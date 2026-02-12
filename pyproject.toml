@@ -1,0 +1,26 @@
+[project]
+name = "ray-lance-train-example"
+version = "0.1.0"
+description = "Ray Train example on a Lance dataset from Hugging Face."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "lerobot",
+    "lance-ray>=0.2.0",
+    "numpy>=1.26.0",
+    "ray[default]>=2.30.0",
+    "torch>=2.2.0",
+]
+
+[project.scripts]
+train-lerobot-lance = "examples.ray_train_lerobot_lance:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["examples"]
+
+[tool.hatch.build.targets.sdist]
+include = ["examples", "README.md", "pyproject.toml"]
