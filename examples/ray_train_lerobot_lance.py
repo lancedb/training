@@ -22,7 +22,7 @@ from lerobot.policies.factory import make_pre_post_processors
 from ray import train
 from ray.train import Checkpoint, CheckpointConfig, RunConfig, ScalingConfig
 from ray.train.torch import TorchTrainer
-from torch.utils.data import DataLoader, default_collate
+from torch.utils.data import DataLoader
 
 ACTION_DELTAS = [
     -0.1,
@@ -102,21 +102,61 @@ def _save_checkpoint_contents(
     )
 
 
-def _iter_batches_from_index_shard(
+def _iter_batches_from_shard(
     shard: ray.data.DataIterator,
-    dataset: LeRobotDataset,
     batch_size: int,
-    index_column: str,
     local_shuffle_buffer_size: int,
 ) -> Iterable[dict[str, Any]]:
-    for index_batch in shard.iter_batches(
+    for batch in shard.iter_torch_batches(
         batch_size=batch_size,
-        batch_format="numpy",
         local_shuffle_buffer_size=local_shuffle_buffer_size,
     ):
-        indices = [int(i) for i in index_batch[index_column].tolist()]
-        samples = [dataset[i] for i in indices]
-        yield default_collate(samples)
+        yield batch
+
+
+def _get_action_window_size(action: Any, expected_action_dim: int) -> int:
+    if not isinstance(action, torch.Tensor):
+        return len(ACTION_DELTAS)
+    if action.ndim >= 3:
+        return int(action.shape[1])
+    if action.ndim == 2:
+        return 1 if int(action.shape[1]) == expected_action_dim else int(action.shape[1])
+    return 1
+
+
+def _derive_action_is_pad(
+    batch: dict[str, Any],
+    episode_bounds: dict[int, tuple[int, int]],
+    action_delta_indices: list[int],
+) -> torch.Tensor:
+    indices = batch["index"]
+    episode_indices = batch["episode_index"]
+    if not isinstance(indices, torch.Tensor):
+        indices = torch.as_tensor(indices)
+    if not isinstance(episode_indices, torch.Tensor):
+        episode_indices = torch.as_tensor(episode_indices)
+
+    action_is_pad = torch.zeros(
+        (int(indices.shape[0]), len(action_delta_indices)),
+        dtype=torch.bool,
+        device=indices.device,
+    )
+
+    for row in range(int(indices.shape[0])):
+        ep_idx = int(episode_indices[row].item())
+        bounds = episode_bounds.get(ep_idx)
+        if bounds is None:
+            raise RuntimeError(
+                f"Could not derive action padding mask: episode_index={ep_idx} "
+                "not found in dataset metadata."
+            )
+        ep_start, ep_end = bounds
+        abs_idx = int(indices[row].item())
+        for col, delta in enumerate(action_delta_indices):
+            target_idx = abs_idx + delta
+            action_is_pad[row, col] = (target_idx < ep_start) or (target_idx >= ep_end)
+
+    return action_is_pad
 
 
 def train_loop_per_worker(config: dict[str, Any]) -> None:
@@ -128,7 +168,6 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
     checkpoint_freq = config["checkpoint_freq"]
     output_directory = Path(config["output_directory"])
     input_mode = config["input_mode"]
-    index_column = config["index_column"]
     video_backend = config["video_backend"]
 
     dataset_repo_id = config["dataset_repo_id"]
@@ -157,27 +196,39 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         cfg, dataset_stats=dataset_metadata.stats
     )
 
-    delta_timestamps = _build_delta_timestamps(input_features, output_features)
-    if not delta_timestamps:
-        raise RuntimeError(
-            "No delta_timestamps could be inferred from dataset features. "
-            "Provide a dataset with observation/action features compatible with DiffusionPolicy."
-        )
-    dataset = LeRobotDataset(
-        dataset_repo_id,
-        delta_timestamps=delta_timestamps,
-        video_backend=video_backend,
-    )
-
     dataloader: DataLoader | None = None
+    dataset: LeRobotDataset | None = None
     dataset_shard: ray.data.DataIterator | None = None
+    episode_bounds: dict[int, tuple[int, int]] | None = None
+    required_shard_keys: set[str] | None = None
+    warned_action_pad_fallback = False
+    shard_keys_validated = False
     if input_mode == "ray-data":
         dataset_shard = train.get_dataset_shard("train")
         if dataset_shard is None:
             raise RuntimeError(
                 "input_mode='ray-data' requires a Ray dataset shard named 'train'."
             )
+        episode_bounds = {
+            int(ep_idx): (
+                int(dataset_metadata.episodes[ep_idx]["dataset_from_index"]),
+                int(dataset_metadata.episodes[ep_idx]["dataset_to_index"]),
+            )
+            for ep_idx in range(len(dataset_metadata.episodes))
+        }
+        required_shard_keys = set(input_features) | set(output_features)
     else:
+        delta_timestamps = _build_delta_timestamps(input_features, output_features)
+        if not delta_timestamps:
+            raise RuntimeError(
+                "No delta_timestamps could be inferred from dataset features. "
+                "Provide a dataset with observation/action features compatible with DiffusionPolicy."
+            )
+        dataset = LeRobotDataset(
+            dataset_repo_id,
+            delta_timestamps=delta_timestamps,
+            video_backend=video_backend,
+        )
         dataloader = DataLoader(
             dataset,
             num_workers=config["num_dataloader_workers"],
@@ -205,11 +256,9 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
     epoch = 0
     while not done:
         if dataset_shard is not None:
-            batches = _iter_batches_from_index_shard(
+            batches = _iter_batches_from_shard(
                 shard=dataset_shard,
-                dataset=dataset,
                 batch_size=config["batch_size"],
-                index_column=index_column,
                 local_shuffle_buffer_size=config["local_shuffle_buffer_size"],
             )
         else:
@@ -220,6 +269,60 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             batches = dataloader
 
         for batch in batches:
+            if required_shard_keys is not None and not shard_keys_validated:
+                missing_keys = required_shard_keys.difference(batch.keys())
+                if missing_keys:
+                    raise RuntimeError(
+                        "Ray shard batch is missing required keys for training: "
+                        f"{sorted(missing_keys)}. Ensure `--lance-uri` points to a dataset "
+                        "with model-ready columns (not index-only rows)."
+                    )
+                shard_keys_validated = True
+
+            if "action_is_pad" not in batch:
+                action = batch.get("action")
+                action_dim = cfg.action_feature.shape[0] if cfg.action_feature else 1
+                action_window_size = _get_action_window_size(action, action_dim)
+                if action_window_size == len(cfg.action_delta_indices):
+                    action_delta_indices = cfg.action_delta_indices
+                elif action_window_size == 1:
+                    action_delta_indices = [0]
+                else:
+                    start = 1 - cfg.n_obs_steps
+                    action_delta_indices = list(
+                        range(start, start + action_window_size)
+                    )
+
+                if (
+                    episode_bounds is not None
+                    and "index" in batch
+                    and "episode_index" in batch
+                ):
+                    batch["action_is_pad"] = _derive_action_is_pad(
+                        batch=batch,
+                        episode_bounds=episode_bounds,
+                        action_delta_indices=action_delta_indices,
+                    )
+                else:
+                    batch_size = (
+                        int(action.shape[0])
+                        if isinstance(action, torch.Tensor) and action.ndim > 0
+                        else config["batch_size"]
+                    )
+                    mask_device = (
+                        action.device if isinstance(action, torch.Tensor) else "cpu"
+                    )
+                    batch["action_is_pad"] = torch.zeros(
+                        (batch_size, action_window_size),
+                        dtype=torch.bool,
+                        device=mask_device,
+                    )
+                    if not warned_action_pad_fallback:
+                        print(
+                            "Warning: deriving `action_is_pad` with an all-false fallback "
+                            "because shard rows do not include both `index` and `episode_index`."
+                        )
+                        warned_action_pad_fallback = True
             print(f"Processing step {step}...")
             batch = preprocessor(batch)
             loss, _ = policy(batch)
@@ -293,7 +396,7 @@ def parse_args() -> argparse.Namespace:
         help="ray-data uses Lance+ray.data index sharding; torch-dataloader mirrors the original example.",
     )
     parser.add_argument("--index-column", type=str, default="index")
-    parser.add_argument("--training-steps", type=int, default=50)
+    parser.add_argument("--training-steps", type=int, default=500)
     parser.add_argument("--log-freq", type=int, default=1)
     parser.add_argument("--checkpoint-freq", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -316,7 +419,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--run-name", type=str, default="ray-train-lerobot-diffusion")
     parser.add_argument("--storage-path", type=str, default="file:///tmp/ray-results")
-    parser.add_argument("--checkpoints-to-keep", type=int, default=2)
+    parser.add_argument("--checkpoints-to-keep", type=int, default=100)
     parser.add_argument("--resume-from-checkpoint", type=str, default=None)
     parser.add_argument("--num-workers", type=int, default=1)
     parser.add_argument("--use-gpu", action="store_true", default=False)
@@ -331,7 +434,7 @@ def main() -> None:
 
     datasets: dict[str, ray.data.Dataset] = {}
     if args.input_mode == "ray-data":
-        train_index_ds = read_lance(args.lance_uri, columns=[args.index_column])
+        train_index_ds = read_lance(args.lance_uri)
         if args.limit_rows > 0:
             train_index_ds = train_index_ds.limit(args.limit_rows)
         datasets["train"] = train_index_ds
