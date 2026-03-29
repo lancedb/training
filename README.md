@@ -1,13 +1,13 @@
 # lancedb-training
 
-A collection of training and benchmarking examples built on [LanceDB](https://lancedb.com) multimodal data lakehouse. The goal is to demonstrate how LanceDB performs as the data layer across different model types, training regimes, and storage backends.
+A collection of training and benchmarking examples built on [LanceDB](https://lancedb.com) multimodal data lakehouse. The goal is to demonstrate how LanceDB performs as the data layer across different model types, and training regimes
 
 ## What this covers
 
 | Model type | Example | Status |
 |---|---|---|
+| ViT (Vision Transformer) | - | planned |
 | VLA (Vision-Language-Action) | Ray + LeRobot Diffusion Policy | ✅ |
-| ViT (Vision Transformer) | MFU benchmark vs S3 / Parquet | ✅ |
 | VLM | — | planned |
 | LLM | — | planned |
 | Video Generation | — | planned |
