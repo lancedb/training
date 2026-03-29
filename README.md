@@ -1,6 +1,6 @@
 # lancedb-training
 
-A collection of training and benchmarking examples built on [LanceDB](https://lancedb.com) multimodal data lakehouse. The goal is to demonstrate how LanceDB performs as the data layer across different model types, and training regimes
+A collection of training and benchmarking examples built on [LanceDB](https://lancedb.com) multimodal data lakehouse. The goal is to demonstrate how LanceDB performs as the data layer across different model types, and training regimes along with benchmarks and best practices for training with LanceDB. 
 
 ## What this covers
 
