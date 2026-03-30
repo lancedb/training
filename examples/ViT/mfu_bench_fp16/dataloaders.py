@@ -24,10 +24,6 @@ def _decode_jpegs(bytes_list, image_size):
     return out
 
 
-# ---------------------------------------------------------------------------
-# LanceDB — map-style Dataset, one Permutation per worker (lazy init)
-# ---------------------------------------------------------------------------
-
 class LanceArrowDataset(torch.utils.data.Dataset):
     def __init__(self, uri, table_name, **connect_kwargs):
         self.uri = uri
@@ -92,10 +88,6 @@ def make_lance_loader(uri, table_name, batch_size, image_size, num_workers, pref
     )
 
 
-# ---------------------------------------------------------------------------
-# Boto3 S3 — one GET request per JPEG
-# ---------------------------------------------------------------------------
-
 class Boto3S3Dataset(torch.utils.data.Dataset):
     def __init__(self, bucket, keys, access_key, secret_key, region):
         self.bucket = bucket
@@ -151,13 +143,9 @@ def make_boto_loader(bucket, keys, batch_size, access_key, secret_key, region, n
     )
 
 
-# ---------------------------------------------------------------------------
-# Parquet on S3 — PyArrow scanner, batch random access
-# ---------------------------------------------------------------------------
-
 class ParquetS3Dataset(torch.utils.data.Dataset):
     def __init__(self, bucket, key, total_rows, access_key, secret_key, region):
-        # PyArrow ds.dataset with s3fs expects "bucket/key" (no s3:// prefix)
+        # PyArrow ds.dataset expects "bucket/key" (no s3:// prefix)
         self.s3_uri = f"{bucket}/{key}"
         self.total_rows = total_rows
         self.access_key = access_key

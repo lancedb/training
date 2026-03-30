@@ -8,10 +8,10 @@ import pyarrow.parquet as pq
 import boto3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-os.environ["AWS_ACCESS_KEY_ID"] = "YOUR_AWS_ACCESS_KEY_ID                                                                                                                                           "
-os.environ["AWS_SECRET_ACCESS_KEY"] = "YOUR_AWS_SECRET_ACCESS_KEY                                                                                                                   "
+os.environ["AWS_ACCESS_KEY_ID"] = "YOUR_AWS_ACCESS_KEY_ID"
+os.environ["AWS_SECRET_ACCESS_KEY"] = "YOUR_AWS_SECRET_ACCESS_KEY"
 os.environ["AWS_REGION"] = "us-east-2"
-LANCEDB_API_KEY = "YOUR_LANCE_API_KEY                                                                                                                                           "
+LANCEDB_API_KEY = "YOUR_LANCE_API_KEY"
 
 NUM_IMAGES = 10000
 NUM_CLASSES = 10
@@ -21,7 +21,7 @@ BASE_DIR = "./benchmark_data"
 IMAGE_DIR = os.path.join(BASE_DIR, "pytorch_image_folder", TBL_NAME)
 PARQUET_FILE_PATH = os.path.join(BASE_DIR, f"{TBL_NAME}.parquet")
 
-S3_BUCKET_NAME = "lancedb-datasets-dev-us-east-2-devrel"
+S3_BUCKET_NAME = "YOUR_S3_BUCKET"
 S3_BASE_PREFIX = f"training/mfu_test_{IMAGE_SHAPE[0]}"
 S3_PARQUET_KEY = f"training/mfu_test_parquet/{TBL_NAME}.parquet"
 
@@ -34,7 +34,7 @@ def generate_datasets():
     db = lancedb.connect(
         uri="db://training",
         api_key=LANCEDB_API_KEY,
-        host_override="https://ayush:YOUR_PASSWORD  @devrelaws@3-129-160-110.sslip.io",
+        host_override="YOUR_LANCE_ENT_HOST",
         region=os.getenv("LANCEDB_REGION", "us-east-1"),
     )
 
@@ -42,7 +42,6 @@ def generate_datasets():
         db.drop_table(TBL_NAME)
 
     print(f"\nPhase 1: Generating {NUM_IMAGES} images...")
-    print(" -> Saving locally, pushing to LanceDB, and writing to Parquet...")
 
     lance_data = []
 
@@ -57,7 +56,6 @@ def generate_datasets():
         label = i % NUM_CLASSES
         img = Image.fromarray(img_arr)
 
-        # Save locally for the S3 raw JPEG upload
         img_path = os.path.join(IMAGE_DIR, str(label), f"img_{i}.jpg")
         img.save(img_path, format="JPEG")
 
@@ -70,13 +68,11 @@ def generate_datasets():
 
         # Batch insert every 2500 images
         if len(lance_data) >= 2500:
-            # A. Push to LanceDB
             if TBL_NAME not in db.table_names():
                 db.create_table(TBL_NAME, data=lance_data, schema=schema)
             else:
                 db.open_table(TBL_NAME).add(lance_data)
 
-            # B. Write row group to Parquet
             batch_table = pa.Table.from_pylist(lance_data, schema=schema)
             pq_writer.write_table(batch_table)
 
@@ -90,12 +86,10 @@ def sync_to_s3():
     print("\nPhase 2: Syncing data to S3...")
     s3_client = boto3.client('s3', region_name=os.getenv("AWS_REGION", "us-east-2"))
 
-    # 1. Upload the monolithic Parquet file
     print(f" -> Uploading {PARQUET_FILE_PATH} to S3...")
     s3_client.upload_file(PARQUET_FILE_PATH, S3_BUCKET_NAME, S3_PARQUET_KEY)
     print(" -> Parquet upload complete!")
 
-    # 2. Gather all local JPEG paths
     print(" -> Gathering raw JPEGs for upload...")
     files_to_upload = []
     for root, _, files in os.walk(IMAGE_DIR):
