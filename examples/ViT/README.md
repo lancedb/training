@@ -6,13 +6,11 @@ The benchmark uses synthetic JPEG images at a fixed resolution to isolate data p
 
 ## Scripts
 
-| Script | Backend |
+| Script | Purpose |
 |---|---|
-| `mfu_bench_fp16/lance.py` | LanceDB (S3 OSS + Enterprise) |
-| `mfu_bench_fp16/boto.py` | Raw S3 (loose JPEGs via Boto3) |
-| `mfu_bench_fp16/parquet.py` | Parquet file on S3 via PyArrow |
-
-`create_data.py` generates the dataset and stages it in all three backends before benchmarking.
+| `mfu_bench_fp16/bench.py` | Training loop + all three storage backends |
+| `mfu_bench_fp16/dataloaders.py` | LanceDB, Boto3, and Parquet DataLoader implementations |
+| `create_data.py` | Generates the dataset and stages it in all three backends |
 
 ## Setup
 
@@ -22,10 +20,8 @@ Requires a CUDA GPU. Configure your AWS credentials and LanceDB connection detai
 # Generate and stage data
 uv run python examples/ViT/create_data.py
 
-# Run benchmarks
-uv run python examples/ViT/mfu_bench_fp16/lance.py
-uv run python examples/ViT/mfu_bench_fp16/boto.py
-uv run python examples/ViT/mfu_bench_fp16/parquet.py
+# Run benchmark (all three backends in one script)
+uv run python examples/ViT/mfu_bench_fp16/bench.py
 ```
 
 ## Configuration
