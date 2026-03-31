@@ -4,7 +4,6 @@ from functools import partial
 import boto3
 import botocore
 import lancedb
-import pyarrow as pa
 import pyarrow.dataset as ds
 import pyarrow.fs as fs
 import torch
@@ -62,13 +61,9 @@ class LanceArrowDataset(torch.utils.data.Dataset):
 
 
 def _lance_collate(batch, image_size):
-    # __getitems__ with with_format("arrow") returns a pa.RecordBatch
-    if isinstance(batch, pa.RecordBatch):
-        bytes_list = batch["image_bytes"].to_pylist()
-        labels = torch.from_numpy(batch["label"].to_numpy(zero_copy_only=False).copy()).long()
-    else:
-        bytes_list = [row["image_bytes"] for row in batch]
-        labels = torch.tensor([row["label"] for row in batch], dtype=torch.long)
+    # with_format("arrow") makes __getitems__ return a pa.RecordBatch directly
+    bytes_list = batch["image_bytes"].to_pylist()
+    labels = torch.from_numpy(batch["label"].to_numpy(zero_copy_only=False).copy()).long()
     return _decode_jpegs(bytes_list, image_size), labels
 
 
