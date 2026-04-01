@@ -239,10 +239,12 @@ def _ensure_hdf5(hf_repo: str) -> str:
         if matches:
             return matches[0]
 
-    # Find the data file in the repo (expect one .tar.zst or .h5)
+    # Find the data file in the repo (expect one .tar.zst, .h5.zst, or bare .h5/.hdf5)
     repo_files = list(list_repo_files(hf_repo, repo_type="dataset"))
     data_file = next(
-        (f for f in repo_files if f.endswith(".tar.zst") or f.endswith(".h5") or f.endswith(".hdf5")),
+        (f for f in repo_files
+         if f.endswith(".tar.zst") or f.endswith(".h5.zst")
+         or f.endswith(".h5") or f.endswith(".hdf5")),
         None,
     )
     assert data_file, f"No .h5 or .tar.zst file found in HF repo {hf_repo}. Files: {repo_files}"
@@ -261,6 +263,12 @@ def _ensure_hdf5(hf_repo: str) -> str:
             ["tar", "--use-compress-program=unzstd", "-xf", local_file, "-C", cache_dir],
             check=True,
         )
+        os.remove(local_file)
+    elif local_file.endswith(".h5.zst"):
+        # Bare zstd-compressed HDF5 (no tar wrapper) — decompress with zstd
+        out_path = local_file[:-4]  # strip .zst → .h5
+        print(f"  Decompressing {os.path.basename(local_file)} → {os.path.basename(out_path)}...")
+        subprocess.run(["zstd", "-d", local_file, "-o", out_path], check=True)
         os.remove(local_file)
 
     matches = glob.glob(os.path.join(cache_dir, "*.h5")) + glob.glob(os.path.join(cache_dir, "*.hdf5"))

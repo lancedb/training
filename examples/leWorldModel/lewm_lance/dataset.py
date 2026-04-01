@@ -1,22 +1,30 @@
 """
 LanceDB-backed PyTorch Dataset for leWorldModel temporal sequences.
 
-leWorldModel trains on windows of T consecutive frames from the same episode:
-  T = history_size (3) + num_preds (1) = 4  by default
+leWorldModel trains on windows of T frames with a configurable frameskip (default 5,
+matching the original le-wm paper):
+  T    = history_size (3) + num_preds (1) = 4 frames
+  span = T × frameskip = 20 raw rows per window
+
+Frameskip mirrors the original HDF5Dataset behaviour:
+  - Pixels:  sampled at stride frameskip → (T, C, H, W)
+  - Actions: ALL span rows kept, reshaped to (T, frameskip × action_dim)
+             This matches le-wm's effective_act_dim = frameskip × action_dim.
+  - Other columns (proprio, state, observation): sampled at stride frameskip → (T, D)
 
 Each dataset item is a dict of tensors:
-  "pixels"  : (T, C, H, W)  float32  ImageNet-normalized
-  "action"  : (T, A)         float32  z-score normalized, NaN→0
-  "proprio" : (T, P)         float32  z-score normalized      [if present]
+  "pixels"  : (T, C, H, W)           float32  ImageNet-normalized
+  "action"  : (T, frameskip×A)        float32  z-score normalized, NaN→0
+  "proprio" : (T, P)                  float32  [if present]
   ...
 
 Design:
-  - One LanceDB row  = one timestep.
+  - One LanceDB row = one raw timestep.
   - Window index is precomputed at __init__ so __getitems__ only does I/O.
   - Permutation object (Rust state) is zeroed before pickling; each worker
     lazily reopens its own connection inside _ensure_open().
-  - __getitems__ batches the full (B*T) row fetch in a single Permutation call,
-    then splits into per-sample dicts — same pattern as ViT dataloaders.py.
+  - __getitems__ batches the full (B × span) row fetch in a single Permutation
+    call, then splits into per-sample dicts.
 """
 
 import io
@@ -54,30 +62,20 @@ def compute_normalizers(
     **connect_kwargs,
 ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     """
-    Compute per-column (mean, std) arrays for z-score normalization.
-
-    Reads only the requested non-pixel columns using LanceDB's column projection
-    so no pixel data is loaded.  For large datasets this streams in batches via
-    the Arrow scanner rather than materializing the full table at once.
-
-    Returns:
-      {col: (mean_array, std_array)}  — each array has shape (D,).
+    Compute per-column (mean, std) for z-score normalization.
+    Only reads non-pixel columns; no pixel data loaded.
     """
-    db = lancedb.connect(uri, **connect_kwargs)
+    db  = lancedb.connect(uri, **connect_kwargs)
     tbl = db.open_table(table_name)
     non_pixel = [c for c in columns if c != "pixels"]
     if not non_pixel:
         return {}
-
-    # Use column-projected Arrow read — loads only the requested columns.
-    # episode_idx + step_idx columns are tiny; the vector columns are float32
-    # lists already in Arrow format, so this is as efficient as possible.
     arrow = tbl.to_arrow(columns=non_pixel)
     normalizers = {}
     for col in non_pixel:
-        data = np.stack([row.as_py() for row in arrow[col]], axis=0).astype(np.float32)
+        data  = np.stack([row.as_py() for row in arrow[col]], axis=0).astype(np.float32)
         valid = ~np.isnan(data).any(axis=1)
-        data = data[valid]
+        data  = data[valid]
         normalizers[col] = (data.mean(axis=0), data.std(axis=0))
     return normalizers
 
@@ -89,11 +87,15 @@ class LeWMLanceDataset(torch.utils.data.Dataset):
     Args:
         uri:          LanceDB URI (local path or s3://…).
         table_name:   Name of the table created by create_data.py.
-        columns:      List of column names to return, e.g. ["pixels","action","proprio"].
+        columns:      List of column names to return.
         num_steps:    Window length T (= history_size + num_preds).
-        img_size:     Target image size after resize (square).
-        normalizers:  Output of compute_normalizers(); used to z-score non-pixel columns.
-        **connect_kwargs: Passed to lancedb.connect() (api_key, host_override, region, …).
+        frameskip:    Stride between sampled frames. Matches le-wm default of 5.
+                      With frameskip=5 and T=4, each window spans 20 raw rows.
+                      action is kept at full resolution and reshaped to
+                      (T, frameskip × action_dim); all other columns are strided.
+        img_size:     Target image size after resize.
+        normalizers:  {col: (mean, std)} from compute_normalizers().
+        **connect_kwargs: Passed to lancedb.connect().
     """
 
     def __init__(
@@ -102,66 +104,54 @@ class LeWMLanceDataset(torch.utils.data.Dataset):
         table_name: str,
         columns: list[str],
         num_steps: int = 4,
+        frameskip: int = 5,
         img_size: int = 224,
         normalizers: dict | None = None,
         **connect_kwargs,
     ):
-        self.uri = uri
-        self.table_name = table_name
-        self.columns = columns
-        self.num_steps = num_steps
-        self.img_size = img_size
+        self.uri         = uri
+        self.table_name  = table_name
+        self.columns     = columns
+        self.num_steps   = num_steps
+        self.frameskip   = frameskip
+        self.img_size    = img_size
         self.normalizers = normalizers or {}
         self.connect_kwargs = connect_kwargs
+        self._span = num_steps * frameskip   # raw rows per window
 
-        # Rust Permutation — zeroed before pickling, rebuilt per-worker
-        self._perm: Permutation | None = None
+        self._perm:      Permutation | None      = None
         self._transform: transforms.Compose | None = None
 
-        # ------------------------------------------------------------------
-        # Eagerly load the episode/step index to precompute valid windows.
-        # These are only two int32 columns — ~8 bytes/row regardless of
-        # dataset size, so loading them fully is fine.
-        # ------------------------------------------------------------------
-        db = lancedb.connect(uri, **connect_kwargs)
+        # Load only the two index columns to precompute valid windows.
+        db  = lancedb.connect(uri, **connect_kwargs)
         tbl = db.open_table(table_name)
-        idx_arrow = tbl.to_arrow(columns=["episode_idx", "step_idx"])
-        self._ep   = idx_arrow["episode_idx"].to_numpy().astype(np.int32)
-        self._step = idx_arrow["step_idx"].to_numpy().astype(np.int32)
+        idx = tbl.to_arrow(columns=["episode_idx", "step_idx"])
+        self._ep   = idx["episode_idx"].to_numpy().astype(np.int32)
+        self._step = idx["step_idx"].to_numpy().astype(np.int32)
         self._n_rows = len(self._ep)
 
-        # Precompute valid window start rows.
-        # A window starting at row i is valid iff rows i..i+T-1 are all in
-        # the same episode and have consecutive step indices.
-        T = num_steps
-        N = self._n_rows - T + 1
+        # A window starting at row i is valid iff all span rows are in the same
+        # episode with consecutive step indices.
+        span = self._span
+        N    = self._n_rows - span + 1
         valid = np.ones(N, dtype=bool)
-        for offset in range(1, T):
-            same_ep = self._ep[offset : N + offset] == self._ep[:N]
-            consec  = self._step[offset : N + offset] == self._step[:N] + offset
-            valid &= same_ep & consec
-
-        # _window_starts[i] = absolute row index for the i-th valid window
+        for offset in range(1, span):
+            valid &= (self._ep[offset : N + offset]   == self._ep[:N])
+            valid &= (self._step[offset : N + offset] == self._step[:N] + offset)
         self._window_starts = np.where(valid)[0].astype(np.int64)
-
-    # ---------------------------------------------------------------------- #
-    # PyTorch Dataset protocol
-    # ---------------------------------------------------------------------- #
 
     def __len__(self) -> int:
         return len(self._window_starts)
 
     def __getstate__(self) -> dict:
-        """Zero out Rust state before the object is pickled for a worker process."""
         state = self.__dict__.copy()
-        state["_perm"] = None
+        state["_perm"]      = None
         state["_transform"] = None
         return state
 
     def _ensure_open(self):
-        """Lazily open DB connection + Permutation once per worker process."""
         if self._perm is None:
-            db = lancedb.connect(self.uri, **self.connect_kwargs)
+            db  = lancedb.connect(self.uri, **self.connect_kwargs)
             tbl = db.open_table(self.table_name)
             fetch_cols = ["pixels"] + [c for c in self.columns if c != "pixels"]
             self._perm = (
@@ -171,61 +161,71 @@ class LeWMLanceDataset(torch.utils.data.Dataset):
             )
             self._transform = _build_img_transform(self.img_size)
 
-    # ---------------------------------------------------------------------- #
-    # Internal: convert a RecordBatch of T rows into a sample dict
-    # ---------------------------------------------------------------------- #
-
     def _rows_to_sample(self, batch: pa.RecordBatch) -> dict[str, torch.Tensor]:
-        T = self.num_steps
-        assert len(batch) == T
+        """
+        Convert a RecordBatch of `span` raw rows into one training sample.
 
-        # Decode JPEG pixels → (T, C, H, W)
+        Pixels and non-action columns: take every frameskip-th row → T frames.
+        Action: keep all span rows, reshape to (T, frameskip × action_dim).
+        """
+        T         = self.num_steps
+        frameskip = self.frameskip
+        assert len(batch) == self._span
+
+        # Pixels: stride by frameskip → T frames
         jpeg_list = batch["pixels"].to_pylist()
-        frames = torch.stack([_jpeg_to_tensor(b, self._transform) for b in jpeg_list])
+        frames = torch.stack(
+            [_jpeg_to_tensor(jpeg_list[t * frameskip], self._transform) for t in range(T)]
+        )
         sample: dict[str, torch.Tensor] = {"pixels": frames}
 
         for col in self.columns:
             if col == "pixels":
                 continue
-            data = np.array([batch[col][t].as_py() for t in range(T)], dtype=np.float32)
-            if col in self.normalizers:
-                mean, std = self.normalizers[col]
-                data = (data - mean) / (std + 1e-8)
-            data = np.nan_to_num(data, nan=0.0)
+
+            if col == "action":
+                # All span steps → (span, action_dim) → (T, frameskip × action_dim)
+                data = np.array(
+                    [batch[col][i].as_py() for i in range(self._span)],
+                    dtype=np.float32,
+                )
+                data = np.nan_to_num(data, nan=0.0)
+                data = data.reshape(T, -1)   # (T, frameskip × action_dim)
+            else:
+                # Stride by frameskip → T steps
+                data = np.array(
+                    [batch[col][t * frameskip].as_py() for t in range(T)],
+                    dtype=np.float32,
+                )
+                if col in self.normalizers:
+                    mean, std = self.normalizers[col]
+                    data = (data - mean) / (std + 1e-8)
+                data = np.nan_to_num(data, nan=0.0)
+
             sample[col] = torch.from_numpy(data)
 
         return sample
 
-    # ---------------------------------------------------------------------- #
-    # Single-item access (used when num_workers=0)
-    # ---------------------------------------------------------------------- #
-
     def __getitem__(self, window_idx: int) -> dict[str, torch.Tensor]:
         self._ensure_open()
         start = int(self._window_starts[window_idx])
-        rows = list(range(start, start + self.num_steps))
+        rows  = list(range(start, start + self._span))
         batch = self._perm.__getitems__(rows)
         return self._rows_to_sample(batch)
 
-    # ---------------------------------------------------------------------- #
-    # Batch access — called by DataLoader with num_workers > 0.
-    # Fetches all B*T rows in ONE Permutation call instead of B calls.
-    # ---------------------------------------------------------------------- #
-
     def __getitems__(self, window_indices: list[int]) -> list[dict[str, torch.Tensor]]:
+        """Fetch all B × span rows in one Permutation call."""
         self._ensure_open()
-        T = self.num_steps
-        starts = self._window_starts[window_indices]          # (B,)
+        span   = self._span
+        starts = self._window_starts[window_indices]
 
-        # Build flat list: [w0_t0, w0_t1, …, w1_t0, w1_t1, …]
         all_rows: list[int] = []
         for s in starts:
-            all_rows.extend(range(int(s), int(s) + T))
+            all_rows.extend(range(int(s), int(s) + span))
 
-        big_batch: pa.RecordBatch = self._perm.__getitems__(all_rows)  # (B*T, cols)
+        big_batch: pa.RecordBatch = self._perm.__getitems__(all_rows)
 
-        samples = []
-        for b in range(len(window_indices)):
-            row_slice = big_batch.slice(b * T, T)
-            samples.append(self._rows_to_sample(row_slice))
-        return samples
+        return [
+            self._rows_to_sample(big_batch.slice(b * span, span))
+            for b in range(len(window_indices))
+        ]

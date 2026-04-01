@@ -140,10 +140,47 @@ python train.py --config config/lewm_pusht.yaml \
 python train.py --config config/lewm_pusht.yaml --lance-uri s3://my-bucket/lewm
 ```
 
-### Step 5 — Post-training analysis
+### Step 5 — Post-training analysis with LeWM embeddings
 
-After training, add LeWM encoder embeddings to the table for world-model-specific analysis.
-These reflect what the trained model considers semantically similar — different from DINOv2.
+#### What we're doing and why
+
+After training, we run the trained LeWM encoder over every frame in the dataset
+and store the resulting CLS-token vectors as a new `emb_lewm` column in the LanceDB
+table. This lets us query the table using the world model's own learned similarity —
+not pixel similarity (DINOv2/CLIP) but *dynamics similarity*: two frames are close
+in `emb_lewm` space if the world model predicts them as leading to similar futures.
+
+#### What this reveals
+
+The le-wm paper shows that the encoder's latent space encodes meaningful physical
+structure: it separates behaviorally distinct states and can be probed for quantities
+like object position, velocity, and task progress. Adding `emb_lewm` to LanceDB
+lets us do this interactively:
+
+- **Nearest-neighbor retrieval**: given a query frame, find the K training frames
+  the model considers most similar — sanity-checks whether the world model's
+  similarity makes physical sense.
+- **DINOv2 vs LeWM comparison**: the same two frames may be far apart in DINOv2
+  space (different appearance) but close in LeWM space (same task phase), or vice
+  versa. Comparing the two embedding columns directly shows what the model has
+  learned to *ignore* (irrelevant visual details) and what it *attends to*
+  (task-relevant structure).
+- **Clustering / UMAP**: exporting `emb_lewm` → UMAP reveals whether the latent
+  space organises into interpretable clusters (e.g. "reaching", "grasping",
+  "releasing" in a manipulation task).
+- **Failure diagnosis**: episodes where val loss is high can be retrieved by
+  their `emb_lewm` vectors and inspected — often revealing a sub-behaviour the
+  model hasn't learned well.
+
+#### Did the paper authors do this?
+
+The le-wm paper validates the latent space through *probing* — training small linear
+heads on top of frozen encoder embeddings to predict physical quantities (object
+position, velocity). This is the standard JEPA evaluation protocol. Those probing
+scripts are not in the public repo, but the technique is identical to what we do
+here: freeze the trained encoder, run it over the dataset, store the vectors, then
+analyse them. Storing them in LanceDB rather than a separate file means the analysis
+is a single ANN query away.
 
 ```bash
 python create_data.py \

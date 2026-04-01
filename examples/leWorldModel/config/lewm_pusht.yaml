@@ -1,42 +1,57 @@
 # leWorldModel training config — PushT dataset
-# Mirrors le-wm/config/train/lewm.yaml + data/pusht.yaml
+# Mirrors le-wm/config/train/lewm.yaml + config/data/pusht.yaml
+# LanceDB-specific keys added under 'data:' (not present in original le-wm).
+# All other sections are a strict superset of the original le-wm config.
 
-model:
-  encoder_name: "vit_tiny_patch14_224"
-  image_size: 224
-  embed_dim: 192
+seed: 42
+img_size: 224
+
+trainer:
+  max_epochs: 100
+  precision: "bf16-mixed"      # PyTorch Lightning format (le-wm uses "bf16" via Hydra)
+  gradient_clip_val: 1.0
+  log_every_n_steps: 50
+  save_every_n_epochs: 10
+  checkpoint_dir: "./checkpoints"
+
+loader:
+  batch_size: 128
+  num_workers: 6
+  prefetch_factor: 3
+
+optimizer:
+  lr: 5.0e-5
+  weight_decay: 1.0e-3
+  warmup_epochs: 10            # added: controls LinearWarmup → Cosine schedule
+
+wm:
   history_size: 3
   num_preds: 1
-  predictor_depth: 6
-  predictor_heads: 16
-  predictor_mlp_dim: 2048
-  proj_hidden: 2048
-  # action_dim is inferred automatically from the first training batch
+  embed_dim: 192
+  encoder_name: "vit_tiny_patch14_224"   # added: timm model identifier
+  proj_hidden: 2048                       # added: projector MLP hidden dim
 
+predictor:
+  depth: 6
+  heads: 16
+  mlp_dim: 2048
+  dim_head: 64
+  dropout: 0.1
+  emb_dropout: 0.0
+
+loss:
+  sigreg:
+    weight: 0.09
+    kwargs:
+      knots: 17
+      num_proj: 1024
+
+# ── LanceDB-specific additions (not present in original le-wm) ────────────────
 data:
   lance_uri: "./lewm_lance"           # override with s3://bucket/prefix for cloud
   table_name: "lewm_pusht"
   columns: ["pixels", "action", "proprio", "state"]
-  num_workers: 6
-  prefetch_factor: 3
-  val_fraction: 0.1
-  seed: 42
-
-training:
-  batch_size: 128
-  max_epochs: 100
-  lr: 5.0e-5
-  weight_decay: 1.0e-3
-  warmup_epochs: 10
-  gradient_clip: 1.0
-  save_every_n_epochs: 10
-  checkpoint_dir: "./checkpoints"
-  precision: "bf16-mixed"             # bf16-mixed | 16-mixed | 32
-  log_every_n_steps: 50
-
-loss:
-  sigreg_weight: 0.09
-  sigreg_knots: 17
-  sigreg_num_proj: 1024
+  frameskip: 5                         # matches le-wm paper default
+  val_fraction: 0.1                    # episode-level hold-out fraction
 
 wandb_project: "lewm-lancedb"

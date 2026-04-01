@@ -36,6 +36,7 @@ def make_lewm_lance_loader(
     columns: list[str],
     batch_size: int,
     num_steps: int = 4,
+    frameskip: int = 5,
     img_size: int = 224,
     num_workers: int = 6,
     prefetch_factor: int = 3,
@@ -45,24 +46,15 @@ def make_lewm_lance_loader(
     """
     Build a DataLoader over a LanceDB leWorldModel table.
 
-    Args:
-        uri:            LanceDB URI.
-        table_name:     Table name (as created by create_data.py).
-        columns:        Columns to load, e.g. ["pixels", "action", "proprio"].
-        batch_size:     Training batch size B.
-        num_steps:      Window length T = history_size + num_preds.
-        img_size:       Resize target (square) applied before ImageNet normalization.
-        num_workers:    DataLoader worker processes.
-        prefetch_factor: Batches queued per worker.
-        normalizers:    {col: (mean, std)} from compute_normalizers(); if None,
-                        no normalization is applied to non-pixel columns.
-        **connect_kwargs: Forwarded to lancedb.connect() (api_key, host_override, …).
+    frameskip=5 matches the le-wm paper default. With T=4 and frameskip=5,
+    each window spans 20 raw rows; action is reshaped to (T, 5×action_dim).
     """
     dataset = LeWMLanceDataset(
         uri=uri,
         table_name=table_name,
         columns=columns,
         num_steps=num_steps,
+        frameskip=frameskip,
         img_size=img_size,
         normalizers=normalizers,
         **connect_kwargs,
@@ -76,6 +68,7 @@ def make_train_val_loaders(
     columns: list[str],
     batch_size: int,
     num_steps: int = 4,
+    frameskip: int = 5,
     img_size: int = 224,
     num_workers: int = 6,
     prefetch_factor: int = 3,
@@ -111,8 +104,8 @@ def make_train_val_loaders(
     normalizers = compute_normalizers(uri, table_name, columns, **connect_kwargs)
 
     # Build full datasets then restrict _window_starts by episode membership
-    train_ds = LeWMLanceDataset(uri, table_name, columns, num_steps, img_size, normalizers, **connect_kwargs)
-    val_ds   = LeWMLanceDataset(uri, table_name, columns, num_steps, img_size, normalizers, **connect_kwargs)
+    train_ds = LeWMLanceDataset(uri, table_name, columns, num_steps, frameskip, img_size, normalizers, **connect_kwargs)
+    val_ds   = LeWMLanceDataset(uri, table_name, columns, num_steps, frameskip, img_size, normalizers, **connect_kwargs)
 
     train_ep_mask = np.isin(train_ds._ep[train_ds._window_starts], list(train_episodes))
     val_ep_mask   = np.isin(val_ds._ep[val_ds._window_starts],   list(val_episodes))
