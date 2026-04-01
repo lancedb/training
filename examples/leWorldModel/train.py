@@ -252,8 +252,7 @@ def build_model(cfg: dict, effective_act_dim: int) -> tuple[JEPA, SIGReg]:
 # S3 storage options
 # ---------------------------------------------------------------------------
 
-def build_storage_options(args: argparse.Namespace) -> dict:
-    uri = args.lance_uri
+def build_storage_options(args: argparse.Namespace, uri: str) -> dict:
     if not (uri.startswith("s3://") or uri.startswith("gs://") or uri.startswith("az://")):
         return {}
     opts: dict[str, str] = {}
@@ -322,7 +321,7 @@ def main():
     if table_name is None:
         parser.error("table_name required: set data.table_name in config or pass --table-name")
 
-    storage_options = build_storage_options(args)
+    storage_options = build_storage_options(args, lance_uri)
     connect_kwargs  = {"storage_options": storage_options} if storage_options else {}
 
     # ------------------------------------------------------------------ #
