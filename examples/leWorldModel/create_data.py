@@ -48,8 +48,8 @@ import hdf5plugin  # noqa: F401 — registers HDF5 decompression filters (Blosc,
 import lancedb
 import numpy as np
 import pyarrow as pa
+from huggingface_hub import snapshot_download
 from PIL import Image
-from stable_worldmodel.data.utils import get_cache_dir, load_dataset
 from tqdm import tqdm
 
 
@@ -210,6 +210,59 @@ def _make_batch(
 
 
 # ---------------------------------------------------------------------------
+# HuggingFace dataset resolution
+# ---------------------------------------------------------------------------
+
+_CACHE_DIR = os.path.expanduser(os.environ.get("STABLEWM_HOME", "~/.stable_worldmodel"))
+
+
+def _ensure_hdf5(hf_repo: str) -> str:
+    """
+    Return the local path to the .h5 file for *hf_repo*.
+
+    Downloads the repo snapshot from HuggingFace Hub on first call and caches
+    it under $STABLEWM_HOME (default: ~/.stable_worldmodel/).
+    The repo is expected to contain exactly one .h5 / .hdf5 file.
+    """
+    import glob
+    cache_dir = os.path.join(_CACHE_DIR, "datasets", hf_repo.replace("/", "--"))
+    # Return cached file if already present
+    for ext in ("*.h5", "*.hdf5"):
+        matches = glob.glob(os.path.join(cache_dir, ext))
+        if matches:
+            return matches[0]
+
+    print(f"  Downloading {hf_repo} from HuggingFace Hub...")
+    snapshot_download(
+        repo_id=hf_repo,
+        repo_type="dataset",
+        local_dir=cache_dir,
+        ignore_patterns=["*.tar.zst"],   # skip raw archives if .h5 is published directly
+    )
+
+    # After download, check for .h5 first; fall back to extracting .tar.zst
+    for ext in ("*.h5", "*.hdf5"):
+        matches = glob.glob(os.path.join(cache_dir, ext))
+        if matches:
+            return matches[0]
+
+    # Extract any .tar.zst archive present
+    import subprocess
+    archives = glob.glob(os.path.join(cache_dir, "*.tar.zst"))
+    assert archives, f"No .h5 or .tar.zst found in {cache_dir} after downloading {hf_repo}"
+    for archive in archives:
+        subprocess.run(
+            ["tar", "--use-compress-program=unzstd", "-xf", archive, "-C", cache_dir],
+            check=True,
+        )
+        os.remove(archive)
+
+    matches = glob.glob(os.path.join(cache_dir, "*.h5")) + glob.glob(os.path.join(cache_dir, "*.hdf5"))
+    assert matches, f"No .h5 file found in {cache_dir} after extracting archives"
+    return matches[0]
+
+
+# ---------------------------------------------------------------------------
 # Core conversion
 # ---------------------------------------------------------------------------
 
@@ -225,15 +278,10 @@ def convert_dataset(
     columns    = cfg["columns"]
     connect_kwargs = connect_kwargs or {}
 
-    # load_dataset() resolves HuggingFace repo ids: downloads the .tar.zst archive,
-    # extracts it, caches the .h5 file under $STABLEWM_HOME, and returns an
-    # HDF5Dataset with the resolved .h5_path.  Nothing to do manually.
     print(f"\n{'=' * 60}")
-    print(f"Dataset : {dataset_name}  (swm_name={swm_name!r})")
-    print(f"  Resolving HDF5 path via stable_worldmodel...")
-    ds = load_dataset(swm_name)
-    hdf5_path = ds.h5_path
+    print(f"Dataset : {dataset_name}  (hf_repo={swm_name!r})")
 
+    hdf5_path = _ensure_hdf5(swm_name)
     print(f"HDF5    : {hdf5_path}")
     print(f"Lance   : {lance_uri}  (table={table_name})")
     print(f"{'=' * 60}")

@@ -2,6 +2,7 @@
 
 # Core
 lancedb>=0.20.0
+huggingface_hub>=0.23.0
 pyarrow>=16.0.0
 torch>=2.2.0
 torchvision>=0.17.0
