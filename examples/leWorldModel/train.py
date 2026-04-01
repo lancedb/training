@@ -273,8 +273,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lance-uri",  default=None)
     parser.add_argument("--table-name", default=None)
     parser.add_argument("--columns",    nargs="+", default=None)
-    parser.add_argument("--run-name",   default=None)
-    parser.add_argument("--no-wandb",   action="store_true")
+    parser.add_argument("--run-name",      default=None)
+    parser.add_argument("--no-wandb",      action="store_true")
+    parser.add_argument("--fast-dev-run",  action="store_true",
+                        help="Run 1 train+val batch then exit (smoke test)")
+    parser.add_argument("--precision",     default=None,
+                        help="Override trainer.precision (e.g. 32, 16-mixed, bf16-mixed)")
     s3 = parser.add_argument_group("S3 storage options")
     s3.add_argument("--aws-access-key-id",     default=None, metavar="KEY")
     s3.add_argument("--aws-secret-access-key", default=None, metavar="SECRET")
@@ -381,14 +385,16 @@ def main():
     # ------------------------------------------------------------------ #
     # Trainer
     # ------------------------------------------------------------------ #
+    precision = args.precision or trainer_cfg["precision"]
     trainer = pl.Trainer(
         max_epochs=trainer_cfg["max_epochs"],
-        precision=trainer_cfg["precision"],
+        precision=precision,
         gradient_clip_val=trainer_cfg["gradient_clip_val"],
         logger=logger,
         callbacks=callbacks,
         log_every_n_steps=trainer_cfg["log_every_n_steps"],
         num_sanity_val_steps=1,
+        fast_dev_run=args.fast_dev_run,
         enable_progress_bar=True,
     )
 
