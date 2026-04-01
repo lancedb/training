@@ -58,28 +58,27 @@ from tqdm import tqdm
 # ---------------------------------------------------------------------------
 
 DATASETS = {
-    # swm_name is passed to stable_worldmodel.data.load_dataset().
-    # For reacher/pusht/tworoom these are local dataset names (collected via
-    # the stable-worldmodel data-collection scripts and stored in STABLEWM_HOME).
-    # For cube, "ogbench/cube_single_expert" is a HuggingFace repo id — load_dataset()
-    # downloads and caches it automatically on first run.
+    # swm_name is a HuggingFace repo id (owner/repo).
+    # stable_worldmodel.data.load_dataset() downloads and caches the archive
+    # automatically on first run — no manual download needed.
+    # HF collection: https://huggingface.co/collections/quentinll/lewm
     "reacher": {
-        "swm_name": "reacher",
+        "swm_name": "quentinll/lewm-reacher",
         "table_name": "lewm_reacher",
         "columns": ["pixels", "action", "observation"],
     },
     "cube": {
-        "swm_name": "ogbench/cube_single_expert",
+        "swm_name": "quentinll/lewm-cube",
         "table_name": "lewm_cube",
         "columns": ["pixels", "action", "observation"],
     },
     "pusht": {
-        "swm_name": "pusht_expert_train",
+        "swm_name": "quentinll/lewm-pusht",
         "table_name": "lewm_pusht",
         "columns": ["pixels", "action", "proprio", "state"],
     },
     "tworoom": {
-        "swm_name": "tworoom",
+        "swm_name": "quentinll/lewm-tworooms",
         "table_name": "lewm_tworoom",
         "columns": ["pixels", "action", "proprio"],
     },
@@ -226,10 +225,9 @@ def convert_dataset(
     columns    = cfg["columns"]
     connect_kwargs = connect_kwargs or {}
 
-    # Resolve the HDF5 path via stable_worldmodel.
-    # load_dataset() handles both local names (looked up in $STABLEWM_HOME) and
-    # HuggingFace repo ids (e.g. "ogbench/cube_single_expert") — it downloads and
-    # caches the archive automatically for the latter.
+    # load_dataset() resolves HuggingFace repo ids: downloads the .tar.zst archive,
+    # extracts it, caches the .h5 file under $STABLEWM_HOME, and returns an
+    # HDF5Dataset with the resolved .h5_path.  Nothing to do manually.
     print(f"\n{'=' * 60}")
     print(f"Dataset : {dataset_name}  (swm_name={swm_name!r})")
     print(f"  Resolving HDF5 path via stable_worldmodel...")

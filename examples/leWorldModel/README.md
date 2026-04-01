@@ -55,30 +55,12 @@ For the DataLoader, `num_workers=6` works well with a local LanceDB store. With 
 
 ## Reproducing the paper
 
-### Step 1 — Collect / download datasets
+### Step 1 — No dataset setup needed
 
-Three datasets are collected locally using the stable-worldmodel expert scripts.
-The cube dataset (`ogbench/cube_single_expert`) is downloaded automatically from
-HuggingFace during conversion — no manual step needed for that one.
-
-```bash
-# Clone stable-worldmodel for the data collection scripts
-git clone https://github.com/galilai-group/stable-worldmodel /tmp/stable-worldmodel
-cd /tmp/stable-worldmodel && pip install -e .
-
-# Collect PushT expert demonstrations (~1000 episodes)
-python scripts/data/collect_weak_pusht.py
-
-# Collect DMControl Reacher
-python scripts/data/collect_dmc.py
-
-# Collect TwoRoom
-python scripts/data/collect_tworooms.py
-
-# cube is auto-downloaded from HuggingFace in the next step
-```
-
-HDF5 files are saved to `$STABLEWM_HOME` (default: `~/.stable_worldmodel/`).
+All four datasets are published on HuggingFace at
+https://huggingface.co/collections/quentinll/lewm.
+`create_data.py` downloads and caches each one automatically on first run
+via `stable_worldmodel.data.load_dataset()` — just run Step 2.
 
 ### Step 2 — Convert datasets to LanceDB
 
