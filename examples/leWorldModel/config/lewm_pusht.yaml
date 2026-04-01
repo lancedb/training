@@ -28,7 +28,7 @@ wm:
   history_size: 3
   num_preds: 1
   embed_dim: 192
-  encoder_name: "vit_tiny_patch14_224"   # added: timm model identifier
+  patch_size: 14                          # ViT patch size — with img_size=224 gives 16×16=256 patches + CLS
   proj_hidden: 2048                       # added: projector MLP hidden dim
 
 predictor:

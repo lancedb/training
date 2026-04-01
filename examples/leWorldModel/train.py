@@ -40,9 +40,9 @@ if not os.path.isdir(_LEWM_DIR):
     )
 sys.path.insert(0, _LEWM_DIR)
 
-import timm
 import torch
 import torch.nn as nn
+from transformers import ViTConfig, ViTModel
 import yaml
 import pytorch_lightning as pl
 from pathlib import Path
@@ -55,34 +55,14 @@ from module import ARPredictor, Embedder, MLP, SIGReg
 
 
 # ---------------------------------------------------------------------------
-# Encoder wrapper
+# Encoder
 #
-# JEPA.encode() calls:
-#   output = self.encoder(pixels, interpolate_pos_encoding=True)
-#   pixels_emb = output.last_hidden_state[:, 0]   ← CLS token
-#
-# timm ViTs return (B, D) when num_classes=0, not a structured object.
-# We wrap forward_features() — which returns (B, N, D) with CLS at [:, 0] —
-# to satisfy the HuggingFace-style interface JEPA expects.
+# le-wm uses spt.backbone.utils.vit_hf() from stable_pretraining, which
+# creates a HuggingFace ViTModel.  JEPA.encode() expects exactly that
+# interface: output.last_hidden_state[:, 0] → CLS token.
+# We build the same model directly with transformers.ViTConfig/ViTModel,
+# matching the ViT-tiny spec from the le-wm paper.
 # ---------------------------------------------------------------------------
-
-class _TimmViTOutput:
-    __slots__ = ("last_hidden_state",)
-    def __init__(self, last_hidden_state):
-        self.last_hidden_state = last_hidden_state
-
-
-class TimmViT(nn.Module):
-    def __init__(self, model_name: str, img_size: int):
-        super().__init__()
-        self._model = timm.create_model(
-            model_name, pretrained=False, img_size=img_size, num_classes=0
-        )
-        self.embed_dim = self._model.embed_dim
-
-    def forward(self, x, interpolate_pos_encoding=False):
-        # forward_features → (B, N, D) where N[0] is the CLS token
-        return _TimmViTOutput(self._model.forward_features(x))
 
 
 # ---------------------------------------------------------------------------
@@ -204,8 +184,20 @@ def build_model(cfg: dict, effective_act_dim: int) -> tuple[JEPA, SIGReg]:
     wm   = cfg["wm"]
     pred = cfg["predictor"]
 
-    encoder    = TimmViT(wm["encoder_name"], cfg["img_size"])
-    hidden_dim = encoder.embed_dim   # ViT-tiny: 192
+    # Build ViT-tiny with HuggingFace transformers — same as le-wm's vit_hf("tiny", ...)
+    vit_cfg = ViTConfig(
+        hidden_size=wm["embed_dim"],
+        num_hidden_layers=12,
+        num_attention_heads=3,
+        intermediate_size=wm["embed_dim"] * 4,
+        image_size=cfg["img_size"],
+        patch_size=wm["patch_size"],
+        num_channels=3,
+        hidden_dropout_prob=0.0,
+        attention_probs_dropout_prob=0.0,
+    )
+    encoder    = ViTModel(vit_cfg, add_pooling_layer=False)
+    hidden_dim = wm["embed_dim"]   # ViT-tiny: 192
 
     # ARPredictor: input_dim and hidden_dim can differ.
     # Here we keep them equal (both embed_dim), matching le-wm defaults.
