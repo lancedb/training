@@ -26,7 +26,19 @@ import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(__file__))
+_HERE = os.path.dirname(__file__)
+sys.path.insert(0, _HERE)
+
+# jepa.py and module.py live at the root of the le-wm repo (not a Python package).
+# Clone it next to this file:  git clone https://github.com/lucas-maes/le-wm
+_LEWM_DIR = os.path.join(_HERE, "le-wm")
+if not os.path.isdir(_LEWM_DIR):
+    raise RuntimeError(
+        f"le-wm repo not found at {_LEWM_DIR}.\n"
+        "Run:  git clone https://github.com/lucas-maes/le-wm  "
+        f"{_LEWM_DIR}"
+    )
+sys.path.insert(0, _LEWM_DIR)
 
 import timm
 import torch
