@@ -89,7 +89,7 @@ def make_train_val_loaders(
     tbl = db.open_table(table_name)
 
     # Only reads one int32 column — negligible memory even at millions of rows
-    ep_arr = tbl.to_arrow(columns=["episode_idx"])["episode_idx"].to_numpy()
+    ep_arr = tbl.to_lance().to_table(columns=["episode_idx"])["episode_idx"].to_numpy()
     all_episodes = np.unique(ep_arr)
 
     rng = np.random.default_rng(seed)

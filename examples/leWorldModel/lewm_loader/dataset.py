@@ -63,17 +63,18 @@ def compute_normalizers(
 ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     """
     Compute per-column (mean, std) for z-score normalization.
-    Only reads non-pixel columns; no pixel data loaded.
+    Only reads non-pixel columns one at a time; pixel/blob data is never loaded.
     """
     db  = lancedb.connect(uri, **connect_kwargs)
     tbl = db.open_table(table_name)
     non_pixel = [c for c in columns if c != "pixels"]
     if not non_pixel:
         return {}
-    arrow = tbl.to_arrow(columns=non_pixel)
+    ds = tbl.to_lance()
     normalizers = {}
     for col in non_pixel:
-        data  = np.stack([row.as_py() for row in arrow[col]], axis=0).astype(np.float32)
+        col_table = ds.to_table(columns=[col])
+        data  = np.array(col_table[col].to_pylist(), dtype=np.float32)
         valid = ~np.isnan(data).any(axis=1)
         data  = data[valid]
         normalizers[col] = (data.mean(axis=0), data.std(axis=0))
@@ -122,10 +123,11 @@ class LeWMLanceDataset(torch.utils.data.Dataset):
         self._perm:      Permutation | None      = None
         self._transform: transforms.Compose | None = None
 
-        # Load only the two index columns to precompute valid windows.
+        # Load only the two int32 index columns to precompute valid windows.
+        # Pixels and all other data columns are never touched here.
         db  = lancedb.connect(uri, **connect_kwargs)
         tbl = db.open_table(table_name)
-        idx = tbl.to_arrow(columns=["episode_idx", "step_idx"])
+        idx = tbl.to_lance().to_table(columns=["episode_idx", "step_idx"])
         self._ep   = idx["episode_idx"].to_numpy().astype(np.int32)
         self._step = idx["step_idx"].to_numpy().astype(np.int32)
         self._n_rows = len(self._ep)

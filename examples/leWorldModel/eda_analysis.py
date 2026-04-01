@@ -43,16 +43,17 @@ def dataset_statistics(tbl: lancedb.table.Table):
     schema = tbl.schema
     total_rows = len(tbl)
 
-    # Read only the two index columns — negligible memory
-    idx_arrow = tbl.to_arrow(columns=["episode_idx"])
-    n_episodes = len(pc.unique(idx_arrow["episode_idx"]))
+    # Read only the episode index column — negligible memory
+    ds = tbl.to_lance()
+    ep_idx_table = ds.to_table(columns=["episode_idx"])
+    n_episodes = len(pc.unique(ep_idx_table["episode_idx"]))
 
     print(f"\nTotal timesteps : {total_rows:,}")
     print(f"Total episodes  : {n_episodes:,}")
     print(f"Avg steps/ep    : {total_rows / n_episodes:.1f}")
     print(f"\nSchema:\n{schema}\n")
 
-    # Per-column stats for fixed-size list columns (skip pixels and embeddings)
+    # Per-column stats — load one column at a time to bound peak memory
     list_cols = [
         f.name for f in schema
         if (pa.types.is_list(f.type) or pa.types.is_fixed_size_list(f.type))
@@ -62,9 +63,9 @@ def dataset_statistics(tbl: lancedb.table.Table):
     if not list_cols:
         return
 
-    arrow = tbl.to_arrow(columns=list_cols)
     for col in list_cols:
-        data = np.stack([row.as_py() for row in arrow[col]], axis=0).astype(np.float32)
+        col_table = ds.to_table(columns=[col])
+        data = np.array(col_table[col].to_pylist(), dtype=np.float32)
         valid = ~np.isnan(data).any(axis=1)
         data = data[valid]
         print(f"  {col:<14} dim={data.shape[1]:3d} | "
@@ -73,7 +74,7 @@ def dataset_statistics(tbl: lancedb.table.Table):
               f"NaN rows={(~valid).sum()}")
 
     # Episode length distribution
-    ep_arr = idx_arrow["episode_idx"].to_numpy()
+    ep_arr = ep_idx_table["episode_idx"].to_numpy()
     _, counts = np.unique(ep_arr, return_counts=True)
     print(f"\nEpisode length  min={counts.min()} max={counts.max()} "
           f"median={int(np.median(counts))} std={counts.std():.1f}")
@@ -104,7 +105,7 @@ def create_splits(
     print("2. EPISODE-LEVEL SPLITS")
     print("=" * 60)
 
-    ep_arr = tbl.to_arrow(columns=["episode_idx"])["episode_idx"].to_numpy()
+    ep_arr = tbl.to_lance().to_table(columns=["episode_idx"])["episode_idx"].to_numpy()
     all_eps = np.unique(ep_arr)
     rng = np.random.default_rng(seed)
     rng.shuffle(all_eps)
@@ -124,7 +125,7 @@ def create_splits(
         print(f"  {name:<6}: {len(eps):5,} episodes  {ep_mask.sum():8,} timesteps")
 
     print("\n  To use a split in training, filter with:")
-    print("    tbl.to_arrow(columns=[...], filter='episode_idx IN (0,1,...)')")
+    print("    tbl.to_lance().to_table(columns=[...], filter='episode_idx IN (0,1,...)')")
 
     return splits
 
@@ -142,7 +143,7 @@ def temporal_coherence_check(tbl: lancedb.table.Table):
     print("3. TEMPORAL COHERENCE CHECK")
     print("=" * 60)
 
-    idx = tbl.to_arrow(columns=["episode_idx", "step_idx"])
+    idx  = tbl.to_lance().to_table(columns=["episode_idx", "step_idx"])
     ep   = idx["episode_idx"].to_numpy()
     step = idx["step_idx"].to_numpy()
 
@@ -266,9 +267,9 @@ def episode_retrieval_demo(
         print(f"  [SKIP] '{emb_col}' column not found.")
         return
 
-    arrow = tbl.to_arrow(columns=["episode_idx", emb_col])
+    arrow   = tbl.to_lance().to_table(columns=["episode_idx", emb_col])
     ep_arr  = arrow["episode_idx"].to_numpy()
-    emb_arr = np.stack([row.as_py() for row in arrow[emb_col]], axis=0).astype(np.float32)
+    emb_arr = np.array(arrow[emb_col].to_pylist(), dtype=np.float32)
 
     unique_eps = np.unique(ep_arr)
     ep_means = {ep: emb_arr[ep_arr == ep].mean(axis=0) for ep in unique_eps}
@@ -308,9 +309,9 @@ def action_entropy_analysis(tbl: lancedb.table.Table, top_k: int = 5):
         print("  [SKIP] No action column.")
         return
 
-    arrow = tbl.to_arrow(columns=["episode_idx", "action"])
+    arrow   = tbl.to_lance().to_table(columns=["episode_idx", "action"])
     ep_arr  = arrow["episode_idx"].to_numpy()
-    act_arr = np.stack([row.as_py() for row in arrow["action"]], axis=0).astype(np.float32)
+    act_arr = np.array(arrow["action"].to_pylist(), dtype=np.float32)
 
     unique_eps = np.unique(ep_arr)
     entropies = {
@@ -353,16 +354,17 @@ def data_quality_scan(tbl: lancedb.table.Table):
         and f.name not in ("pixels",)
         and not f.name.startswith("emb_")
     ]
+    ds = tbl.to_lance()
     for col in list_cols:
-        arrow = tbl.to_arrow(columns=[col])
-        data = np.stack([row.as_py() for row in arrow[col]], axis=0).astype(np.float32)
+        col_table = ds.to_table(columns=[col])
+        data = np.array(col_table[col].to_pylist(), dtype=np.float32)
         n_nan = int(np.isnan(data).any(axis=1).sum())
         pct   = 100 * n_nan / total
         flag  = "[WARN]" if pct > 5 else "[OK]  "
         print(f"  {flag} {col:<14} NaN rows: {n_nan:,} ({pct:.1f}%)")
 
     # Degenerate episode check
-    ep_arr = tbl.to_arrow(columns=["episode_idx"])["episode_idx"].to_numpy()
+    ep_arr = ds.to_table(columns=["episode_idx"])["episode_idx"].to_numpy()
     _, counts = np.unique(ep_arr, return_counts=True)
     short_eps = int((counts < 4).sum())
     if short_eps == 0:
@@ -429,7 +431,7 @@ def print_lancedb_vs_hdf5():
    window into what the world model has learned to focus on.
 
 4. EPISODE FILTERING WITHOUT ARRAY MANIPULATION
-   tbl.to_arrow(filter="episode_idx IN (...)")  returns only the matching
+   tbl.to_lance().to_table(filter="episode_idx IN (...)")  returns only the matching
    rows, columnar-compressed, as Arrow. With HDF5 you load the full array
    and mask in Python.
 
