@@ -214,20 +214,3 @@ class LeWMLanceDataset(torch.utils.data.Dataset):
         rows  = list(range(start, start + self._span))
         batch = self._perm.__getitems__(rows)
         return self._rows_to_sample(batch)
-
-    def __getitems__(self, window_indices: list[int]) -> list[dict[str, torch.Tensor]]:
-        """Fetch all B × span rows in one Permutation call."""
-        self._ensure_open()
-        span   = self._span
-        starts = self._window_starts[window_indices]
-
-        all_rows: list[int] = []
-        for s in starts:
-            all_rows.extend(range(int(s), int(s) + span))
-
-        big_batch: pa.RecordBatch = self._perm.__getitems__(all_rows)
-
-        return [
-            self._rows_to_sample(big_batch.slice(b * span, span))
-            for b in range(len(window_indices))
-        ]
