@@ -50,7 +50,7 @@ from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.loggers import WandbLogger
 
 from jepa import JEPA
-from lewm_lance import make_train_val_loaders
+from lewm_loader import make_train_val_loaders
 from module import ARPredictor, Embedder, MLP, SIGReg
 
 

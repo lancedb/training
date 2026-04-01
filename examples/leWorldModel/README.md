@@ -9,7 +9,7 @@ examples/leWorldModel/
 ├── eda_analysis.py         # EDA, quality scan, splits, vector search
 ├── config/
 │   └── lewm_pusht.yaml     # Example config (copy and edit per dataset)
-└── lewm_lance/
+└── lewm_loader/
     ├── dataset.py          # LeWMLanceDataset — temporal window sampler
     └── dataloaders.py      # make_train_val_loaders() factory
 ```

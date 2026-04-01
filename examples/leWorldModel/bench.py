@@ -42,7 +42,7 @@ from torchvision import transforms
 
 import sys
 sys.path.insert(0, os.path.dirname(__file__))
-from lewm_lance import make_lewm_lance_loader
+from lewm_loader import make_lewm_lance_loader
 
 
 # ---------------------------------------------------------------------------
