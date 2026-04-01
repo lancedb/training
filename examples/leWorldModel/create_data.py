@@ -42,6 +42,7 @@ import argparse
 import io
 import os
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 
 import h5py
 import hdf5plugin  # noqa: F401 — registers HDF5 decompression filters (Blosc, Zstd, etc.)
@@ -85,7 +86,8 @@ DATASETS = {
 }
 
 JPEG_QUALITY = 95       # 95 → ~13× smaller than raw uint8, negligible quality loss
-BATCH_ROWS = 1000       # rows per RecordBatch yielded to LanceDB
+BATCH_ROWS   = 4096     # rows read from HDF5 and written to LanceDB per chunk
+JPEG_WORKERS = 8        # parallel threads for JPEG encoding within each batch
 
 
 # ---------------------------------------------------------------------------
@@ -151,38 +153,38 @@ def _record_batch_reader(
     """
     Return a pa.RecordBatchReader that streams the HDF5 file in BATCH_ROWS chunks.
 
-    Using a RecordBatchReader rather than repeated table.add() calls lets
-    LanceDB write all data in a single pass through the file without accumulating
-    large in-memory lists, and avoids creating many small Lance fragments.
+    Reads BATCH_ROWS rows at a time from HDF5 (one slice per column, not one
+    row at a time) and encodes the pixel batch in parallel with a thread pool.
+    This is the dominant speedup over the naive row-by-row approach.
     """
     total = len(episode_arr)
     non_pixel_cols = [c for c in columns if c != "pixels"]
 
+    def _encode_frame(frame: np.ndarray) -> bytes:
+        return _to_jpeg_bytes(frame)
+
     def _generate() -> Iterator[pa.RecordBatch]:
-        # Buffers — reset every BATCH_ROWS rows
-        ep_buf:   list[int]   = []
-        st_buf:   list[int]   = []
-        px_buf:   list[bytes] = []
-        ph_buf:   list[int]   = []
-        pw_buf:   list[int]   = []
-        col_bufs: dict[str, list[list[float]]] = {c: [] for c in non_pixel_cols}
+        with ThreadPoolExecutor(max_workers=JPEG_WORKERS) as pool:
+            for start in tqdm(range(0, total, BATCH_ROWS), desc="  Converting", unit="batch"):
+                end = min(start + BATCH_ROWS, total)
+                sl  = slice(start, end)
 
-        for idx in tqdm(range(total), desc="  Converting", unit="step"):
-            ep_buf.append(int(episode_arr[idx]))
-            st_buf.append(int(step_arr[idx]))
-            px_buf.append(_to_jpeg_bytes(np.array(f["pixels"][idx])))
-            ph_buf.append(h)
-            pw_buf.append(w)
-            for col in non_pixel_cols:
-                col_bufs[col].append(np.array(f[col][idx], dtype=np.float32).flatten().tolist())
+                # One HDF5 slice read per column — orders of magnitude fewer I/O ops
+                pixels_raw = f["pixels"][sl]                          # (B, H, W, C)
+                col_data   = {c: np.array(f[c][sl], dtype=np.float32) for c in non_pixel_cols}
 
-            if len(ep_buf) == BATCH_ROWS:
-                yield _make_batch(ep_buf, st_buf, px_buf, ph_buf, pw_buf, col_bufs, schema)
-                ep_buf, st_buf, px_buf, ph_buf, pw_buf = [], [], [], [], []
-                col_bufs = {c: [] for c in non_pixel_cols}
+                # Encode all frames in the batch concurrently
+                px_buf = list(pool.map(_encode_frame, pixels_raw))
 
-        if ep_buf:
-            yield _make_batch(ep_buf, st_buf, px_buf, ph_buf, pw_buf, col_bufs, schema)
+                yield _make_batch(
+                    episode_arr[sl].tolist(),
+                    step_arr[sl].tolist(),
+                    px_buf,
+                    [h] * len(px_buf),
+                    [w] * len(px_buf),
+                    {c: col_data[c].reshape(len(px_buf), -1).tolist() for c in non_pixel_cols},
+                    schema,
+                )
 
     return pa.RecordBatchReader.from_batches(schema, _generate())
 
