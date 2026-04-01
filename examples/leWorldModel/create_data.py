@@ -48,7 +48,7 @@ import hdf5plugin  # noqa: F401 — registers HDF5 decompression filters (Blosc,
 import lancedb
 import numpy as np
 import pyarrow as pa
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, list_repo_files
 from PIL import Image
 from tqdm import tqdm
 
@@ -220,45 +220,49 @@ def _ensure_hdf5(hf_repo: str) -> str:
     """
     Return the local path to the .h5 file for *hf_repo*.
 
-    Downloads the repo snapshot from HuggingFace Hub on first call and caches
-    it under $STABLEWM_HOME (default: ~/.stable_worldmodel/).
-    The repo is expected to contain exactly one .h5 / .hdf5 file.
+    On first call: finds the .tar.zst (or .h5) file in the HF repo, downloads
+    just that file, extracts it if needed, and caches the result under
+    $STABLEWM_HOME/datasets/<owner>--<repo>/.
+    Subsequent calls return the cached path immediately.
     """
     import glob
+    import subprocess
+
     cache_dir = os.path.join(_CACHE_DIR, "datasets", hf_repo.replace("/", "--"))
-    # Return cached file if already present
-    for ext in ("*.h5", "*.hdf5"):
-        matches = glob.glob(os.path.join(cache_dir, ext))
+    os.makedirs(cache_dir, exist_ok=True)
+
+    # Return cached .h5 if already extracted
+    for pattern in ("*.h5", "*.hdf5"):
+        matches = glob.glob(os.path.join(cache_dir, pattern))
         if matches:
             return matches[0]
 
-    print(f"  Downloading {hf_repo} from HuggingFace Hub...")
-    snapshot_download(
+    # Find the data file in the repo (expect one .tar.zst or .h5)
+    repo_files = list(list_repo_files(hf_repo, repo_type="dataset"))
+    data_file = next(
+        (f for f in repo_files if f.endswith(".tar.zst") or f.endswith(".h5") or f.endswith(".hdf5")),
+        None,
+    )
+    assert data_file, f"No .h5 or .tar.zst file found in HF repo {hf_repo}. Files: {repo_files}"
+
+    print(f"  Downloading {hf_repo}/{data_file}...")
+    local_file = hf_hub_download(
         repo_id=hf_repo,
+        filename=data_file,
         repo_type="dataset",
         local_dir=cache_dir,
-        ignore_patterns=["*.tar.zst"],   # skip raw archives if .h5 is published directly
     )
 
-    # After download, check for .h5 first; fall back to extracting .tar.zst
-    for ext in ("*.h5", "*.hdf5"):
-        matches = glob.glob(os.path.join(cache_dir, ext))
-        if matches:
-            return matches[0]
-
-    # Extract any .tar.zst archive present
-    import subprocess
-    archives = glob.glob(os.path.join(cache_dir, "*.tar.zst"))
-    assert archives, f"No .h5 or .tar.zst found in {cache_dir} after downloading {hf_repo}"
-    for archive in archives:
+    if local_file.endswith(".tar.zst"):
+        print(f"  Extracting {os.path.basename(local_file)}...")
         subprocess.run(
-            ["tar", "--use-compress-program=unzstd", "-xf", archive, "-C", cache_dir],
+            ["tar", "--use-compress-program=unzstd", "-xf", local_file, "-C", cache_dir],
             check=True,
         )
-        os.remove(archive)
+        os.remove(local_file)
 
     matches = glob.glob(os.path.join(cache_dir, "*.h5")) + glob.glob(os.path.join(cache_dir, "*.hdf5"))
-    assert matches, f"No .h5 file found in {cache_dir} after extracting archives"
+    assert matches, f"No .h5 file found in {cache_dir} after extracting {data_file}"
     return matches[0]
 
 
