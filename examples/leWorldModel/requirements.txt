@@ -1,0 +1,28 @@
+# leWorldModel × LanceDB requirements
+
+# Core
+lancedb>=0.20.0
+pyarrow>=16.0.0
+torch>=2.2.0
+torchvision>=0.17.0
+
+# Training
+pytorch-lightning>=2.2.0
+timm>=1.0.0
+pyyaml>=6.0
+stable-worldmodel
+
+# Data
+h5py>=3.10.0
+hdf5plugin>=4.3.0
+Pillow>=10.0.0
+numpy>=1.26.0
+tqdm>=4.66.0
+s3fs>=2024.2.0
+
+# Embedding models
+# openai-clip   — for --embedding-model clip
+# geneva        — LanceDB Enterprise, for embedding backfill
+
+# Logging
+wandb>=0.17.0

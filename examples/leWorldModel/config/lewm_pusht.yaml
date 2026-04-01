@@ -1,0 +1,42 @@
+# leWorldModel training config — PushT dataset
+# Mirrors le-wm/config/train/lewm.yaml + data/pusht.yaml
+
+model:
+  encoder_name: "vit_tiny_patch14_224"
+  image_size: 224
+  embed_dim: 192
+  history_size: 3
+  num_preds: 1
+  predictor_depth: 6
+  predictor_heads: 16
+  predictor_mlp_dim: 2048
+  proj_hidden: 2048
+  # action_dim is inferred automatically from the first training batch
+
+data:
+  lance_uri: "./lewm_lance"           # override with s3://bucket/prefix for cloud
+  table_name: "lewm_pusht"
+  columns: ["pixels", "action", "proprio", "state"]
+  num_workers: 6
+  prefetch_factor: 3
+  val_fraction: 0.1
+  seed: 42
+
+training:
+  batch_size: 128
+  max_epochs: 100
+  lr: 5.0e-5
+  weight_decay: 1.0e-3
+  warmup_epochs: 10
+  gradient_clip: 1.0
+  save_every_n_epochs: 10
+  checkpoint_dir: "./checkpoints"
+  precision: "bf16-mixed"             # bf16-mixed | 16-mixed | 32
+  log_every_n_steps: 50
+
+loss:
+  sigreg_weight: 0.09
+  sigreg_knots: 17
+  sigreg_num_proj: 1024
+
+wandb_project: "lewm-lancedb"
