@@ -55,13 +55,38 @@ For the DataLoader, `num_workers=6` works well with a local LanceDB store. With 
 
 ## Reproducing the paper
 
-### Step 1 — Convert datasets
+### Step 1 — Collect / download datasets
 
-Download the datasets via `stable-worldmodel` and convert each to a LanceDB table.
-All four datasets can share a single LanceDB store (each gets its own table).
+Three datasets are collected locally using the stable-worldmodel expert scripts.
+The cube dataset (`ogbench/cube_single_expert`) is downloaded automatically from
+HuggingFace during conversion — no manual step needed for that one.
 
 ```bash
+# Clone stable-worldmodel for the data collection scripts
+git clone https://github.com/galilai-group/stable-worldmodel /tmp/stable-worldmodel
+cd /tmp/stable-worldmodel && pip install -e .
+
+# Collect PushT expert demonstrations (~1000 episodes)
+python scripts/data/collect_weak_pusht.py
+
+# Collect DMControl Reacher
+python scripts/data/collect_dmc.py
+
+# Collect TwoRoom
+python scripts/data/collect_tworooms.py
+
+# cube is auto-downloaded from HuggingFace in the next step
+```
+
+HDF5 files are saved to `$STABLEWM_HOME` (default: `~/.stable_worldmodel/`).
+
+### Step 2 — Convert datasets to LanceDB
+
+```bash
+cd /path/to/examples/leWorldModel
+
 # All four datasets into one local store
+# (cube is fetched from HuggingFace automatically if not cached)
 python create_data.py --dataset all --lance-uri ./lewm_lance
 
 # Or one at a time
@@ -76,7 +101,7 @@ python create_data.py --dataset all --lance-uri s3://my-bucket/lewm
 
 This creates four tables: `lewm_reacher`, `lewm_cube`, `lewm_pusht`, `lewm_tworoom`.
 
-### Step 2 — EDA and data quality check
+### Step 3 — EDA and data quality check
 
 Run this **before** training to catch any data issues and understand each dataset.
 Uses DINOv2 embeddings (no training needed — frozen foundation model).
@@ -98,7 +123,7 @@ python eda_analysis.py --table lewm_pusht --section entropy        # find divers
 python eda_analysis.py --table lewm_pusht --section stats
 ```
 
-### Step 3 — Train on each dataset
+### Step 4 — Train on each dataset
 
 Each dataset is trained independently. Create a config per dataset by copying
 `config/lewm_pusht.yaml` and updating `data.table_name` and `data.columns`.
@@ -133,7 +158,7 @@ python train.py --config config/lewm_pusht.yaml \
 python train.py --config config/lewm_pusht.yaml --lance-uri s3://my-bucket/lewm
 ```
 
-### Step 4 — Post-training analysis
+### Step 5 — Post-training analysis
 
 After training, add LeWM encoder embeddings to the table for world-model-specific analysis.
 These reflect what the trained model considers semantically similar — different from DINOv2.

@@ -4,13 +4,27 @@ Convert leWorldModel HDF5 datasets to LanceDB tables.
 Each LanceDB row = one timestep (same granularity as the source HDF5).
 See dataset.md for full format documentation.
 
-Supported datasets:
-  reacher  →  ~/.stable-wm/reacher.hdf5
-  cube     →  ~/.stable-wm/cube_single_expert.hdf5
-  pusht    →  ~/.stable-wm/pusht_expert_train.hdf5
-  tworoom  →  ~/.stable-wm/tworoom.hdf5
+COLLECTING THE DATASETS
+-----------------------
+Three datasets (reacher, pusht, tworoom) must be collected locally using the
+stable-worldmodel expert scripts before converting.  The cube dataset is
+downloaded automatically from HuggingFace (ogbench/cube_single_expert).
 
-Usage:
+  # Collect reacher (~30 min on a single GPU with mujoco)
+  python scripts/data/collect_dmc.py
+
+  # Collect pusht
+  python scripts/data/collect_pusht_fov.py   # or collect_weak_pusht.py
+
+  # Collect tworoom
+  python scripts/data/collect_tworooms.py
+
+  # cube is auto-downloaded from HuggingFace when you run create_data.py
+
+HDF5 files are written to $STABLEWM_HOME (default: ~/.stable_worldmodel/).
+
+CONVERTING TO LANCEDB
+---------------------
   # Convert all datasets to a local LanceDB store
   python create_data.py --dataset all --lance-uri ./lewm_lance
 
@@ -35,6 +49,7 @@ import lancedb
 import numpy as np
 import pyarrow as pa
 from PIL import Image
+from stable_worldmodel.data.utils import get_cache_dir, load_dataset
 from tqdm import tqdm
 
 
@@ -43,23 +58,28 @@ from tqdm import tqdm
 # ---------------------------------------------------------------------------
 
 DATASETS = {
+    # swm_name is passed to stable_worldmodel.data.load_dataset().
+    # For reacher/pusht/tworoom these are local dataset names (collected via
+    # the stable-worldmodel data-collection scripts and stored in STABLEWM_HOME).
+    # For cube, "ogbench/cube_single_expert" is a HuggingFace repo id — load_dataset()
+    # downloads and caches it automatically on first run.
     "reacher": {
-        "hdf5_file": "reacher.hdf5",
+        "swm_name": "reacher",
         "table_name": "lewm_reacher",
         "columns": ["pixels", "action", "observation"],
     },
     "cube": {
-        "hdf5_file": "cube_single_expert.hdf5",
+        "swm_name": "ogbench/cube_single_expert",
         "table_name": "lewm_cube",
         "columns": ["pixels", "action", "observation"],
     },
     "pusht": {
-        "hdf5_file": "pusht_expert_train.hdf5",
+        "swm_name": "pusht_expert_train",
         "table_name": "lewm_pusht",
         "columns": ["pixels", "action", "proprio", "state"],
     },
     "tworoom": {
-        "hdf5_file": "tworoom.hdf5",
+        "swm_name": "tworoom",
         "table_name": "lewm_tworoom",
         "columns": ["pixels", "action", "proprio"],
     },
@@ -196,26 +216,26 @@ def _make_batch(
 
 def convert_dataset(
     dataset_name: str,
-    hdf5_dir: str,
     lance_uri: str,
     overwrite: bool = False,
     connect_kwargs: dict | None = None,
 ):
-    cfg = DATASETS[dataset_name]
-    hdf5_path = os.path.join(hdf5_dir, cfg["hdf5_file"])
+    cfg        = DATASETS[dataset_name]
+    swm_name   = cfg["swm_name"]
     table_name = cfg["table_name"]
     columns    = cfg["columns"]
     connect_kwargs = connect_kwargs or {}
 
-    if not os.path.exists(hdf5_path):
-        raise FileNotFoundError(
-            f"HDF5 not found: {hdf5_path}\n"
-            "Download with: "
-            f"python -c \"import stable_worldmodel as swm; swm.data.download('{dataset_name}')\""
-        )
-
+    # Resolve the HDF5 path via stable_worldmodel.
+    # load_dataset() handles both local names (looked up in $STABLEWM_HOME) and
+    # HuggingFace repo ids (e.g. "ogbench/cube_single_expert") — it downloads and
+    # caches the archive automatically for the latter.
     print(f"\n{'=' * 60}")
-    print(f"Dataset : {dataset_name}")
+    print(f"Dataset : {dataset_name}  (swm_name={swm_name!r})")
+    print(f"  Resolving HDF5 path via stable_worldmodel...")
+    ds = load_dataset(swm_name)
+    hdf5_path = ds.h5_path
+
     print(f"HDF5    : {hdf5_path}")
     print(f"Lance   : {lance_uri}  (table={table_name})")
     print(f"{'=' * 60}")
@@ -467,11 +487,6 @@ def main():
         help="Dataset to convert (default: all)",
     )
     parser.add_argument(
-        "--hdf5-dir",
-        default=os.path.expanduser("~/.stable-wm"),
-        help="Directory containing .hdf5 files (default: ~/.stable-wm)",
-    )
-    parser.add_argument(
         "--lance-uri",
         default="./lewm_lance",
         help="LanceDB URI — local path or s3://bucket/prefix (default: ./lewm_lance)",
@@ -515,7 +530,6 @@ def main():
     for ds_name in datasets_to_run:
         convert_dataset(
             dataset_name=ds_name,
-            hdf5_dir=args.hdf5_dir,
             lance_uri=args.lance_uri,
             overwrite=args.overwrite,
         )
