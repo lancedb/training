@@ -146,19 +146,20 @@ class LeWMLightning(pl.LightningModule):
             lr=self.cfg["lr"],
             weight_decay=self.cfg["weight_decay"],
         )
-        warmup = self.cfg["warmup_epochs"]
-        total  = self.cfg["max_epochs"]
-        # Linear warmup → cosine decay (matches le-wm's LinearWarmupCosineAnnealingLR)
+        # Replicate le-wm's LinearWarmupCosineAnnealingLR exactly:
+        # warmup_steps = 1% of total steps (step-based, not epoch-based)
+        total_steps  = self.trainer.estimated_stepping_batches
+        warmup_steps = max(1, int(0.01 * total_steps))
         warmup_sched = torch.optim.lr_scheduler.LinearLR(
-            opt, start_factor=1e-4, end_factor=1.0, total_iters=warmup
+            opt, start_factor=0.0 + 1e-8, end_factor=1.0, total_iters=warmup_steps
         )
         cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-            opt, T_max=max(total - warmup, 1), eta_min=0
+            opt, T_max=max(total_steps - warmup_steps, 1), eta_min=0
         )
         sched = torch.optim.lr_scheduler.SequentialLR(
-            opt, schedulers=[warmup_sched, cosine_sched], milestones=[warmup]
+            opt, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_steps]
         )
-        return [opt], [{"scheduler": sched, "interval": "epoch"}]
+        return [opt], [{"scheduler": sched, "interval": "step"}]
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +349,6 @@ def main():
     lightning_cfg = {
         "lr":             opt_cfg["lr"],
         "weight_decay":   opt_cfg["weight_decay"],
-        "warmup_epochs":  opt_cfg["warmup_epochs"],
         "max_epochs":     trainer_cfg["max_epochs"],
         "sigreg_weight":  cfg["loss"]["sigreg"]["weight"],
         "history_size":   wm_cfg["history_size"],
