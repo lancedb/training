@@ -5,6 +5,9 @@ Drop-in replacement for le-wm/train.py that swaps the HDF5 data pipeline for
 a LanceDB-backed DataLoader while keeping the model, loss, and Lightning
 training loop identical to the original.
 
+jepa.py and module.py are vendored directly from https://github.com/lucas-maes/le-wm
+(no git clone required).
+
 Usage:
   # Local LanceDB store (defaults come from config)
   python train.py --config config/lewm_pusht.yaml
@@ -28,17 +31,6 @@ import sys
 
 _HERE = os.path.dirname(__file__)
 sys.path.insert(0, _HERE)
-
-# jepa.py and module.py live at the root of the le-wm repo (not a Python package).
-# Clone it next to this file:  git clone https://github.com/lucas-maes/le-wm
-_LEWM_DIR = os.path.join(_HERE, "le-wm")
-if not os.path.isdir(_LEWM_DIR):
-    raise RuntimeError(
-        f"le-wm repo not found at {_LEWM_DIR}.\n"
-        "Run:  git clone https://github.com/lucas-maes/le-wm  "
-        f"{_LEWM_DIR}"
-    )
-sys.path.insert(0, _LEWM_DIR)
 
 import torch
 import torch.nn as nn
@@ -184,27 +176,29 @@ def build_model(cfg: dict, effective_act_dim: int) -> tuple[JEPA, SIGReg]:
     wm   = cfg["wm"]
     pred = cfg["predictor"]
 
-    # Build ViT-tiny with HuggingFace transformers — same as le-wm's vit_hf("tiny", ...)
+    # ViT-tiny — identical to spt.backbone.utils.vit_hf("tiny", patch_size=14, image_size=224,
+    #   pretrained=False, use_mask_token=False) from stable_pretraining.
+    # vit_hf builds ViTModel(ViTConfig(**size_configs["tiny"]), add_pooling_layer=False,
+    #   use_mask_token=False) where size_configs["tiny"] = {hidden_size:192, num_hidden_layers:12,
+    #   num_attention_heads:3, intermediate_size:768}.
     vit_cfg = ViTConfig(
-        hidden_size=wm["embed_dim"],
+        hidden_size=wm["embed_dim"],        # 192
         num_hidden_layers=12,
         num_attention_heads=3,
-        intermediate_size=wm["embed_dim"] * 4,
-        image_size=cfg["img_size"],
-        patch_size=wm["patch_size"],
-        num_channels=3,
+        intermediate_size=wm["embed_dim"] * 4,  # 768
+        image_size=cfg["img_size"],         # 224
+        patch_size=wm["patch_size"],        # 14
         hidden_dropout_prob=0.0,
         attention_probs_dropout_prob=0.0,
     )
-    encoder    = ViTModel(vit_cfg, add_pooling_layer=False)
-    hidden_dim = wm["embed_dim"]   # ViT-tiny: 192
+    encoder    = ViTModel(vit_cfg, add_pooling_layer=False, use_mask_token=False)
+    hidden_dim = wm["embed_dim"]   # ViT-tiny hidden_size: 192
 
-    # ARPredictor: input_dim and hidden_dim can differ.
-    # Here we keep them equal (both embed_dim), matching le-wm defaults.
     predictor = ARPredictor(
         num_frames=wm["history_size"],
         input_dim=wm["embed_dim"],
         hidden_dim=hidden_dim,
+        output_dim=hidden_dim,
         depth=pred["depth"],
         heads=pred["heads"],
         mlp_dim=pred["mlp_dim"],

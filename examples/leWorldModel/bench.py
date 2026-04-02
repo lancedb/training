@@ -51,6 +51,7 @@ from lewm_loader import make_lewm_lance_loader
 
 BATCH_SIZE      = 128
 NUM_STEPS       = 4
+FRAMESKIP       = 5          # must match training config; both backends use the same value
 IMAGE_SIZE      = 224
 NUM_WORKERS     = 8
 PREFETCH_FACTOR = 3
@@ -91,7 +92,7 @@ class HDF5LeWMDataset(torch.utils.data.Dataset):
     h5py is opened lazily per worker because handles are not fork-safe.
     """
 
-    def __init__(self, hdf5_src, columns, num_steps=NUM_STEPS, frameskip=1):
+    def __init__(self, hdf5_src, columns, num_steps=NUM_STEPS, frameskip=FRAMESKIP):
         self._src      = hdf5_src
         self.columns   = columns
         self.num_steps = num_steps
@@ -283,6 +284,7 @@ def main():
         columns=args.columns,
         batch_size=args.batch_size,
         num_steps=NUM_STEPS,
+        frameskip=FRAMESKIP,
         img_size=IMAGE_SIZE,
         num_workers=args.num_workers,
         prefetch_factor=PREFETCH_FACTOR,
