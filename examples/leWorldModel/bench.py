@@ -151,6 +151,16 @@ class HDF5LeWMDataset(torch.utils.data.Dataset):
             sample[col] = torch.from_numpy(np.nan_to_num(data, nan=0.0))
         return sample
 
+    def __getitems__(self, indices: list[int]) -> list[dict]:
+        """Batch pixel reads sorted by file offset to improve sequential access."""
+        self._ensure_open()
+        # Sort by file offset so HDF5 reads are as sequential as possible
+        order = sorted(range(len(indices)), key=lambda i: self._clip_indices[indices[i]])
+        results = [None] * len(indices)
+        for pos in order:
+            results[pos] = self.__getitem__(indices[pos])
+        return results
+
 
 def _collate(samples):
     return {k: torch.stack([s[k] for s in samples], dim=0) for k in samples[0]}

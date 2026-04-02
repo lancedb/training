@@ -187,3 +187,29 @@ the dataset object — it is pickled safely to DataLoader workers.
 
 The LanceDB pipeline is a direct structural equivalent of the HDF5 pipeline
 with a different I/O backend.
+
+
+```
+
+# gpu     sm    mem    enc    dec    jpg    ofa 
+# Idx      %      %      %      %      %      % 
+    0    100    100      0      0      0      0 
+    0     99     91      0      0      0      0 
+    0    100    100      0      0      0      0 
+    0    100    100      0      0      0      0 
+    0     98     91      0      0      0      0 
+    0    100    100      0      0      0      0 
+    0     99     93      0      0      0      0 
+    0     99     91      0      0      0      0 
+    0     98     89      0      0      0      0 
+    0    100    100      0      0      0      0 
+    0    100     94      0      0      0      0 
+    0     98     91      0      0      0      0 
+    0    100    100      0      0      0      0 
+    0    100    100      0      0      0      0 
+    0     98     92      0      0      0      0 
+    0    100    100      0      0      0      0 
+    0    100    100      0      0      0      0 
+    0     98     93      0      0      0      0 
+
+```
