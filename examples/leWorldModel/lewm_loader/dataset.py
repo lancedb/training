@@ -186,19 +186,14 @@ class LeWMLanceDataset(torch.utils.data.Dataset):
                 continue
 
             if col == "action":
-                # All span steps → (span, action_dim) → (T, frameskip × action_dim)
-                data = np.array(
-                    [batch[col][i].as_py() for i in range(self._span)],
-                    dtype=np.float32,
-                )
+                # to_pylist() batches the Arrow → Python conversion in one call
+                # instead of .as_py() in a Python loop
+                data = np.array(batch.column(col).to_pylist(), dtype=np.float32)
                 data = np.nan_to_num(data, nan=0.0)
                 data = data.reshape(T, -1)   # (T, frameskip × action_dim)
             else:
-                # Stride by frameskip → T steps
-                data = np.array(
-                    [batch[col][t * frameskip].as_py() for t in range(T)],
-                    dtype=np.float32,
-                )
+                data = np.array(batch.column(col).to_pylist(), dtype=np.float32)
+                data = data[::frameskip]     # stride without a Python loop
                 if col in self.normalizers:
                     mean, std = self.normalizers[col]
                     data = (data - mean) / (std + 1e-8)
@@ -214,3 +209,37 @@ class LeWMLanceDataset(torch.utils.data.Dataset):
         rows  = list(range(start, start + self._span))
         batch = self._perm.__getitems__(rows)
         return self._rows_to_sample(batch)
+
+    def __getitems__(self, indices: list[int]) -> list[dict[str, torch.Tensor]]:
+        """
+        Fetch an entire DataLoader batch in one round trip.
+
+        Permutation.__getitems__ deduplicates row indices, so we cannot pass
+        all B*span rows directly (overlapping windows would silently drop rows).
+        Instead we:
+          1. Collect the exact row ranges for each window.
+          2. Deduplicate ourselves → sorted unique row list.
+          3. Single Permutation fetch for those unique rows.
+          4. Reconstruct each window by indexing into the fetched result.
+        This reduces S3 round trips from B (one per sample) to 1 per batch.
+        """
+        self._ensure_open()
+
+        # Step 1 — row ranges per window
+        window_rows = [
+            list(range(int(self._window_starts[i]), int(self._window_starts[i]) + self._span))
+            for i in indices
+        ]
+
+        # Step 2 — unique sorted rows + reverse mapping
+        all_rows   = sorted(set(r for rows in window_rows for r in rows))
+        row_to_pos = {r: pos for pos, r in enumerate(all_rows)}
+
+        # Step 3 — single fetch
+        fetched = self._perm.__getitems__(all_rows)
+
+        # Step 4 — reconstruct each window
+        return [
+            self._rows_to_sample(fetched.take([row_to_pos[r] for r in rows]))
+            for rows in window_rows
+        ]

@@ -7,7 +7,7 @@ seed: 42
 img_size: 224
 
 trainer:
-  max_epochs: 100
+  max_epochs: 10
   precision: "bf16-mixed"      # PyTorch Lightning format (le-wm uses "bf16" via Hydra)
   gradient_clip_val: 1.0
   log_every_n_steps: 50
@@ -16,8 +16,8 @@ trainer:
 
 loader:
   batch_size: 128
-  num_workers: 6
-  prefetch_factor: 3
+  num_workers: 12
+  prefetch_factor: 4
 
 optimizer:
   lr: 5.0e-5
