@@ -535,8 +535,8 @@ def _make_embedding_udf(model_name: str, checkpoint: str | None, img_size: int):
                 img = _Image.open(_io.BytesIO(pixels)).convert("RGB")
                 t = _transform(img).unsqueeze(0).cuda()
                 with self.torch.no_grad():
-                    out = self.encoder(t)
-                    return out[0, 0, :].cpu().tolist()   # CLS token
+                    out = self.encoder(t, interpolate_pos_encoding=True)
+                    return out.last_hidden_state[0, 0, :].cpu().tolist()   # CLS token
 
         return LeWMEmbedder
 
