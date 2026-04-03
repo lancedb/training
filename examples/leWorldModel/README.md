@@ -140,7 +140,37 @@ python train.py --config config/lewm_pusht.yaml \
 python train.py --config config/lewm_pusht.yaml --lance-uri s3://my-bucket/lewm
 ```
 
-### Step 5 — Post-training analysis with LeWM embeddings
+### Step 5 — Evaluate planning performance (reproducing paper Table 1 / Figure 6)
+
+The paper's headline metric is **planning success rate** using CEM (Cross-Entropy Method) over the learned latent space — not loss values. To reproduce:
+
+```bash
+# Install the evaluation stack (requires stable-worldmodel with env extras)
+pip install "stable-worldmodel[train,env]"
+
+# Copy the checkpoint to stable-worldmodel's cache directory
+mkdir -p ~/.stable_worldmodel/pusht
+cp checkpoints/lewm_pusht_lewm_epoch_10_object.ckpt ~/.stable_worldmodel/pusht/lewm_object.ckpt
+
+# Run evaluation on PushT (target: ~90% success rate, Figure 6)
+# eval.py and config/eval/ are vendored from https://github.com/lucas-maes/le-wm
+python eval.py --config-name=pusht.yaml policy=pusht/lewm
+```
+
+Expected results from the paper (Figure 6):
+
+| Dataset  | LeWM success rate |
+|----------|-------------------|
+| PushT    | ~90%              |
+| TwoRoom  | ~97%              |
+| OGBench-Cube | ~74%          |
+| Reacher  | ~86%              |
+
+> Note: the paper trains for 10 epochs on PushT and observes that further training does not improve planning performance. Evaluate the epoch-10 checkpoint first.
+
+---
+
+### Step 6 — Post-training analysis with LeWM embeddings
 
 #### What we're doing and why
 

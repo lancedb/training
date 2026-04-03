@@ -390,7 +390,7 @@ def add_embeddings_geneva(
     checkpoint: str | None = None,
     batch_size: int = 32,
     img_size: int = 224,
-    concurrency: int = 1,
+    concurrency: int = 2,
     connect_kwargs: dict | None = None,
 ):
     """
@@ -417,8 +417,8 @@ def add_embeddings_geneva(
 
     col_name = f"emb_{model_name}"
     if col_name in tbl.schema.names:
-        print(f"  '{col_name}' column already present. Skipping.")
-        return
+        print(f"  '{col_name}' column already present. dropping.")
+        tbl.drop_columns([col_name])
 
     # Build the UDF class for the chosen model
     udf_cls = _make_embedding_udf(model_name, checkpoint, img_size)
@@ -471,7 +471,7 @@ def _make_embedding_udf(model_name: str, checkpoint: str | None, img_size: int):
     if model_name == "dinov2":
         EMBED_DIM = 384
 
-        @geneva.udf(data_type=pa.list_(pa.float32(), EMBED_DIM))
+        @geneva.udf(data_type=pa.list_(pa.float32(), EMBED_DIM), num_gpus=0.5)
         class DINOv2Embedder:
             def setup(self):
                 import timm, torch
@@ -491,7 +491,7 @@ def _make_embedding_udf(model_name: str, checkpoint: str | None, img_size: int):
     if model_name == "clip":
         EMBED_DIM = 512
 
-        @geneva.udf(data_type=pa.list_(pa.float32(), EMBED_DIM))
+        @geneva.udf(data_type=pa.list_(pa.float32(), EMBED_DIM), num_gpus=0.5)
         class CLIPEmbedder:
             def setup(self):
                 import clip, torch
@@ -511,16 +511,27 @@ def _make_embedding_udf(model_name: str, checkpoint: str | None, img_size: int):
         assert checkpoint, "--checkpoint is required for --embedding-model lewm"
         _ckpt = checkpoint
 
-        @geneva.udf(data_type=pa.list_(pa.float32(), 192))   # ViT-tiny embed_dim
+        @geneva.udf(data_type=pa.list_(pa.float32(), 192), num_gpus=0.5)   # ViT-tiny embed_dim
         class LeWMEmbedder:
             def setup(self):
-                import torch
-                model = torch.load(_ckpt, map_location="cuda")
+                import sys, os, torch
+                # Ray workers need jepa.py on the path (vendored next to create_data.py)
+                _here = os.path.dirname(os.path.abspath(__file__))
+                if _here not in sys.path:
+                    sys.path.insert(0, _here)
+                # weights_only=False required for torch.save'd model objects (PyTorch >= 2.6)
+                model = torch.load(_ckpt, map_location="cuda", weights_only=False)
                 model.eval()
                 self.encoder = model.encoder
                 self.torch = torch
+            
+            def _ensure_setup(self):
+                if not hasattr(self, "torch"):
+                    self.setup()
+
 
             def __call__(self, pixels: bytes) -> list[float]:
+                self._ensure_setup()
                 img = _Image.open(_io.BytesIO(pixels)).convert("RGB")
                 t = _transform(img).unsqueeze(0).cuda()
                 with self.torch.no_grad():
