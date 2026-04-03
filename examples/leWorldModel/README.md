@@ -145,17 +145,22 @@ python train.py --config config/lewm_pusht.yaml --lance-uri s3://my-bucket/lewm
 The paper's headline metric is **planning success rate** using CEM (Cross-Entropy Method) over the learned latent space — not loss values. To reproduce:
 
 ```bash
-# Install the evaluation stack (requires stable-worldmodel with env extras)
+# Install the evaluation stack
 pip install "stable-worldmodel[train,env]"
 
-# Copy the checkpoint to stable-worldmodel's cache directory
-mkdir -p ~/.stable_worldmodel/pusht
-cp checkpoints/lewm_pusht_lewm_epoch_10_object.ckpt ~/.stable_worldmodel/pusht/lewm_object.ckpt
+# stable_worldmodel's AutoCostModel looks for checkpoints under $STABLEWM_HOME
+# as <run_name>_object.ckpt. prepare_eval.py handles the placement automatically:
+python prepare_eval.py \
+  --checkpoint checkpoints/lewm_pusht_lewm_epoch_10_object.ckpt \
+  --dataset pusht
 
-# Run evaluation on PushT (target: ~90% success rate, Figure 6)
+# prepare_eval.py prints the exact command to run, e.g.:
+python eval.py --config-name=pusht.yaml policy=lewm_pusht_lewm_epoch_10
+
 # eval.py and config/eval/ are vendored from https://github.com/lucas-maes/le-wm
-python eval.py --config-name=pusht.yaml policy=pusht/lewm
 ```
+
+`prepare_eval.py` symlinks the checkpoint into `~/.stable_worldmodel/` with the name that `AutoCostModel` expects, then prints the ready-to-run `eval.py` command. Use `--copy` if the checkpoint and home directory are on different filesystems.
 
 Expected results from the paper (Figure 6):
 
