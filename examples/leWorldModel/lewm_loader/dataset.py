@@ -14,7 +14,7 @@ Frameskip mirrors the original HDF5Dataset behaviour:
 
 Each dataset item is a dict of tensors:
   "pixels"  : (T, C, H, W)           float32  ImageNet-normalized
-  "action"  : (T, frameskip×A)        float32  z-score normalized, NaN→0
+  "action"  : (T, frameskip×A)        float32  NaN→0
   "proprio" : (T, P)                  float32  [if present]
   ...
 
@@ -55,32 +55,6 @@ def _jpeg_to_tensor(jpeg_bytes: bytes, transform: transforms.Compose) -> torch.T
     return transform(img)
 
 
-def compute_normalizers(
-    uri: str,
-    table_name: str,
-    columns: list[str],
-    **connect_kwargs,
-) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    """
-    Compute per-column (mean, std) for z-score normalization.
-    Only reads non-pixel columns one at a time; pixel/blob data is never loaded.
-    """
-    db  = lancedb.connect(uri, **connect_kwargs)
-    tbl = db.open_table(table_name)
-    non_pixel = [c for c in columns if c != "pixels"]
-    if not non_pixel:
-        return {}
-    ds = tbl.to_lance()
-    normalizers = {}
-    for col in non_pixel:
-        col_table = ds.to_table(columns=[col])
-        data  = np.array(col_table[col].to_pylist(), dtype=np.float32)
-        valid = ~np.isnan(data).any(axis=1)
-        data  = data[valid]
-        normalizers[col] = (data.mean(axis=0), data.std(axis=0))
-    return normalizers
-
-
 class LeWMLanceDataset(torch.utils.data.Dataset):
     """
     Temporal-window dataset backed by a LanceDB table.
@@ -95,7 +69,6 @@ class LeWMLanceDataset(torch.utils.data.Dataset):
                       action is kept at full resolution and reshaped to
                       (T, frameskip × action_dim); all other columns are strided.
         img_size:     Target image size after resize.
-        normalizers:  {col: (mean, std)} from compute_normalizers().
         **connect_kwargs: Passed to lancedb.connect().
     """
 
@@ -107,7 +80,6 @@ class LeWMLanceDataset(torch.utils.data.Dataset):
         num_steps: int = 4,
         frameskip: int = 5,
         img_size: int = 224,
-        normalizers: dict | None = None,
         **connect_kwargs,
     ):
         self.uri         = uri
@@ -116,7 +88,6 @@ class LeWMLanceDataset(torch.utils.data.Dataset):
         self.num_steps   = num_steps
         self.frameskip   = frameskip
         self.img_size    = img_size
-        self.normalizers = normalizers or {}
         self.connect_kwargs = connect_kwargs
         self._span = num_steps * frameskip   # raw rows per window
 
@@ -186,17 +157,15 @@ class LeWMLanceDataset(torch.utils.data.Dataset):
                 continue
 
             if col == "action":
-                # to_pylist() batches the Arrow → Python conversion in one call
-                # instead of .as_py() in a Python loop
+                # Keep all span rows, reshape to (T, frameskip × action_dim).
+                # This matches le-wm's effective_act_dim = frameskip × raw_action_dim.
                 data = np.array(batch.column(col).to_pylist(), dtype=np.float32)
                 data = np.nan_to_num(data, nan=0.0)
-                data = data.reshape(T, -1)   # (T, frameskip × action_dim)
+                data = data.reshape(T, -1)
             else:
+                # Proprio, state, observation: stride by frameskip → (T, D)
                 data = np.array(batch.column(col).to_pylist(), dtype=np.float32)
-                data = data[::frameskip]     # stride without a Python loop
-                if col in self.normalizers:
-                    mean, std = self.normalizers[col]
-                    data = (data - mean) / (std + 1e-8)
+                data = data[::frameskip]
                 data = np.nan_to_num(data, nan=0.0)
 
             sample[col] = torch.from_numpy(data)

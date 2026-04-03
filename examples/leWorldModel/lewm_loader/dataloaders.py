@@ -2,7 +2,7 @@
 DataLoader factories for leWorldModel LanceDB-backed training.
 
 Two public functions:
-  make_lewm_lance_loader()    – single loader, caller provides a pre-built dataset
+  make_lewm_lance_loader()    – single loader (no split)
   make_train_val_loaders()    – episode-level train/val split, returns two loaders
 
 Episode-level split (not random-row split) avoids data leakage:
@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from .dataset import LeWMLanceDataset, compute_normalizers
+from .dataset import LeWMLanceDataset
 
 
 # ---------------------------------------------------------------------------
@@ -40,11 +40,11 @@ def make_lewm_lance_loader(
     img_size: int = 224,
     num_workers: int = 6,
     prefetch_factor: int = 3,
-    normalizers: dict | None = None,
+    shuffle: bool = False,
     **connect_kwargs,
 ) -> DataLoader:
     """
-    Build a DataLoader over a LanceDB leWorldModel table.
+    Build a single DataLoader over a LanceDB leWorldModel table.
 
     frameskip=5 matches the le-wm paper default. With T=4 and frameskip=5,
     each window spans 20 raw rows; action is reshaped to (T, 5×action_dim).
@@ -56,10 +56,9 @@ def make_lewm_lance_loader(
         num_steps=num_steps,
         frameskip=frameskip,
         img_size=img_size,
-        normalizers=normalizers,
         **connect_kwargs,
     )
-    return _build_loader(dataset, batch_size, num_workers, prefetch_factor)
+    return _build_loader(dataset, batch_size, num_workers, prefetch_factor, shuffle=shuffle)
 
 
 def make_train_val_loaders(
@@ -80,7 +79,8 @@ def make_train_val_loaders(
     Episode-level train/val split.
 
     val_fraction of episodes (randomly sampled, seeded) are held out for
-    validation.  Normalizers are computed on training episodes only.
+    validation. All timesteps within an episode go entirely to one split —
+    no row-level leakage between train and val.
 
     Returns:
         (train_loader, val_loader)
@@ -100,12 +100,10 @@ def make_train_val_loaders(
 
     print(f"  Split: {len(train_episodes)} train episodes, {len(val_episodes)} val episodes")
 
-    # Compute normalizers on training data only to avoid leakage
-    normalizers = compute_normalizers(uri, table_name, columns, **connect_kwargs)
-
-    # Build full datasets then restrict _window_starts by episode membership
-    train_ds = LeWMLanceDataset(uri, table_name, columns, num_steps, frameskip, img_size, normalizers, **connect_kwargs)
-    val_ds   = LeWMLanceDataset(uri, table_name, columns, num_steps, frameskip, img_size, normalizers, **connect_kwargs)
+    # Build full datasets then restrict _window_starts by episode membership.
+    # Both datasets share the same table — no data is copied.
+    train_ds = LeWMLanceDataset(uri, table_name, columns, num_steps, frameskip, img_size, **connect_kwargs)
+    val_ds   = LeWMLanceDataset(uri, table_name, columns, num_steps, frameskip, img_size, **connect_kwargs)
 
     train_ep_mask = np.isin(train_ds._ep[train_ds._window_starts], list(train_episodes))
     val_ep_mask   = np.isin(val_ds._ep[val_ds._window_starts],   list(val_episodes))
@@ -116,8 +114,8 @@ def make_train_val_loaders(
     print(f"  Windows: {len(train_ds):,} train, {len(val_ds):,} val")
 
     return (
-        _build_loader(train_ds, batch_size, num_workers, prefetch_factor),
-        _build_loader(val_ds,   batch_size, num_workers, prefetch_factor),
+        _build_loader(train_ds, batch_size, num_workers, prefetch_factor, shuffle=True),
+        _build_loader(val_ds,   batch_size, num_workers, prefetch_factor, shuffle=False),
     )
 
 
@@ -125,11 +123,17 @@ def make_train_val_loaders(
 # Internal
 # ---------------------------------------------------------------------------
 
-def _build_loader(dataset: LeWMLanceDataset, batch_size: int, num_workers: int, prefetch_factor: int) -> DataLoader:
+def _build_loader(
+    dataset: LeWMLanceDataset,
+    batch_size: int,
+    num_workers: int,
+    prefetch_factor: int,
+    shuffle: bool = False,
+) -> DataLoader:
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=True,
         drop_last=True,
