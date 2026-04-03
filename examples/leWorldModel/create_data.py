@@ -480,8 +480,8 @@ def _make_embedding_udf(model_name: str, checkpoint: str | None, img_size: int):
                 ).cuda().eval()
                 self.torch = torch
 
-            def __call__(self, pixel_bytes: bytes) -> list[float]:
-                img = _Image.open(_io.BytesIO(pixel_bytes)).convert("RGB")
+            def __call__(self, pixels: bytes) -> list[float]:
+                img = _Image.open(_io.BytesIO(pixels)).convert("RGB")
                 t = _transform(img).unsqueeze(0).cuda()
                 with self.torch.no_grad():
                     return self.model(t)[0].cpu().tolist()
@@ -499,8 +499,8 @@ def _make_embedding_udf(model_name: str, checkpoint: str | None, img_size: int):
                 self.model.eval()
                 self.torch = torch
 
-            def __call__(self, pixel_bytes: bytes) -> list[float]:
-                img = _Image.open(_io.BytesIO(pixel_bytes)).convert("RGB")
+            def __call__(self, pixels: bytes) -> list[float]:
+                img = _Image.open(_io.BytesIO(pixels)).convert("RGB")
                 t = self.preprocess(img).unsqueeze(0).cuda()
                 with self.torch.no_grad():
                     return self.model.encode_image(t)[0].cpu().float().tolist()
@@ -520,8 +520,8 @@ def _make_embedding_udf(model_name: str, checkpoint: str | None, img_size: int):
                 self.encoder = model.encoder
                 self.torch = torch
 
-            def __call__(self, pixel_bytes: bytes) -> list[float]:
-                img = _Image.open(_io.BytesIO(pixel_bytes)).convert("RGB")
+            def __call__(self, pixels: bytes) -> list[float]:
+                img = _Image.open(_io.BytesIO(pixels)).convert("RGB")
                 t = _transform(img).unsqueeze(0).cuda()
                 with self.torch.no_grad():
                     out = self.encoder(t)
