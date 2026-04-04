@@ -80,6 +80,7 @@ class LeWMLanceDataset(torch.utils.data.Dataset):
         num_steps: int = 4,
         frameskip: int = 5,
         img_size: int = 224,
+        normalizers: dict[str, dict[str, np.ndarray]] | None = None,
         **connect_kwargs,
     ):
         self.uri         = uri
@@ -93,6 +94,13 @@ class LeWMLanceDataset(torch.utils.data.Dataset):
 
         self._perm:      Permutation | None      = None
         self._transform: transforms.Compose | None = None
+        self._normalizers: dict[str, dict[str, np.ndarray]] = {}
+        if normalizers:
+            for col, stats in normalizers.items():
+                mean = np.array(stats["mean"], dtype=np.float32)
+                std = np.array(stats["std"], dtype=np.float32)
+                std = np.where(std > 1e-6, std, np.ones_like(std))
+                self._normalizers[col] = {"mean": mean, "std": std}
 
         # Load only the two int32 index columns to precompute valid windows.
         # Pixels and all other data columns are never touched here.
@@ -159,14 +167,23 @@ class LeWMLanceDataset(torch.utils.data.Dataset):
             if col == "action":
                 # Keep all span rows, reshape to (T, frameskip × action_dim).
                 # This matches le-wm's effective_act_dim = frameskip × raw_action_dim.
-                data = np.array(batch.column(col).to_pylist(), dtype=np.float32)
+                data = np.array(batch[col].to_pylist(), dtype=np.float32)
                 data = np.nan_to_num(data, nan=0.0)
+                data = data.reshape(T, frameskip, -1)
+                if col in self._normalizers:
+                    norm = self._normalizers[col]
+                    mean = norm["mean"][None, None, :]
+                    std = norm["std"][None, None, :]
+                    data = (data - mean) / std
                 data = data.reshape(T, -1)
             else:
                 # Proprio, state, observation: stride by frameskip → (T, D)
-                data = np.array(batch.column(col).to_pylist(), dtype=np.float32)
+                data = np.array(batch[col].to_pylist(), dtype=np.float32)
                 data = data[::frameskip]
                 data = np.nan_to_num(data, nan=0.0)
+                if col in self._normalizers:
+                    norm = self._normalizers[col]
+                    data = (data - norm["mean"]) / norm["std"]
 
             sample[col] = torch.from_numpy(data)
 
