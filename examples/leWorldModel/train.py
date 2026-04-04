@@ -126,7 +126,7 @@ class LeWMLightning(pl.LightningModule):
         # Predict next states from the context window (first history_size frames)
         ctx_emb  = emb[:, :ctx_len]
         ctx_act  = act_emb[:, :ctx_len]
-        tgt_emb  = emb[:, n_preds:]          # ground-truth targets (shifted by n_preds)
+        tgt_emb  = emb[:, n_preds:]
         pred_emb = self.model.predict(ctx_emb, ctx_act)
 
         emb_std     = emb.detach().float().std().item()
@@ -164,10 +164,11 @@ class LeWMLightning(pl.LightningModule):
         self._shared_step(batch, "val")
 
     def configure_optimizers(self):
+        param_groups = self._build_param_groups(self.model)
         opt = torch.optim.AdamW(
-            self.model.parameters(),
+            param_groups,
             lr=self.cfg["lr"],
-            weight_decay=self.cfg["weight_decay"],
+            weight_decay=0.0,
         )
         # Replicate le-wm's LinearWarmupCosineAnnealingLR exactly:
         # warmup_steps = 1% of total steps (step-based, not epoch-based)
@@ -199,6 +200,34 @@ class LeWMLightning(pl.LightningModule):
                 self._debug_header_written = True
             writer.writerow(row)
         self._debug_fieldnames = fieldnames
+
+    def _build_param_groups(self, module: nn.Module) -> list[dict]:
+        decay: list[torch.nn.Parameter] = []
+        no_decay: list[torch.nn.Parameter] = []
+        for name, param in module.named_parameters():
+            if not param.requires_grad:
+                continue
+            if _is_bias_or_norm(name, param):
+                no_decay.append(param)
+            else:
+                decay.append(param)
+        groups: list[dict] = []
+        if decay:
+            groups.append({"params": decay, "weight_decay": self.cfg["weight_decay"]})
+        if no_decay:
+            groups.append({"params": no_decay, "weight_decay": 0.0})
+        return groups
+
+
+def _is_bias_or_norm(name: str, param: torch.nn.Parameter) -> bool:
+    if name.endswith(".bias") or name.endswith("bias"):
+        return True
+    lname = name.lower()
+    if "norm" in lname:
+        return True
+    if param.ndim == 1:
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
