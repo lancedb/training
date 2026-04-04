@@ -183,6 +183,7 @@ def make_train_val_loaders(
 
     print(f"  Split: {len(train_episodes)} train episodes, {len(val_episodes)} val episodes")
 
+    print("  Computing column normalizers on train episodes...")
     normalizers = _compute_column_normalizers(
         uri=uri,
         table_name=table_name,
@@ -190,6 +191,9 @@ def make_train_val_loaders(
         train_episodes=train_episodes,
         connect_kwargs=connect_kwargs,
     )
+
+    for col, stats in normalizers.items():
+        print(f"    {col}: mean={stats['mean'].tolist()}, std={stats['std'].tolist()}")
 
     # Build full datasets then restrict _window_starts by episode membership.
     # Both datasets share the same table — no data is copied.

@@ -38,8 +38,10 @@ from transformers import ViTConfig, ViTModel
 import yaml
 import pytorch_lightning as pl
 from pathlib import Path
+from typing import Optional
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.loggers import WandbLogger
+import csv
 
 from jepa import JEPA
 from lewm_loader import make_train_val_loaders
@@ -99,11 +101,14 @@ class LeWMLightning(pl.LightningModule):
     never called here.
     """
 
-    def __init__(self, model: JEPA, sigreg: SIGReg, cfg: dict):
+    def __init__(self, model: JEPA, sigreg: SIGReg, cfg: dict, debug_path: Optional[str] = None):
         super().__init__()
         self.model  = model
         self.sigreg = sigreg
         self.cfg    = cfg
+        self.debug_path = Path(debug_path) if debug_path else None
+        self._debug_header_written = False
+        self._debug_fieldnames: Optional[list[str]] = None
         self.save_hyperparameters(ignore=["model", "sigreg"])
 
     def _shared_step(self, batch: dict, stage: str) -> torch.Tensor:
@@ -124,14 +129,32 @@ class LeWMLightning(pl.LightningModule):
         tgt_emb  = emb[:, n_preds:]          # ground-truth targets (shifted by n_preds)
         pred_emb = self.model.predict(ctx_emb, ctx_act)
 
+        emb_std     = emb.detach().float().std().item()
+        act_std     = act_emb.detach().float().std().item()
         # SIGReg expects (T, B, D) — transpose time and batch dims
         loss_pred = (pred_emb - tgt_emb).pow(2).mean()
         loss_reg  = self.sigreg(emb.transpose(0, 1))
         loss      = loss_pred + self.cfg["sigreg_weight"] * loss_reg
+        pred_std   = pred_emb.detach().float().std().item()
 
         self.log(f"{stage}/loss_pred", loss_pred, on_step=(stage == "train"), on_epoch=True, prog_bar=True)
         self.log(f"{stage}/loss_reg",  loss_reg,  on_step=(stage == "train"), on_epoch=True)
         self.log(f"{stage}/loss",      loss,       on_step=(stage == "train"), on_epoch=True, prog_bar=True)
+        self.log(f"{stage}/emb_std", emb_std, on_step=(stage == "train"), on_epoch=True)
+        self.log(f"{stage}/act_emb_std", act_std, on_step=(stage == "train"), on_epoch=True)
+        self.log(f"{stage}/pred_emb_std", pred_std, on_step=(stage == "train"), on_epoch=True)
+
+        self._write_debug_row(stage, {
+            "stage": stage,
+            "global_step": int(self.global_step),
+            "epoch": int(self.current_epoch),
+            "loss": float(loss.detach().item()),
+            "loss_pred": float(loss_pred.detach().item()),
+            "loss_reg": float(loss_reg.detach().item()),
+            "emb_std": emb_std,
+            "act_emb_std": act_std,
+            "pred_emb_std": pred_std,
+        })
         return loss
 
     def training_step(self, batch: dict, _) -> torch.Tensor:
@@ -160,6 +183,22 @@ class LeWMLightning(pl.LightningModule):
             opt, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_steps]
         )
         return [opt], [{"scheduler": sched, "interval": "step"}]
+
+    def _write_debug_row(self, stage: str, row: dict) -> None:
+        if not self.debug_path:
+            return
+        path = self.debug_path
+        if path.parent and not path.parent.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+        fieldnames = self._debug_fieldnames or list(row.keys())
+        need_header = not self._debug_header_written and not path.exists()
+        with path.open("a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if need_header:
+                writer.writeheader()
+                self._debug_header_written = True
+            writer.writerow(row)
+        self._debug_fieldnames = fieldnames
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +316,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Run 1 train+val batch then exit (smoke test)")
     parser.add_argument("--precision",     default=None,
                         help="Override trainer.precision (e.g. 32, 16-mixed, bf16-mixed)")
+    parser.add_argument("--debug-log",     default=None,
+                        help="Optional path to write per-step debug metrics (emb/action stds, losses)")
     s3 = parser.add_argument_group("S3 storage options")
     s3.add_argument("--aws-access-key-id",     default=None, metavar="KEY")
     s3.add_argument("--aws-secret-access-key", default=None, metavar="SECRET")
@@ -353,9 +394,15 @@ def main():
         "sigreg_weight":  cfg["loss"]["sigreg"]["weight"],
         "history_size":   wm_cfg["history_size"],
         "num_preds":      wm_cfg["num_preds"],
+        "debug_log":      args.debug_log,
     }
 
-    lightning_model = LeWMLightning(model=model, sigreg=sigreg, cfg=lightning_cfg)
+    lightning_model = LeWMLightning(
+        model=model,
+        sigreg=sigreg,
+        cfg=lightning_cfg,
+        debug_path=args.debug_log,
+    )
 
     # ------------------------------------------------------------------ #
     # Logging & callbacks
