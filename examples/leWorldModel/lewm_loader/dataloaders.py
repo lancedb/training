@@ -3,10 +3,7 @@ DataLoader factories for leWorldModel LanceDB-backed training.
 
 Two public functions:
   make_lewm_lance_loader()    – single loader (no split)
-  make_train_val_loaders()    – episode-level train/val split, returns two loaders
-
-Episode-level split (not random-row split) avoids data leakage:
-  all timesteps of a given episode go entirely to train or entirely to val.
+  make_train_val_loaders()    – random window train/val split, returns two loaders
 """
 
 import lancedb
@@ -48,13 +45,13 @@ def _compute_column_normalizers(
     uri: str,
     table_name: str,
     columns: list[str],
-    train_episodes: set[int],
+    train_episodes: set[int] | None,
     connect_kwargs: dict,
 ) -> dict[str, dict[str, np.ndarray]]:
-    """Compute per-column (mean,std) stats on the training episodes only."""
+    """Compute per-column (mean,std) stats on selected episodes (or all)."""
 
     norm_cols = [c for c in columns if c != "pixels"]
-    if not norm_cols or not train_episodes:
+    if not norm_cols:
         return {}
 
     db = lancedb.connect(uri, **connect_kwargs)
@@ -66,11 +63,18 @@ def _compute_column_normalizers(
     )
 
     stats = {col: {"count": 0, "mean": None, "m2": None} for col in norm_cols}
-    episode_ids = np.array(sorted(train_episodes), dtype=np.int32)
+    episode_ids = (
+        np.array(sorted(train_episodes), dtype=np.int32)
+        if train_episodes is not None
+        else None
+    )
 
     for batch in scanner.to_batches():
         ep = np.array(batch["episode_idx"].to_pylist(), dtype=np.int32)
-        mask = np.isin(ep, episode_ids)
+        if episode_ids is None:
+            mask = np.ones_like(ep, dtype=bool)
+        else:
+            mask = np.isin(ep, episode_ids)
         if not mask.any():
             continue
 
@@ -159,55 +163,24 @@ def make_train_val_loaders(
     **connect_kwargs,
 ) -> tuple[DataLoader, DataLoader]:
     """
-    Episode-level train/val split.
-
-    val_fraction of episodes (randomly sampled, seeded) are held out for
-    validation. All timesteps within an episode go entirely to one split —
-    no row-level leakage between train and val.
+    Random window train/val split (matches le-wm Hydra config).
 
     Returns:
         (train_loader, val_loader)
     """
-    db  = lancedb.connect(uri, **connect_kwargs)
-    tbl = db.open_table(table_name)
 
-    # Only reads one int32 column — negligible memory even at millions of rows
-    ep_arr = tbl.to_lance().to_table(columns=["episode_idx"])["episode_idx"].to_numpy()
-    all_episodes = np.unique(ep_arr)
-
-    rng = np.random.default_rng(seed)
-    rng.shuffle(all_episodes)
-    n_val = max(1, int(len(all_episodes) * val_fraction))
-    val_episodes   = set(all_episodes[:n_val].tolist())
-    train_episodes = set(all_episodes[n_val:].tolist())
-
-    print(f"  Split: {len(train_episodes)} train episodes, {len(val_episodes)} val episodes")
-
-    print("  Computing column normalizers on train episodes...")
+    print("  Computing column normalizers (all episodes)...")
     normalizers = _compute_column_normalizers(
         uri=uri,
         table_name=table_name,
         columns=columns,
-        train_episodes=train_episodes,
+        train_episodes=None,
         connect_kwargs=connect_kwargs,
     )
-
     for col, stats in normalizers.items():
         print(f"    {col}: mean={stats['mean'].tolist()}, std={stats['std'].tolist()}")
 
-    # Build full datasets then restrict _window_starts by episode membership.
-    # Both datasets share the same table — no data is copied.
-    train_ds = LeWMLanceDataset(
-        uri,
-        table_name,
-        columns,
-        num_steps,
-        frameskip,
-        img_size,
-        normalizers=normalizers,
-        **connect_kwargs,
-    )
-    val_ds   = LeWMLanceDataset(
+    base_ds = LeWMLanceDataset(
         uri,
         table_name,
         columns,
@@ -218,11 +191,28 @@ def make_train_val_loaders(
         **connect_kwargs,
     )
 
-    train_ep_mask = np.isin(train_ds._ep[train_ds._window_starts], list(train_episodes))
-    val_ep_mask   = np.isin(val_ds._ep[val_ds._window_starts],   list(val_episodes))
+    total_windows = len(base_ds)
+    n_val = max(1, int(total_windows * val_fraction))
+    n_train = total_windows - n_val
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(total_windows)
+    train_idx = np.sort(perm[:n_train])
+    val_idx = np.sort(perm[n_train:])
 
-    train_ds._window_starts = train_ds._window_starts[train_ep_mask]
-    val_ds._window_starts   = val_ds._window_starts[val_ep_mask]
+    train_ds = base_ds
+    train_ds._window_starts = train_ds._window_starts[train_idx]
+
+    val_ds = LeWMLanceDataset(
+        uri,
+        table_name,
+        columns,
+        num_steps,
+        frameskip,
+        img_size,
+        normalizers=normalizers,
+        **connect_kwargs,
+    )
+    val_ds._window_starts = val_ds._window_starts[val_idx]
 
     print(f"  Windows: {len(train_ds):,} train, {len(val_ds):,} val")
 

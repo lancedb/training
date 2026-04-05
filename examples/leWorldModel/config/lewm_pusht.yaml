@@ -1,35 +1,25 @@
-# leWorldModel training config — PushT dataset
-# Mirrors le-wm/config/train/lewm.yaml + config/data/pusht.yaml
-# LanceDB-specific keys added under 'data:' (not present in original le-wm).
-# All other sections are a strict superset of the original le-wm config.
-
 seed: 42
 img_size: 224
-
 trainer:
   max_epochs: 100
-  precision: "bf16-mixed"      # PyTorch Lightning format (le-wm uses "bf16" via Hydra)
+  precision: bf16-mixed
   gradient_clip_val: 1.0
   log_every_n_steps: 50
   save_every_n_epochs: 10
-  checkpoint_dir: "./checkpoints"
-
+  checkpoint_dir: ./checkpoints
 loader:
   batch_size: 128
   num_workers: 12
   prefetch_factor: 4
-
 optimizer:
-  lr: 5.0e-5
-  weight_decay: 1.0e-3
-
+  lr: 5.0e-05
+  weight_decay: 0.001
 wm:
   history_size: 3
   num_preds: 1
   embed_dim: 192
-  patch_size: 14                          # ViT patch size — with img_size=224 gives 16×16=256 patches + CLS
-  proj_hidden: 2048                       # added: projector MLP hidden dim
-
+  patch_size: 14
+  proj_hidden: 2048
 predictor:
   depth: 6
   heads: 16
@@ -37,20 +27,20 @@ predictor:
   dim_head: 64
   dropout: 0.1
   emb_dropout: 0.0
-
 loss:
   sigreg:
     weight: 0.09
     kwargs:
       knots: 17
       num_proj: 1024
-
-# ── LanceDB-specific additions (not present in original le-wm) ────────────────
 data:
-  lance_uri: "./lewm_lance"           # override with s3://bucket/prefix for cloud
-  table_name: "lewm_pusht"
-  columns: ["pixels", "action", "proprio", "state"]
-  frameskip: 5                         # matches le-wm paper default
-  val_fraction: 0.1                    # episode-level hold-out fraction
-
-wandb_project: "lewm-lancedb"
+  lance_uri: ./lewm_lance
+  table_name: lewm_pusht
+  columns:
+  - pixels
+  - action
+  - proprio
+  - state
+  frameskip: 5
+  val_fraction: 0.1
+wandb_project: lewm-lancedb
