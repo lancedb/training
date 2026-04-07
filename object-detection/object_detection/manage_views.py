@@ -9,20 +9,28 @@ This is the maintenance layer of the LanceDB + Geneva lifecycle:
                   ↓                       ↓
               refresh views ←── mv.version logged in training run
 
-Views are Geneva-maintained child tables of the `bdd100k` parent.
-When new footage is ingested and backfilled, a single `make refresh`
-call propagates updates to all curated splits — no training code changes.
+Actions
+-------
+  curate   Create the three built-in views (nighttime_person, rider, nighttime_rider).
+  add      Create a single custom view for any SQL filter you care about.
+  refresh  Refresh all views after new data is ingested + backfilled.
+  status   Print row counts and versions for parent + all views.
 
 Usage
 -----
-# Create all materialized views (run once after initial backfill):
-python -m object_detection.manage_views --action curate --db data/bdd100k/lancedb
+# Built-in views (annotation-based, no GPU backfill needed):
+python -m object_detection.manage_views --action curate
 
-# Show current parent + view sizes:
-python -m object_detection.manage_views --action status --db data/bdd100k/lancedb
+# Custom view — ambulance detection (requires vehicle_light_label backfill):
+python -m object_detection.manage_views --action add \\
+    --name bdd100k_ambulance \\
+    --filter "vehicle_light_label = 'red_ambulance'"
 
-# Refresh all views after new ingest + backfill:
-python -m object_detection.manage_views --action refresh --db data/bdd100k/lancedb
+# After new data arrives:
+python -m object_detection.manage_views --action refresh
+
+# Check what exists:
+python -m object_detection.manage_views --action status
 """
 
 from __future__ import annotations
@@ -32,97 +40,70 @@ import argparse
 import lancedb
 import geneva
 
-# ---------------------------------------------------------------------------
-# View definitions
-# Each view is a named Geneva materialized view over the parent bdd100k table.
-# The WHERE clause lives here, not in training scripts — that's the point.
-# ---------------------------------------------------------------------------
-
-VIEWS: dict[str, str] = {
-    "bdd100k_nighttime_person": (
-        "timeofday = 'night' AND has_person = true"
-    ),
-    "bdd100k_rider": (
-        "has_rider = true"
-    ),
-    "bdd100k_nighttime_rider": (
-        "timeofday = 'night' AND has_rider = true"
-    ),
-}
-
 PARENT_TABLE = "bdd100k"
+
+# Built-in curated views — annotation-based filters, no GPU backfill required.
+BUILTIN_VIEWS: dict[str, str] = {
+    "bdd100k_nighttime_person": "timeofday = 'night' AND has_person = true",
+    "bdd100k_rider":            "has_rider = true",
+    "bdd100k_nighttime_rider":  "timeofday = 'night' AND has_rider = true",
+}
 
 
 def _connect(db_path: str):
-    """Open both a Geneva connection (for view ops) and a plain LanceDB connection (for row counts)."""
+    """Return (geneva_conn, lancedb_conn) — both are needed for different ops."""
     return geneva.connect(db_path), lancedb.connect(db_path)
 
 
-def status(db_path: str) -> None:
-    """Print current row counts for parent table and all views."""
-    gconn, lconn = _connect(db_path)
-    existing = set(lconn.list_tables().tables)
+def _all_views(lconn) -> list[str]:
+    """All tables in the DB that aren't the parent or a system table."""
+    return [
+        t for t in lconn.list_tables().tables
+        if t != PARENT_TABLE and not t.startswith("__")
+    ]
 
-    parent = lconn.open_table(PARENT_TABLE)
-    print(f"\n{'table':<35}  {'rows':>8}  {'version':>8}  {'filter'}")
-    print("-" * 90)
-    print(f"  {PARENT_TABLE:<33}  {parent.count_rows():>8}  {parent.version:>8}  (source)")
 
-    for view_name, sql_filter in VIEWS.items():
-        if view_name in existing:
-            tbl = lconn.open_table(view_name)
-            print(f"  {view_name:<33}  {tbl.count_rows():>8}  {tbl.version:>8}  WHERE {sql_filter}")
-        else:
-            print(f"  {view_name:<33}  {'—':>8}  {'—':>8}  (not yet created)")
-    print()
-
+# ---------------------------------------------------------------------------
+# Actions
+# ---------------------------------------------------------------------------
 
 def curate(db_path: str) -> None:
-    """Create all materialized views (idempotent — refreshes if already exists)."""
+    """Create the three built-in materialized views (idempotent)."""
     gconn, lconn = _connect(db_path)
     existing = set(lconn.list_tables().tables)
     gtbl = gconn.open_table(PARENT_TABLE)
 
     with gconn.local_ray_context():
-        for view_name, sql_filter in VIEWS.items():
-            query = gtbl.search().where(sql_filter)
+        for name, sql_filter in BUILTIN_VIEWS.items():
+            _create_or_refresh(gconn, gtbl, name, sql_filter, existing)
 
-            if view_name in existing:
-                print(f"[{view_name}] already exists — refreshing …")
-                mv = gconn.open_table(view_name)
-                mv.refresh()
-            else:
-                print(f"[{view_name}] creating … (filter: {sql_filter})")
-                mv = gconn.create_materialized_view(view_name, query)
-                mv.refresh()
+    print("All built-in views ready.")
 
-            rows = mv.count_rows()
-            print(f"[{view_name}] ✓  {rows} rows  (version {mv.version})\n")
 
-    print("All views ready.")
+def add(db_path: str, name: str, sql_filter: str) -> None:
+    """Create a single custom materialized view."""
+    gconn, lconn = _connect(db_path)
+    existing = set(lconn.list_tables().tables)
+    gtbl = gconn.open_table(PARENT_TABLE)
+
+    with gconn.local_ray_context():
+        _create_or_refresh(gconn, gtbl, name, sql_filter, existing)
 
 
 def refresh(db_path: str) -> None:
-    """
-    Refresh all views after new data has been ingested + backfilled.
-
-    Call this whenever:
-      - New BDD frames are appended to the parent table
-      - Geneva backfill has run on the new rows
-    The views will pick up any new rows that match their filter.
-    """
+    """Refresh all views after new data has been ingested + backfilled."""
     gconn, lconn = _connect(db_path)
-    existing = set(lconn.list_tables().tables)
+    views = _all_views(lconn)
 
     parent = lconn.open_table(PARENT_TABLE)
     print(f"\nParent '{PARENT_TABLE}': {parent.count_rows()} rows (version {parent.version})")
 
-    with gconn.local_ray_context():
-        for view_name in VIEWS:
-            if view_name not in existing:
-                print(f"[{view_name}] not found — run `--action curate` first")
-                continue
+    if not views:
+        print("No views found. Run --action curate or --action add first.")
+        return
 
+    with gconn.local_ray_context():
+        for view_name in views:
             mv = gconn.open_table(view_name)
             before = mv.count_rows()
             mv.refresh()
@@ -134,23 +115,70 @@ def refresh(db_path: str) -> None:
     print("\nRefresh complete.")
 
 
+def status(db_path: str) -> None:
+    """Print row counts and versions for the parent table and all views."""
+    gconn, lconn = _connect(db_path)
+    views = _all_views(lconn)
+
+    parent = lconn.open_table(PARENT_TABLE)
+    print(f"\n{'table':<35}  {'rows':>8}  {'version':>8}")
+    print("-" * 60)
+    print(f"  {PARENT_TABLE:<33}  {parent.count_rows():>8}  {parent.version:>8}  (source)")
+
+    for view_name in views:
+        tbl = lconn.open_table(view_name)
+        print(f"  {view_name:<33}  {tbl.count_rows():>8}  {tbl.version:>8}")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Internal helper
+# ---------------------------------------------------------------------------
+
+def _create_or_refresh(gconn, gtbl, name: str, sql_filter: str, existing: set) -> None:
+    if name in existing:
+        print(f"[{name}] already exists — refreshing …")
+        mv = gconn.open_table(name)
+        mv.refresh()
+    else:
+        print(f"[{name}] creating … (filter: {sql_filter})")
+        query = gtbl.search().where(sql_filter)
+        mv = gconn.create_materialized_view(name, query)
+        mv.refresh()
+
+    print(f"[{name}] ✓  {mv.count_rows()} rows  (version {mv.version})\n")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(description="Manage Geneva materialized views for BDD100K.")
-    p.add_argument("--action", choices=["status", "curate", "refresh"],
+    p.add_argument("--action", choices=["status", "curate", "refresh", "add"],
                    default="status")
-    p.add_argument("--db", default="data/bdd100k/lancedb")
-    p.add_argument("--table", default=PARENT_TABLE)
+    p.add_argument("--db",     default="data/bdd100k/lancedb")
+    p.add_argument("--name",   default=None,
+                   help="View name (required for --action add)")
+    p.add_argument("--filter", default=None,
+                   help="SQL WHERE clause (required for --action add)")
     return p.parse_args(argv)
 
 
 def main(argv=None):
     args = _parse_args(argv)
-    if args.action == "status":
-        status(args.db)
+
+    if args.action == "add":
+        if not args.name or not args.filter:
+            print("--action add requires both --name and --filter")
+            raise SystemExit(1)
+        add(args.db, args.name, args.filter)
     elif args.action == "curate":
         curate(args.db)
     elif args.action == "refresh":
         refresh(args.db)
+    elif args.action == "status":
+        status(args.db)
 
 
 if __name__ == "__main__":

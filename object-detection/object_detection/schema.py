@@ -61,13 +61,8 @@ GENEVA_UDF_COLUMNS = [
     pa.field("vehicle_light_confidence", pa.float32()),
     pa.field("vehicle_light_bbox_area_pct", pa.float32()),
 
-    # heavy detector (Faster R-CNN)
+    # heavy detector (Faster R-CNN) — used for ambulance narrative
     pa.field("vehicle_label", pa.string()),
-    pa.field("vehicle_confidence", pa.float32()),
-    pa.field("vehicle_bbox_area_pct", pa.float32()),
-    pa.field("vehicle_bbox_hsv_h", pa.float32()),
-    pa.field("vehicle_bbox_hsv_s", pa.float32()),
-    pa.field("vehicle_bbox_hsv_v", pa.float32()),
 
     # white balance
     pa.field("white_balance", pa.float32()),

@@ -199,46 +199,18 @@ def _run_frcnn(image_bytes: bytes):
     return img, label_idx, score, bbox
 
 
-@udf(data_type=pa.string(), input_columns=["image_bytes"], num_gpus=0.1)
+@udf(data_type=pa.string(), input_columns=["image_bytes"], num_gpus=0.25)
 def vehicle_label(image_bytes: bytes) -> str:
+    """Enriched label from the heavy Faster R-CNN detector (GPU recommended).
+
+    Used to filter the ambulance materialized view:
+      vehicle_label = 'red_ambulance'
+    """
     img, label_idx, _, bbox = _run_frcnn(image_bytes)
     if label_idx is None:
         return "no_detection"
     h, s, v = _dominant_hsv(img, bbox)
     return _enrich_label(label_idx, h, s, v)
-
-
-@udf(data_type=pa.float32(), input_columns=["image_bytes"], num_gpus=0.1)
-def vehicle_confidence(image_bytes: bytes) -> float:
-    _, _, score, _ = _run_frcnn(image_bytes)
-    return score
-
-
-@udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"], num_gpus=0.1)
-def vehicle_bbox_area_pct(image_bytes: bytes, width: int, height: int) -> float:
-    _, _, _, bbox = _run_frcnn(image_bytes)
-    return _bbox_area_pct(bbox, width, height)
-
-
-@udf(data_type=pa.float32(), input_columns=["image_bytes"], num_gpus=0.1)
-def vehicle_bbox_hsv_h(image_bytes: bytes) -> float:
-    img, _, _, bbox = _run_frcnn(image_bytes)
-    h, _, _ = _dominant_hsv(img, bbox)
-    return h
-
-
-@udf(data_type=pa.float32(), input_columns=["image_bytes"], num_gpus=0.1)
-def vehicle_bbox_hsv_s(image_bytes: bytes) -> float:
-    img, _, _, bbox = _run_frcnn(image_bytes)
-    _, s, _ = _dominant_hsv(img, bbox)
-    return s
-
-
-@udf(data_type=pa.float32(), input_columns=["image_bytes"], num_gpus=0.1)
-def vehicle_bbox_hsv_v(image_bytes: bytes) -> float:
-    img, _, _, bbox = _run_frcnn(image_bytes)
-    _, _, v = _dominant_hsv(img, bbox)
-    return v
 
 
 # ---------------------------------------------------------------------------
@@ -328,11 +300,6 @@ LIGHT_UDFS: dict[str, object] = {
 #: Heavy UDFs that need a GPU for reasonable throughput.
 HEAVY_UDFS: dict[str, object] = {
     "vehicle_label": vehicle_label,
-    "vehicle_confidence": vehicle_confidence,
-    "vehicle_bbox_area_pct": vehicle_bbox_area_pct,
-    "vehicle_bbox_hsv_h": vehicle_bbox_hsv_h,
-    "vehicle_bbox_hsv_s": vehicle_bbox_hsv_s,
-    "vehicle_bbox_hsv_v": vehicle_bbox_hsv_v,
 }
 
 ALL_UDFS: dict[str, object] = {**LIGHT_UDFS, **HEAVY_UDFS}

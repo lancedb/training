@@ -106,7 +106,7 @@ so those flags are omitted below.
 
 ### Step 1 — Ingest
 
-Downloads BDD100K automatically (~6.4 GB) on first run if `data/bdd100k/` is empty.
+Downloads BDD100K automatically (~6.6 GB images + ~190 MB labels) on first run if `data/bdd100k/` is empty.
 
 ```bash
 # Full dataset (GPU training — ~80k frames):
@@ -128,122 +128,111 @@ python -m object_detection.ingest_bdd --splits train val --limit 5000 --overwrit
 
 ### Step 2 — Geneva backfill
 
+There are two tiers of backfill depending on which training narrative you want to run.
+
+**Tier 1 — Annotation-based** (fast, CPU-friendly, needed for the pedestrian/rider narrative):
+
 ```bash
-# Annotation-presence flags (fast — no image decoding):
-python -m object_detection.backfill_geneva \
-    --columns has_person has_rider \
-    --min-checkpoint-size 25200 --max-checkpoint-size 25200
-
-# Vehicle detector labels (SSDLite, ~30 min CPU):
-python -m object_detection.backfill_geneva \
-    --columns vehicle_light_label vehicle_light_confidence vehicle_light_bbox_area_pct \
-    --min-checkpoint-size 25200 --max-checkpoint-size 25200
-
-# Heavy Faster R-CNN columns (GPU recommended):
-python -m object_detection.backfill_geneva \
-    --columns vehicle_label vehicle_confidence vehicle_bbox_area_pct \
-    --concurrency 8
+python -m object_detection.backfill_geneva --columns has_person has_rider
 ```
 
-Geneva's backfill is **incremental** — re-running after new ingests only processes rows
-where the column is still `NULL`. No re-work on existing data.
+**Tier 2 — Model-inference-based** (GPU recommended, needed for the ambulance narrative):
+
+```bash
+python -m object_detection.backfill_geneva \
+    --columns vehicle_light_label vehicle_light_confidence vehicle_light_bbox_area_pct
+```
+
+Run both tiers to unlock all experiments. Backfill is incremental — re-running after new
+data only processes newly added rows. `--concurrency` and checkpoint-size tuning knobs
+are documented in `backfill_geneva.py`.
 
 ### Step 3 — EDA (optional but recommended)
 
-Explore what the Geneva columns reveal before committing to curation filters:
-
 ```bash
-# Row counts by spec — pure metadata, no image loading:
 python -m object_detection.spec_queries
-
-# Or open the EDA notebook:
-jupyter notebook notebooks/eda_bdd100k.ipynb
+# or: jupyter notebook notebooks/eda_bdd100k.ipynb
 ```
-
-The notebook shows: frame distributions, annotation counts by spec, FTS search on
-`scene_description`, white-balance CCT distributions (night vs daytime), and a sample
-image preview. All queries use `count_rows(filter=)` or `search().limit()` — the full
-table is never loaded into memory.
 
 ### Step 4 — Create materialized views
 
 ```bash
+# Built-in views (pedestrian + rider narrative, needs Tier 1 backfill):
 python -m object_detection.manage_views --action curate
+
+# Custom view (ambulance narrative, needs Tier 2 backfill):
+python -m object_detection.manage_views --action add \
+    --name bdd100k_ambulance \
+    --filter "vehicle_light_label = 'red_ambulance'"
 ```
 
-This creates three Geneva materialized views as child tables:
+`--action curate` creates:
 
-| View | Filter | Train rows | Val rows |
-|---|---|---|---|
-| `bdd100k_nighttime_person` | `timeofday='night' AND has_person=true` | 1,165 | 859 |
-| `bdd100k_rider` | `has_rider=true` | 747 | 522 |
-| `bdd100k_nighttime_rider` | `timeofday='night' AND has_rider=true` | 139 | 108 |
+| View | Filter |
+|---|---|
+| `bdd100k_nighttime_person` | `timeofday='night' AND has_person=true` |
+| `bdd100k_rider` | `has_rider=true` |
+| `bdd100k_nighttime_rider` | `timeofday='night' AND has_rider=true` |
 
-The curation logic — the WHERE clause — lives in `manage_views.py`, not in training scripts.
+`--action add` works for any SQL filter over any backfilled column — the ambulance example
+above uses `vehicle_light_label`, but you could equally filter on `scene`, `weather`,
+`timeofday`, or any combination.
 
 ### Step 5 — Train
 
-The training script auto-detects GPU. If `torch.cuda.is_available()` is true it uses CUDA
-automatically — no extra flags needed. On an A100 each experiment takes ~10–20 min.
+The script always evaluates the COCO pretrained checkpoint first, then fine-tunes and
+prints a before/after comparison — no separate baseline run needed:
 
-**Curated runs** (main experiments):
+```
+=== Baseline (pretrained COCO checkpoint) ===
+  map@0.5: 0.1820
+
+=== Fine-tuning for 10 epoch(s) ===
+  ...
+
+--- Results ---
+metric                baseline  fine-tuned       delta
+map_50                  0.1820      0.4076      +0.2256
+precision               0.3210      0.5188      +0.1978
+recall                  0.4900      0.6493      +0.1593
+```
+
+**Narrative A — Pedestrian / Rider** (annotation-based curation, works on CPU too):
 
 ```bash
-# Exp 1 — Nighttime pedestrian  (~1165 train frames, ~20 min on A100)
+# Nighttime pedestrian
 python -m object_detection.train_detector \
-    --mode finetune \
     --train-table bdd100k_nighttime_person \
     --val-table bdd100k \
     --train-where "split='train'" \
     --val-where "split='val' AND timeofday='night' AND has_person=true" \
     --epochs 10 --batch-size 8 --num-workers 4 \
-    --output-dir checkpoints/nighttime_person_frcnn
+    --output-dir checkpoints/nighttime_person
 
-# Exp 2 — Rider  (~747 train frames, ~10 min on A100)
+# Rider
 python -m object_detection.train_detector \
-    --mode finetune \
     --train-table bdd100k_rider \
     --val-table bdd100k \
     --train-where "split='train'" \
     --val-where "split='val' AND has_rider=true" \
     --epochs 10 --batch-size 8 --num-workers 4 \
-    --output-dir checkpoints/rider_frcnn
-
-# Exp 3 — Nighttime rider  (~139 train frames, GPU only — too slow on CPU)
-# Lower LR because the slice is tiny; use all available frames, no subsampling
-python -m object_detection.train_detector \
-    --mode finetune \
-    --train-table bdd100k_nighttime_rider \
-    --val-table bdd100k \
-    --train-where "split='train'" \
-    --val-where "split='val' AND timeofday='night' AND has_rider=true" \
-    --epochs 10 --batch-size 4 --lr 0.001 --num-workers 4 \
-    --output-dir checkpoints/nighttime_rider_frcnn
+    --output-dir checkpoints/rider
 ```
 
-**Random baseline** (to reproduce the results comparison):
+**Narrative B — Ambulance** (uses GPU-backfilled `vehicle_light_label`):
 
 ```bash
-# Exp 1 random baseline — train on full table, eval on the same curated slice:
 python -m object_detection.train_detector \
-    --mode finetune \
-    --train-table bdd100k \
+    --train-table bdd100k_ambulance \
     --val-table bdd100k \
-    --train-where "split='train' AND num_annotations > 0" \
-    --val-where "split='val' AND timeofday='night' AND has_person=true" \
-    --epochs 10 --batch-size 8 --num-workers 4 \
-    --output-dir checkpoints/nighttime_person_random
-
-# Exp 2 random baseline:
-python -m object_detection.train_detector \
-    --mode finetune \
-    --train-table bdd100k \
-    --val-table bdd100k \
-    --train-where "split='train' AND num_annotations > 0" \
-    --val-where "split='val' AND has_rider=true" \
-    --epochs 10 --batch-size 8 --num-workers 4 \
-    --output-dir checkpoints/rider_random
+    --train-where "split='train'" \
+    --val-where "split='val' AND vehicle_light_label='red_ambulance'" \
+    --epochs 10 --batch-size 4 --lr 0.002 --num-workers 4 \
+    --output-dir checkpoints/ambulance
 ```
+
+The same pattern extends to any class you can express as a SQL filter over a backfilled
+column. Create a view, point `--train-table` at it, done.
 
 Training logs the **table version** for provenance:
 ```
@@ -258,9 +247,8 @@ Checkpoint ↔ exact data snapshot. If you retrain after a refresh, the version 
 # 1. Append new footage (omit --overwrite to append, not replace):
 python -m object_detection.ingest_bdd --synthetic 500
 
-# 2. Incremental backfill (Geneva skips already-computed rows):
-python -m object_detection.backfill_geneva \
-    --columns has_person has_rider
+# 2. Incremental backfill — only processes the newly added rows:
+python -m object_detection.backfill_geneva --columns has_person has_rider
 
 # 3. Refresh all views — one command, all splits update:
 python -m object_detection.manage_views --action refresh
@@ -283,96 +271,78 @@ python -m object_detection.manage_views --action status
 ```
 
 ```
-table                                rows   version  filter
-------------------------------------------------------------------------------------------
+table                                rows   version
+------------------------------------------------------------
   bdd100k                           25200        19  (source)
-  bdd100k_nighttime_person           2024         4  WHERE timeofday = 'night' AND has_person = true
-  bdd100k_rider                      1269         4  WHERE has_rider = true
-  bdd100k_nighttime_rider             247         4  WHERE timeofday = 'night' AND has_rider = true
+  bdd100k_nighttime_person           2024         4
+  bdd100k_rider                      1269         4
+  bdd100k_nighttime_rider             247         4
+  bdd100k_ambulance                   312         2
 ```
+
+Custom views show up automatically — `refresh` and `status` discover all views in the DB.
 
 ---
 
 ## Results (1 epoch, CPU baseline — run on GPU for production)
 
-Each experiment compares two models trained from the same COCO pretrained weights
-with the same data budget (400 frames). Only the *selection* of those 400 frames differs.
+The training script always evaluates the COCO pretrained checkpoint first (baseline),
+then fine-tunes, and prints a side-by-side delta. No separate baseline run needed.
 
-**Val set**: the Geneva-curated slice for that experiment (not general val).
+### Narrative A — Pedestrian / Rider (CPU baseline, 1 epoch, 15k subset)
 
-### Experiment 1 — Nighttime pedestrian detection
-
-| metric | random 400 | curated 400 | Δ |
+| metric | baseline (COCO) | curated fine-tune | Δ |
 |---|---|---|---|
+| **Nighttime pedestrian** | | | |
 | mAP@0.5 | 0.2569 | 0.2509 | -0.006 |
 | Precision | 0.3288 | **0.4288** | **+0.100** |
 | Recall | 0.5887 | 0.5875 | ~0 |
-
-### Experiment 2 — Rider detection ✓ best result
-
-| metric | random 400 | curated 400 | Δ |
-|---|---|---|---|
+| **Rider** | | | |
 | mAP@0.5 | 0.3101 | **0.4076** | **+0.098** |
 | Precision | 0.4523 | **0.5188** | **+0.067** |
 | Recall | 0.6157 | **0.6493** | **+0.034** |
 
-Clean sweep — Geneva curation beats random sampling on all three metrics.
+### Narrative B — Ambulance *(GPU required, results pending)*
 
-### Experiment 3 — Nighttime rider detection *(GPU required)*
-
-Only 139 curated train frames — too few for a meaningful CPU run. See Step 5 for the
-GPU command (`--lr 0.001`, lower because the slice is small).
-
-*Results pending — fill in after GPU run.*
+Requires Tier 2 backfill (`vehicle_light_label`). Results pending after GPU run.
 
 ---
 
-## Reproducing the CPU baseline results
+## Reproducing the CPU baseline
 
-Environment used: macOS, Apple Silicon, no GPU, Python 3.13 (uv venv).
-These experiments used a **15k train + 10.2k val subset** (`--limit 15000` / `--limit 10200`)
-to keep CPU runtimes manageable. GPU runs should use the full dataset (no `--limit`).
+Environment: macOS, Apple Silicon, no GPU, Python 3.13. Uses a 15k/10k subset to keep
+runtimes manageable. GPU runs should use the full dataset (drop `--limit`).
 
 ```bash
 cd object-detection/
 export GENEVA_PIPELINE_STALL_TIMEOUT_S=7200
 
-# 1. Ingest subset (15k train + 10.2k val — downloads automatically on first run)
+# 1. Ingest subset
 python -m object_detection.ingest_bdd --splits train val --limit 15000 --overwrite
 
-# 2. Backfill annotation-presence flags (fast — no image decoding)
-python -m object_detection.backfill_geneva \
-    --columns has_person has_rider \
-    --min-checkpoint-size 25200 --max-checkpoint-size 25200
+# 2. Backfill (Tier 1 — fast, no image decoding)
+python -m object_detection.backfill_geneva --columns has_person has_rider
 
-# 3. Backfill vehicle light labels (SSDLite, ~30 min CPU)
-python -m object_detection.backfill_geneva \
-    --columns vehicle_light_label vehicle_light_confidence vehicle_light_bbox_area_pct \
-    --min-checkpoint-size 25200 --max-checkpoint-size 25200
-
-# 4. Create materialized views
+# 3. Create views
 python -m object_detection.manage_views --action curate
 
-# 5a. Exp 1 — Nighttime pedestrian
+# 4a. Nighttime pedestrian
 python -m object_detection.train_detector \
-    --mode finetune \
     --train-table bdd100k_nighttime_person --val-table bdd100k \
     --train-where "split='train'" \
     --val-where "split='val' AND timeofday='night' AND has_person=true" \
     --epochs 1 --batch-size 4 --num-workers 0
 
-# 5b. Exp 2 — Rider (best result)
+# 4b. Rider
 python -m object_detection.train_detector \
-    --mode finetune \
     --train-table bdd100k_rider --val-table bdd100k \
     --train-where "split='train'" \
     --val-where "split='val' AND has_rider=true" \
     --epochs 1 --batch-size 4 --num-workers 0
 ```
 
-> **Note on CPU runtime**: FasterRCNN on CPU is ~15s/image. Training 400 frames ≈ 100 min,
-> eval 150 frames ≈ 30 min per experiment. Use GPU (`--num-workers 4 --batch-size 8`) for
-> practical iteration.
+> **CPU runtime**: FasterRCNN runs ~15s/image. Training 400 frames ≈ 100 min per experiment.
+> Use GPU with `--num-workers 4 --batch-size 8` for practical iteration.
 
 ---
 
