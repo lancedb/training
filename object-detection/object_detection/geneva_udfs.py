@@ -140,7 +140,7 @@ def _run_ssd(image_bytes: bytes):
     return img, *_top_detection(preds)
 
 
-@udf(data_type=pa.string(), input_columns=["image_bytes"], checkpoint_size=32)
+@udf(data_type=pa.string(), input_columns=["image_bytes"])
 def _vehicle_label_cpu(image_bytes: bytes) -> str:
     img, label_idx, _, bbox = _run_ssd(image_bytes)
     if label_idx is None:
@@ -148,13 +148,13 @@ def _vehicle_label_cpu(image_bytes: bytes) -> str:
     return _enrich_label(label_idx, *_dominant_hsv(img, bbox))
 
 
-@udf(data_type=pa.float32(), input_columns=["image_bytes"], checkpoint_size=32)
+@udf(data_type=pa.float32(), input_columns=["image_bytes"])
 def _vehicle_confidence_cpu(image_bytes: bytes) -> float:
     _, _, score, _ = _run_ssd(image_bytes)
     return score
 
 
-@udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"], checkpoint_size=32)
+@udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"])
 def _vehicle_bbox_area_pct_cpu(image_bytes: bytes, width: int, height: int) -> float:
     _, _, _, bbox = _run_ssd(image_bytes)
     return _bbox_area_pct(bbox, width, height)
@@ -191,7 +191,7 @@ def _run_frcnn(image_bytes: bytes):
     return img, *_top_detection(preds)
 
 
-@udf(data_type=pa.string(), input_columns=["image_bytes"], num_gpus=0.25, checkpoint_size=32)
+@udf(data_type=pa.string(), input_columns=["image_bytes"], num_gpus=0.25)
 def _vehicle_label_gpu(image_bytes: bytes) -> str:
     img, label_idx, _, bbox = _run_frcnn(image_bytes)
     if label_idx is None:
@@ -199,13 +199,13 @@ def _vehicle_label_gpu(image_bytes: bytes) -> str:
     return _enrich_label(label_idx, *_dominant_hsv(img, bbox))
 
 
-@udf(data_type=pa.float32(), input_columns=["image_bytes"], num_gpus=0.25, checkpoint_size=32)
+@udf(data_type=pa.float32(), input_columns=["image_bytes"], num_gpus=0.25)
 def _vehicle_confidence_gpu(image_bytes: bytes) -> float:
     _, _, score, _ = _run_frcnn(image_bytes)
     return score
 
 
-@udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"], num_gpus=0.25, checkpoint_size=32)
+@udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"], num_gpus=0.25)
 def _vehicle_bbox_area_pct_gpu(image_bytes: bytes, width: int, height: int) -> float:
     _, _, _, bbox = _run_frcnn(image_bytes)
     return _bbox_area_pct(bbox, width, height)

@@ -14,25 +14,19 @@ Faster R-CNN UDFs (GPU recommended).
 
 Usage
 -----
-# Local smoke test — backfill lightweight UDFs on the default table:
-PYTHONPATH=object-detection/src python -m object_detection.backfill_geneva
+# Backfill all columns (CPU, SSDLite):
+python -m object_detection.backfill_geneva
 
-# Backfill specific columns only:
-PYTHONPATH=object-detection/src python -m object_detection.backfill_geneva \\
-    --columns vehicle_light_label vehicle_light_confidence
-
-# Heavy backfill on GPU (vehicle_label for ambulance narrative):
-GENEVA_PIPELINE_STALL_TIMEOUT_S=7200 \\
-python -m object_detection.backfill_geneva --columns vehicle_label
+# Backfill vehicle columns using Faster R-CNN on GPU:
+python -m object_detection.backfill_geneva --gpu --columns vehicle_label vehicle_confidence vehicle_bbox_area_pct
 
 # Restart a stuck job:
-python -m object_detection.backfill_geneva --columns vehicle_label --overwrite
+python -m object_detection.backfill_geneva --gpu --columns vehicle_label --overwrite
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
 
 import pyarrow as pa
 import lancedb
@@ -89,8 +83,6 @@ def backfill(
     table_name: str,
     columns: list[str],
     concurrency: int,
-    min_checkpoint_size: int,
-    max_checkpoint_size: int,
     overwrite: bool = False,
     gpu: bool = False,
 ) -> None:
@@ -126,8 +118,6 @@ def backfill(
                 udf=udf_fn,
                 concurrency=concurrency,
                 batch_size=32,
-                min_checkpoint_size=min_checkpoint_size,
-                max_checkpoint_size=max_checkpoint_size,
             )
             print(f"  [done]     {col}  (job_id={job_id})\n")
 
@@ -161,14 +151,6 @@ def _parse_args(argv=None):
         help="Parallel Ray actor processes (default: 4)",
     )
     p.add_argument(
-        "--min-checkpoint-size", type=int, default=10,
-        help="Minimum rows per checkpoint (default: 10)",
-    )
-    p.add_argument(
-        "--max-checkpoint-size", type=int, default=50,
-        help="Maximum rows per checkpoint (default: 50)",
-    )
-    p.add_argument(
         "--overwrite", action="store_true",
         help="Drop and re-add columns before backfilling — use to restart a stuck job",
     )
@@ -182,8 +164,6 @@ def main(argv=None):
         table_name=args.table,
         columns=args.columns,
         concurrency=args.concurrency,
-        min_checkpoint_size=args.min_checkpoint_size,
-        max_checkpoint_size=args.max_checkpoint_size,
         overwrite=args.overwrite,
         gpu=args.gpu,
     )
