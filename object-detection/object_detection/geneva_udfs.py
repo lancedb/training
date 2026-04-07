@@ -140,7 +140,7 @@ def _run_ssd(image_bytes: bytes):
     return img, label_idx, score, bbox
 
 
-@udf(data_type=pa.string(), input_columns=["image_bytes"])
+@udf(data_type=pa.string(), input_columns=["image_bytes"], batch_size=32)
 def vehicle_light_label(image_bytes: bytes) -> str:
     """Enriched label from the lightweight SSDLite detector."""
     img, label_idx, _, bbox = _run_ssd(image_bytes)
@@ -150,14 +150,14 @@ def vehicle_light_label(image_bytes: bytes) -> str:
     return _enrich_label(label_idx, h, s, v)
 
 
-@udf(data_type=pa.float32(), input_columns=["image_bytes"])
+@udf(data_type=pa.float32(), input_columns=["image_bytes"], batch_size=32)
 def vehicle_light_confidence(image_bytes: bytes) -> float:
     """Detection confidence from the lightweight SSDLite detector."""
     _, _, score, _ = _run_ssd(image_bytes)
     return score
 
 
-@udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"])
+@udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"], batch_size=32)
 def vehicle_light_bbox_area_pct(image_bytes: bytes, width: int, height: int) -> float:
     """Bounding-box area of the top SSDLite detection as a % of frame area."""
     _, _, _, bbox = _run_ssd(image_bytes)
@@ -199,7 +199,7 @@ def _run_frcnn(image_bytes: bytes):
     return img, label_idx, score, bbox
 
 
-@udf(data_type=pa.string(), input_columns=["image_bytes"], num_gpus=0.25)
+@udf(data_type=pa.string(), input_columns=["image_bytes"], num_gpus=0.25, batch_size=32)
 def vehicle_label(image_bytes: bytes) -> str:
     """Enriched label from the heavy Faster R-CNN detector (GPU recommended).
 
@@ -284,7 +284,7 @@ def scene_description(weather: str, scene: str, timeofday: str) -> str:
 # Registry  — used by backfill_geneva.py
 # ---------------------------------------------------------------------------
 
-#: All lightweight UDFs that run comfortably on CPU.
+#: Lightweight UDFs — SSDLite-based, use GPU when available, fall back to CPU.
 LIGHT_UDFS: dict[str, object] = {
     "vehicle_light_label": vehicle_light_label,
     "vehicle_light_confidence": vehicle_light_confidence,

@@ -136,16 +136,28 @@ There are two tiers of backfill depending on which training narrative you want t
 python -m object_detection.backfill_geneva --columns has_person has_rider
 ```
 
-**Tier 2 — Model-inference-based** (GPU recommended, needed for the ambulance narrative):
+**Tier 2 — Model-inference-based** (needed for the ambulance narrative). Pick one:
 
 ```bash
+# Option A — SSDLite (CPU-friendly, runs without a GPU):
 python -m object_detection.backfill_geneva \
     --columns vehicle_light_label vehicle_light_confidence vehicle_light_bbox_area_pct
+
+# Option B — Faster R-CNN (GPU recommended, more accurate):
+python -m object_detection.backfill_geneva --columns vehicle_label
 ```
 
-Run both tiers to unlock all experiments. Backfill is incremental — re-running after new
-data only processes newly added rows. `--concurrency` and checkpoint-size tuning knobs
-are documented in `backfill_geneva.py`.
+Option A populates `vehicle_light_label`; Option B populates `vehicle_label`. The ambulance
+view in Step 4 uses whichever you ran — they produce the same enriched labels (`red_ambulance`,
+`yellow_ambulance`, etc.) from different models.
+
+To restart a stuck backfill job, add `--overwrite` — it drops and re-adds the column from scratch:
+
+```bash
+python -m object_detection.backfill_geneva --columns vehicle_light_label --overwrite
+```
+
+Backfill is incremental — re-running without `--overwrite` only processes newly added rows.
 
 ### Step 3 — EDA (optional but recommended)
 
@@ -160,10 +172,15 @@ python -m object_detection.spec_queries
 # Built-in views (pedestrian + rider narrative, needs Tier 1 backfill):
 python -m object_detection.manage_views --action curate
 
-# Custom view (ambulance narrative, needs Tier 2 backfill):
+# Ambulance view — use the column matching whichever Tier 2 option you ran:
+# Option A (SSDLite):
 python -m object_detection.manage_views --action add \
     --name bdd100k_ambulance \
     --filter "vehicle_light_label = 'red_ambulance'"
+# Option B (Faster R-CNN):
+python -m object_detection.manage_views --action add \
+    --name bdd100k_ambulance \
+    --filter "vehicle_label = 'red_ambulance'"
 ```
 
 `--action curate` creates:
@@ -219,14 +236,24 @@ python -m object_detection.train_detector \
     --output-dir checkpoints/rider
 ```
 
-**Narrative B — Ambulance** (uses GPU-backfilled `vehicle_light_label`):
+**Narrative B — Ambulance** (requires Tier 2 backfill):
 
 ```bash
+# If you ran Option A (SSDLite → vehicle_light_label):
 python -m object_detection.train_detector \
     --train-table bdd100k_ambulance \
     --val-table bdd100k \
     --train-where "split='train'" \
     --val-where "split='val' AND vehicle_light_label='red_ambulance'" \
+    --epochs 10 --batch-size 4 --lr 0.002 --num-workers 4 \
+    --output-dir checkpoints/ambulance
+
+# If you ran Option B (Faster R-CNN → vehicle_label):
+python -m object_detection.train_detector \
+    --train-table bdd100k_ambulance \
+    --val-table bdd100k \
+    --train-where "split='train'" \
+    --val-where "split='val' AND vehicle_label='red_ambulance'" \
     --epochs 10 --batch-size 4 --lr 0.002 --num-workers 4 \
     --output-dir checkpoints/ambulance
 ```

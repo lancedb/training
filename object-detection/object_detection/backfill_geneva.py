@@ -101,11 +101,13 @@ def backfill(
     if overwrite:
         print("Mode: overwrite — resetting columns to NULL before backfill\n")
 
-    _ensure_columns(tbl, columns)
-
     if overwrite:
         for col in columns:
             _drop_column(tbl, col)
+        # Re-open to get a fresh schema after drops
+        tbl = conn.open_table(table_name)
+
+    _ensure_columns(tbl, columns)
 
     with conn.local_ray_context():
         for col in columns:
