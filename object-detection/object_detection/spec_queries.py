@@ -149,6 +149,9 @@ def spec_counts_summary(tbl) -> dict[str, int]:
     daytime_clear      :     3241 rows
     """
     defaults = {
+        "nighttime_person": {},
+        "rider":            {},
+        "nighttime_rider":  {},
         "red_ambulance":    {"bbox_pct": 5.0},
         "yellow_ambulance": {"bbox_pct": 5.0},
         "traffic_light":    {"min_confidence": 0.5},
