@@ -70,72 +70,66 @@ def _download(url: str, dest: Path) -> None:
 
 
 def _extract_zip(zip_path: Path, dest: Path) -> None:
-    """
-    Extract zip into dest, stripping any top-level 'bdd100k/' prefix.
-
-    The Berkeley zips may pack files as 'bdd100k/images/...' or 'images/...' depending
-    on how they were created. We normalise to the latter so the result is always at
-    dest/images/... and dest/labels/...
-    """
+    """Extract zip into dest, printing the top-level structure for debugging."""
+    print(f"  zip top-level entries: {sorted({n.split('/')[0] for n in zipfile.ZipFile(zip_path).namelist()})[:10]}")
     with zipfile.ZipFile(zip_path) as z:
-        names = z.namelist()
-        # Detect a common top-level prefix like "bdd100k/"
-        prefix = ""
-        first = names[0] if names else ""
-        if "/" in first:
-            candidate = first.split("/")[0] + "/"
-            if all(n.startswith(candidate) for n in names):
-                prefix = candidate
+        z.extractall(dest)
 
-        for member in z.infolist():
-            rel = member.filename[len(prefix):]  # strip prefix
-            if not rel:  # was the prefix directory itself
-                continue
-            out_path = dest / rel
-            if member.is_dir():
-                out_path.mkdir(parents=True, exist_ok=True)
-            else:
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                with z.open(member) as src, open(out_path, "wb") as dst:
-                    dst.write(src.read())
+
+def _find_dir_with_files(root: Path, glob: str) -> Path | None:
+    """Walk root and return the first directory containing files matching glob."""
+    for p in sorted(root.rglob("*")):
+        if p.is_dir() and any(p.glob(glob)):
+            return p
+    return None
 
 
 def _ensure_dataset(data_root: Path) -> tuple[Path, Path]:
     """
     Download and extract BDD100K images + detection labels if not already present.
 
-    Returns (image_root, annotation_root) pointing at the extracted directories.
+    Finds where the zip actually extracted (the structure varies) and returns
+    (image_root, annotation_root) pointing at the directories containing train/val splits.
     """
-    image_root = data_root / "images"
-    annotation_root = data_root / "labels"
-
-    need_images = not (image_root / "train").exists() or not any((image_root / "train").glob("*.jpg"))
-    need_labels = not (annotation_root / "train").exists() or not any((annotation_root / "train").glob("*.json"))
-
-    if not need_images and not need_labels:
-        print(f"Dataset already present at {data_root}")
-        return image_root, annotation_root
-
     zip_dir = data_root / "_zips"
     zip_dir.mkdir(parents=True, exist_ok=True)
 
-    if need_images:
+    # Download and extract images if train split is missing
+    image_root = _find_dir_with_files(data_root, "train/*.jpg")
+    if image_root is None:
         zip_path = zip_dir / "bdd100k_images_100k.zip"
         if not zip_path.exists():
             _download(_IMAGES_URL, zip_path)
         print(f"Extracting {zip_path.name} …")
         _extract_zip(zip_path, data_root)
         zip_path.unlink()
+        image_root = _find_dir_with_files(data_root, "train/*.jpg")
+        if image_root is None:
+            raise RuntimeError(f"Could not find images/train/*.jpg anywhere under {data_root}")
+    else:
+        print(f"Images already present at {image_root}")
 
-    if need_labels:
+    # Download and extract labels if train split is missing
+    annotation_root = _find_dir_with_files(data_root, "train/*.json")
+    if annotation_root is None:
         zip_path = zip_dir / "bdd100k_det_20_labels.zip"
         if not zip_path.exists():
             _download(_LABELS_URL, zip_path)
         print(f"Extracting {zip_path.name} …")
         _extract_zip(zip_path, data_root)
         zip_path.unlink()
+        annotation_root = _find_dir_with_files(data_root, "train/*.json")
+        if annotation_root is None:
+            raise RuntimeError(f"Could not find labels/train/*.json anywhere under {data_root}")
+    else:
+        print(f"Labels already present at {annotation_root}")
 
-    zip_dir.rmdir()  # remove if empty
+    try:
+        zip_dir.rmdir()
+    except OSError:
+        pass
+
+    print(f"image_root={image_root}  annotation_root={annotation_root}")
     return image_root, annotation_root
 
 # BDD100K ten-class detection taxonomy
