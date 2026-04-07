@@ -74,9 +74,25 @@ know or care when that view last changed.
 
 BDD100K requires a free account — there is no unauthenticated bulk download.
 
+**Option A — Kaggle (automated, ~30 GB download):**
+
+```bash
+pip install kaggle
+# Put your kaggle.json API token at ~/.kaggle/kaggle.json  (download from kaggle.com → Settings → API)
+
+mkdir -p data/bdd100k
+cd data/bdd100k
+kaggle datasets download -d bdd-iva/bdd100k --unzip
+cd ../..
+```
+
+**Option B — Berkeley portal (manual):**
+
 1. Register at https://bdd-data.berkeley.edu/portal.html
 2. Download **BDD100K Images** (train + val) and **BDD100K Labels — Detection 2020**
-3. Extract so the layout looks like this:
+3. Extract the archives
+
+Either way, the final layout must look like this:
 
 ```
 object-detection/data/bdd100k/
