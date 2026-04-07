@@ -43,10 +43,14 @@ import geneva
 PARENT_TABLE = "bdd100k"
 
 # Built-in curated views — annotation-based filters, no GPU backfill required.
+# Each view is split into _train and _val to match BDD100K's native split column.
 BUILTIN_VIEWS: dict[str, str] = {
-    "bdd100k_nighttime_person": "timeofday = 'night' AND has_person = true",
-    "bdd100k_rider":            "has_rider = true",
-    "bdd100k_nighttime_rider":  "timeofday = 'night' AND has_rider = true",
+    "bdd100k_nighttime_person_train": "timeofday = 'night' AND has_person = true AND split = 'train'",
+    "bdd100k_nighttime_person_val":   "timeofday = 'night' AND has_person = true AND split = 'val'",
+    "bdd100k_rider_train":            "has_rider = true AND split = 'train'",
+    "bdd100k_rider_val":              "has_rider = true AND split = 'val'",
+    "bdd100k_nighttime_rider_train":  "timeofday = 'night' AND has_rider = true AND split = 'train'",
+    "bdd100k_nighttime_rider_val":    "timeofday = 'night' AND has_rider = true AND split = 'val'",
 }
 
 

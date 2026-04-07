@@ -1,49 +1,32 @@
 """
-PyTorch dataloader for BDD100K object detection using LanceDB materialized views.
+PyTorch dataloader for BDD100K object detection using LanceDB Permutation API.
 
-Each training table is a small Geneva materialized view (~700–1200 rows).
-The dataset fetches all matching rows as an Arrow table once per DataLoader
-worker (lazy load on first access), then serves items by index.  Calling
-to_arrow() on a few hundred rows is fine — the concern is never doing it on
-the full 25k-row parent table.
-
-Torchvision detection API expects each sample to be a tuple of:
-  (image_tensor, target_dict)
-where target_dict has keys: boxes (FloatTensor[N,4]), labels (Int64Tensor[N]).
+Follows the pattern from examples/ViT/mfu_bench_fp16/dataloaders.py:
+  - Dataset stores connection params; each worker reopens its own Permutation
+  - __getitems__ returns a pa.RecordBatch (with_format="arrow")
+  - collate_fn decodes the whole batch at once
 
 Usage
 -----
 from object_detection.dataloader import make_detection_loader
 
-train_loader = make_detection_loader(
-    uri="data/bdd100k/lancedb",
-    table_name="bdd100k_rider",   # Geneva materialized view
-    where="split='train'",
-    batch_size=4,
-    num_workers=2,
-)
-
-for images, targets in train_loader:
-    # images : list[Tensor[3, H, W]]
-    # targets: list[{boxes: Tensor[N,4], labels: Tensor[N]}]
-    ...
+# Pass the right table for each split — views are already filtered
+train_loader = make_detection_loader("data/bdd100k/lancedb", "bdd100k_nighttime_person_train", batch_size=32, num_workers=8, shuffle=True)
+val_loader   = make_detection_loader("data/bdd100k/lancedb", "bdd100k_nighttime_person_val",   batch_size=32, num_workers=8)
 """
 
 from __future__ import annotations
 
-import io
-
 import lancedb
 import pyarrow as pa
 import torch
-from PIL import Image
-from torchvision import transforms
+import torchvision.io as tio
+from lancedb.permutation import Permutation
 
-_to_tensor = transforms.ToTensor()
 
 # BDD100K → COCO class ID mapping.
 # Torchvision Faster R-CNN is pretrained on 91-class COCO; we must use the
-# same IDs so baseline evaluation and fine-tuned evaluation are comparable.
+# same IDs so baseline and fine-tuned evaluation are comparable.
 # BDD categories not present in COCO (rider, traffic sign) are dropped.
 BDD_LABEL_MAP: dict[str, int] = {
     "person":        1,   # COCO: person
@@ -56,38 +39,33 @@ BDD_LABEL_MAP: dict[str, int] = {
     "traffic light": 10,  # COCO: traffic light
 }
 
+_DETECTION_COLS = ["image_bytes", "ann_categories", "ann_bboxes"]
+
 
 def _decode_image(raw: bytes) -> torch.Tensor:
-    img = Image.open(io.BytesIO(raw)).convert("RGB")
-    return _to_tensor(img)
+    buf = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
+    return tio.decode_image(buf, tio.ImageReadMode.RGB).float().div(255.0)
 
 
-def _decode_target(categories: list[str], bboxes: list[list[float]]) -> dict[str, torch.Tensor]:
-    """Convert annotation lists from Lance into a torchvision-compatible target dict.
-
-    FasterRCNN requires label ids >= 1 (0 is background).  Categories not in
-    BDD_LABEL_MAP are dropped rather than mapped to 0, which would corrupt the
-    classification loss.
-    """
+def _decode_target(categories: list, bboxes: list) -> dict:
     valid_boxes, valid_labels = [], []
     for cat, box in zip(categories, bboxes):
         lid = BDD_LABEL_MAP.get(cat)
         if lid is None:
             continue
         x1, y1, x2, y2 = box
-        if x2 <= x1 or y2 <= y1:   # skip degenerate boxes
+        if x2 <= x1 or y2 <= y1:
             continue
         valid_boxes.append(box)
         valid_labels.append(lid)
 
     if not valid_labels:
         return {
-            "boxes": torch.zeros((0, 4), dtype=torch.float32),
-            "labels": torch.zeros((0,), dtype=torch.int64),
+            "boxes":  torch.zeros((0, 4), dtype=torch.float32),
+            "labels": torch.zeros((0,),   dtype=torch.int64),
         }
-
     return {
-        "boxes": torch.tensor(valid_boxes, dtype=torch.float32),
+        "boxes":  torch.tensor(valid_boxes, dtype=torch.float32),
         "labels": torch.tensor(valid_labels, dtype=torch.int64),
     }
 
@@ -96,87 +74,63 @@ def _decode_target(categories: list[str], bboxes: list[list[float]]) -> dict[str
 # Dataset
 # ---------------------------------------------------------------------------
 
-class LanceArrowDetectionDataset(torch.utils.data.Dataset):
+class LanceDetectionDataset(torch.utils.data.Dataset):
     """
-    PyTorch Dataset backed by a LanceDB table (or Geneva materialized view).
+    Detection dataset backed by a LanceDB table via the Permutation API.
 
-    On first access, fetches all matching rows as an Arrow table and caches
-    them in memory.  This is intentionally simple: our training tables are
-    Geneva materialized views with a few hundred to ~1200 rows, so caching
-    fits comfortably in RAM.  Do not point this at the full 25k-row parent
-    table without a WHERE filter.
-
-    Parameters
-    ----------
-    uri        : LanceDB database directory
-    table_name : Lance table name (typically a Geneva materialized view)
-    where      : optional SQL filter, e.g. "split = 'train'"
+    Stores only connection params — each DataLoader worker reopens its own
+    Permutation handle lazily, exactly like the ViT benchmark example.
     """
 
-    def __init__(self, uri: str, table_name: str, where: str | None = None):
-        self.uri = uri
+    def __init__(self, uri: str, table_name: str):
+        self.uri        = uri
         self.table_name = table_name
-        self.where = where
-        self._data: pa.Table | None = None  # loaded lazily on first access
+        self._perm      = None
 
         db = lancedb.connect(uri)
-        tbl = db.open_table(table_name)
-        self.length = tbl.count_rows(filter=where) if where else tbl.count_rows()
-
-    def _load(self) -> None:
-        """Fetch all matching rows from LanceDB into an Arrow table."""
-        db = lancedb.connect(self.uri)
-        tbl = db.open_table(self.table_name)
-        q = tbl.search().select(["image_bytes", "ann_categories", "ann_bboxes"])
-        if self.where:
-            q = q.where(self.where)
-        self._data = q.limit(self.length).to_arrow()
+        self.length = len(db.open_table(table_name))
 
     def __len__(self) -> int:
         return self.length
 
     def __getstate__(self) -> dict:
-        # Drop the cached Arrow table when pickling across DataLoader workers.
-        # Each worker reloads on its first access — Arrow tables are not
-        # shareable across forked processes.
+        # Permutation holds Rust async state — zero it so each worker reopens its own
         state = self.__dict__.copy()
-        state["_data"] = None
+        state["_perm"] = None
         return state
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, dict]:
-        if self._data is None:
-            self._load()
-        row = self._data.slice(idx, 1)
-        return _parse_batch(row)[0]
+    def _ensure_open(self) -> None:
+        if self._perm is None:
+            db = lancedb.connect(self.uri)
+            self._perm = (
+                Permutation.identity(db.open_table(self.table_name))
+                .select_columns(_DETECTION_COLS)
+                .with_format("arrow")
+            )
 
-    def __getitems__(self, indices: list[int]) -> list[tuple[torch.Tensor, dict]]:
-        if self._data is None:
-            self._load()
-        batch = self._data.take(pa.array(indices, type=pa.int64()))
-        return _parse_batch(batch)
+    def __getitem__(self, idx: int):
+        self._ensure_open()
+        return self._perm[idx]
+
+    def __getitems__(self, indices: list[int]):
+        # Returns a pa.RecordBatch — collate_fn processes the whole batch at once
+        self._ensure_open()
+        return self._perm.__getitems__(indices)
 
 
-def _parse_batch(batch: pa.Table) -> list[tuple[torch.Tensor, dict]]:
-    results = []
+# ---------------------------------------------------------------------------
+# Collate — receives pa.RecordBatch from __getitems__
+# ---------------------------------------------------------------------------
+
+def _detection_collate(batch: pa.RecordBatch):
+    images, targets = [], []
     for raw, cats, bboxes in zip(
         batch.column("image_bytes").to_pylist(),
         batch.column("ann_categories").to_pylist(),
         batch.column("ann_bboxes").to_pylist(),
     ):
-        results.append((_decode_image(raw), _decode_target(cats or [], bboxes or [])))
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Collate — detection models receive a list of variable-size tensors
-# ---------------------------------------------------------------------------
-
-def _detection_collate(
-    batch: list[tuple[torch.Tensor, dict]],
-) -> tuple[list[torch.Tensor], list[dict]]:
-    """Standard torchvision detection collate: keep as lists (variable image size)."""
-    images = [item[0] for item in batch]
-    targets = [item[1] for item in batch]
+        images.append(_decode_image(raw))
+        targets.append(_decode_target(cats or [], bboxes or []))
     return images, targets
 
 
@@ -187,26 +141,18 @@ def _detection_collate(
 def make_detection_loader(
     uri: str,
     table_name: str,
-    where: str | None = None,
     batch_size: int = 4,
     num_workers: int = 0,
     shuffle: bool = False,
     seed: int = 42,
 ) -> torch.utils.data.DataLoader:
     """
-    Return a DataLoader backed by a LanceDB table or Geneva materialized view.
+    Return a DataLoader backed by a LanceDB table via the Permutation API.
 
-    Parameters
-    ----------
-    uri        : LanceDB database directory
-    table_name : Lance table name (typically a Geneva materialized view)
-    where      : SQL filter, e.g. "split='train'"
-    batch_size : samples per batch
-    num_workers: DataLoader worker processes (0 = main process only)
-    shuffle    : shuffle sample order each epoch
-    seed       : random seed for shuffle
+    Pass the correct table for each split — Geneva materialized views are
+    already split into train/val, so no filtering is needed here.
     """
-    dataset = LanceArrowDetectionDataset(uri=uri, table_name=table_name, where=where)
+    dataset = LanceDetectionDataset(uri=uri, table_name=table_name)
 
     sampler = None
     if shuffle:
@@ -218,7 +164,7 @@ def make_detection_loader(
         dataset,
         batch_size=batch_size,
         sampler=sampler,
-        shuffle=False,          # handled by sampler above
+        shuffle=False,
         num_workers=num_workers,
         collate_fn=_detection_collate,
         pin_memory=torch.cuda.is_available(),

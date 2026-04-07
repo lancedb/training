@@ -123,22 +123,19 @@ def run(args) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # Log the exact table version used — full provenance for checkpoint reproducibility
     db = lancedb.connect(args.db)
-    source_table = args.train_table if args.mode == "finetune" else args.val_table
-    tbl = db.open_table(source_table)
+    tbl = db.open_table(args.train_table)
     print(f"Table '{tbl.name}'  version={tbl.version}  rows={len(tbl)}")
 
-    # --- validation loader (always needed) ---
-    val_loader = make_detection_loader(
-        uri=args.db,
-        table_name=args.val_table,
-        where=args.val_where,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
+    train_loader = make_detection_loader(
+        uri=args.db, table_name=args.train_table,
+        batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True,
     )
-    val_desc = f"'{args.val_table}'" + (f" WHERE {args.val_where}" if args.val_where else "")
-    print(f"Val loader: {len(val_loader.dataset)} samples from {val_desc}")
+    val_loader = make_detection_loader(
+        uri=args.db, table_name=args.val_table,
+        batch_size=args.batch_size, num_workers=args.num_workers,
+    )
+    print(f"Train: {len(train_loader.dataset)} rows  Val: {len(val_loader.dataset)} rows")
 
     # Baseline uses the intact COCO head (replace_head=False) so pretrained
     # weights are not destroyed.  Fine-tune swaps in a fresh head afterwards.
@@ -159,16 +156,6 @@ def run(args) -> None:
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, NUM_CLASSES).to(device)
 
     # --- fine-tune ---
-    train_loader = make_detection_loader(
-        uri=args.db,
-        table_name=args.train_table,
-        where=args.train_where,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        shuffle=True,
-    )
-    train_desc = f"'{args.train_table}'" + (f" WHERE {args.train_where}" if args.train_where else "")
-    print(f"\nTrain loader: {len(train_loader.dataset)} samples from {train_desc}")
 
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.SGD(params, lr=args.lr, momentum=0.9, weight_decay=1e-4)
@@ -205,12 +192,8 @@ def _parse_args(argv=None):
     p = argparse.ArgumentParser(description="Train/evaluate Faster R-CNN on LanceDB BDD100K.")
     p.add_argument("--mode", choices=["baseline", "finetune"], default="finetune")
     p.add_argument("--db", default="data/bdd100k/lancedb")
-    p.add_argument("--train-table", default="bdd100k")
-    p.add_argument("--val-table", default="bdd100k")
-    p.add_argument("--train-where", default=None,
-                   help="SQL filter on the training table, e.g. \"split='train' AND vehicle_label='red_ambulance'\"")
-    p.add_argument("--val-where", default=None,
-                   help="SQL filter on the validation table, e.g. \"split='val'\"")
+    p.add_argument("--train-table", default="bdd100k_nighttime_person")
+    p.add_argument("--val-table",   default="bdd100k_nighttime_person_val")
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--lr", type=float, default=0.005)
