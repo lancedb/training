@@ -70,14 +70,25 @@ know or care when that view last changed.
 
 ## Prerequisites
 
-**Dataset**: Download BDD100K Detection 2020 from https://bdd-data.berkeley.edu/portal.html.
-You need:
-- `bdd100k/images/100k/train/` and `bdd100k/images/100k/val/` — JPEG frames
-- `bdd100k/labels/det_20/train/` and `bdd100k/labels/det_20/val/` — per-frame JSON annotations
+### 1. Download BDD100K
 
-Place them under `object-detection/data/bdd100k/`.
+BDD100K requires a free account — there is no unauthenticated bulk download.
 
-**Python environment**: Requires `lancedb`, `geneva`, `torch`, `torchvision`, `pyarrow`.
+1. Register at https://bdd-data.berkeley.edu/portal.html
+2. Download **BDD100K Images** (train + val) and **BDD100K Labels — Detection 2020**
+3. Extract so the layout looks like this:
+
+```
+object-detection/data/bdd100k/
+├── images/
+│   ├── train/    ← 70 000 JPEGs
+│   └── val/      ← 10 000 JPEGs
+└── labels/
+    ├── train/    ← one JSON per image
+    └── val/
+```
+
+### 2. Python environment
 
 ```bash
 cd object-detection/
@@ -86,7 +97,8 @@ source .venv/bin/activate
 uv pip install lancedb geneva torch torchvision pyarrow pillow
 ```
 
-**Geneva local setup** (macOS):
+### 3. Geneva local setup (macOS only)
+
 ```bash
 export GENEVA_PIPELINE_STALL_TIMEOUT_S=7200  # prevents timeout on slow CPU runs
 sudo chmod a+rw /tmp/.geneva_zip_setup        # fixes permission error on first run
@@ -108,18 +120,27 @@ export GENEVA_PIPELINE_STALL_TIMEOUT_S=7200
 ### Step 1 — Ingest
 
 ```bash
-# Smoke test — no download needed:
-python -m object_detection.ingest_bdd \
-    --synthetic 1000 \
-    --output $DB --table-name $TABLE --overwrite
-
-# Real BDD100K (25k frames used in these experiments):
+# Full dataset (GPU training — ingests all ~80k frames):
 python -m object_detection.ingest_bdd \
     --splits train val \
     --image-root data/bdd100k/images \
     --annotation-root data/bdd100k/labels \
     --output $DB --table-name $TABLE --overwrite
+
+# Subset for local dev (--limit caps frames per split):
+python -m object_detection.ingest_bdd \
+    --splits train val \
+    --image-root data/bdd100k/images \
+    --annotation-root data/bdd100k/labels \
+    --limit 5000 \
+    --output $DB --table-name $TABLE --overwrite
 ```
+
+> **No dataset yet?** Use `--synthetic N` to generate fake frames and verify the
+> full pipeline works before downloading BDD100K:
+> ```bash
+> python -m object_detection.ingest_bdd --synthetic 500 --output $DB --table-name $TABLE --overwrite
+> ```
 
 > **Important**: the table is created with `new_table_enable_stable_row_ids=true`.
 > This is required for Geneva materialized view refresh to work across table versions
@@ -342,6 +363,8 @@ GPU command (`--lr 0.001`, lower because the slice is small).
 ## Reproducing the CPU baseline results
 
 Environment used: macOS, Apple Silicon, no GPU, Python 3.13 (uv venv).
+These experiments used a **15k train + 10.2k val subset** (`--limit 15000` / `--limit 10200`)
+to keep CPU runtimes manageable. GPU runs should use the full dataset (no `--limit`).
 
 ```bash
 cd object-detection/
@@ -349,11 +372,12 @@ export DB=data/bdd100k/lancedb
 export TABLE=bdd100k
 export GENEVA_PIPELINE_STALL_TIMEOUT_S=7200
 
-# 1. Ingest 25k frames (15k train + 10.2k val)
+# 1. Ingest subset (15k train + 10.2k val — use --limit to cap per split)
 python -m object_detection.ingest_bdd \
     --splits train val \
     --image-root data/bdd100k/images \
     --annotation-root data/bdd100k/labels \
+    --limit 15000 \
     --output $DB --table-name $TABLE --overwrite
 
 # 2. Backfill annotation-presence flags (fast — no image decoding)
