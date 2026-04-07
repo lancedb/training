@@ -213,6 +213,7 @@ def make_detection_loader(
         num_workers=num_workers,
         collate_fn=_detection_collate,
         pin_memory=torch.cuda.is_available(),
+        prefetch_factor=4 if num_workers > 0 else None,
         persistent_workers=(num_workers > 0),
         multiprocessing_context="spawn" if num_workers > 0 else None,
     )

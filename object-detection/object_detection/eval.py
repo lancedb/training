@@ -158,8 +158,8 @@ def evaluate(
         predictions = model(images_dev)
 
         for pred, tgt in zip(predictions, targets):
-            gt_boxes = tgt["boxes"]
-            gt_labels = tgt["labels"]
+            gt_boxes = tgt["boxes"].to(device)
+            gt_labels = tgt["labels"].to(device)
 
             # Filter predictions by score threshold
             keep = pred["scores"] >= score_thresh
