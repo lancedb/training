@@ -54,7 +54,7 @@ from object_detection.schema import BDD_SCHEMA
 # ---------------------------------------------------------------------------
 
 _IMAGES_URL = "http://128.32.162.150/bdd100k/bdd100k_images_100k.zip"
-_LABELS_URL = "http://128.32.162.150/bdd100k/bdd100k_det_20_labels.zip"
+_LABELS_URL = "http://128.32.162.150/bdd100k/bdd100k_labels.zip"
 
 
 def _download(url: str, dest: Path) -> None:
