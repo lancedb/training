@@ -154,9 +154,9 @@ def run(args) -> None:
     if args.mode == "baseline":
         return
 
-    # Replace head for fine-tuning on BDD class IDs
+    # Replace head for fine-tuning on BDD class IDs, keep on same device
     in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, NUM_CLASSES)
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, NUM_CLASSES).to(device)
 
     # --- fine-tune ---
     train_loader = make_detection_loader(
