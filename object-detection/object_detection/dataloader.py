@@ -41,10 +41,19 @@ from torchvision import transforms
 
 _to_tensor = transforms.ToTensor()
 
-# BDD100K 10-class label map (index 0 = background, matching torchvision convention)
+# BDD100K → COCO class ID mapping.
+# Torchvision Faster R-CNN is pretrained on 91-class COCO; we must use the
+# same IDs so baseline evaluation and fine-tuned evaluation are comparable.
+# BDD categories not present in COCO (rider, traffic sign) are dropped.
 BDD_LABEL_MAP: dict[str, int] = {
-    "car": 1, "truck": 2, "bus": 3, "person": 4, "rider": 5,
-    "bicycle": 6, "motorcycle": 7, "traffic light": 8, "traffic sign": 9, "train": 10,
+    "person":        1,   # COCO: person
+    "bicycle":       2,   # COCO: bicycle
+    "car":           3,   # COCO: car
+    "motorcycle":    4,   # COCO: motorcycle
+    "bus":           6,   # COCO: bus
+    "train":         7,   # COCO: train
+    "truck":         8,   # COCO: truck
+    "traffic light": 10,  # COCO: traffic light
 }
 
 

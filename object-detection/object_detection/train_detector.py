@@ -60,13 +60,21 @@ from object_detection.schema import NUM_CLASSES
 # Model helpers
 # ---------------------------------------------------------------------------
 
-def build_model(num_classes: int, pretrained: bool = True) -> torch.nn.Module:
-    """Return Faster R-CNN with a freshly initialised classification head."""
+def build_model(num_classes: int, pretrained: bool = True, replace_head: bool = True) -> torch.nn.Module:
+    """
+    Return Faster R-CNN ResNet50 FPN v2.
+
+    pretrained=True  loads COCO weights.
+    replace_head=True  swaps the 91-class COCO head for a fresh num_classes head
+                       (required for fine-tuning on a custom class set).
+    replace_head=False keeps the original COCO head intact — use this for
+                       baseline evaluation so pretrained weights are not destroyed.
+    """
     weights = FasterRCNN_ResNet50_FPN_V2_Weights.COCO_V1 if pretrained else None
     model = fasterrcnn_resnet50_fpn_v2(weights=weights)
-    # Replace the box predictor head to match our class count
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+    if replace_head:
+        in_features = model.roi_heads.box_predictor.cls_score.in_features
+        model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
     return model
 
 
@@ -132,7 +140,9 @@ def run(args) -> None:
     val_desc = f"'{args.val_table}'" + (f" WHERE {args.val_where}" if args.val_where else "")
     print(f"Val loader: {len(val_loader.dataset)} samples from {val_desc}")
 
-    model = build_model(NUM_CLASSES, pretrained=True).to(device)
+    # Baseline uses the intact COCO head (replace_head=False) so pretrained
+    # weights are not destroyed.  Fine-tune swaps in a fresh head afterwards.
+    model = build_model(NUM_CLASSES, pretrained=True, replace_head=False).to(device)
 
     # --- baseline: just evaluate the COCO pretrained checkpoint ---
     print("\n=== Baseline (pretrained COCO checkpoint) ===")
@@ -143,6 +153,10 @@ def run(args) -> None:
 
     if args.mode == "baseline":
         return
+
+    # Replace head for fine-tuning on BDD class IDs
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, NUM_CLASSES)
 
     # --- fine-tune ---
     train_loader = make_detection_loader(
