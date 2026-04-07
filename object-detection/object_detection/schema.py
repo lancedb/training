@@ -56,13 +56,10 @@ BDD_SCHEMA = pa.schema(
 NUM_CLASSES = 11
 
 GENEVA_UDF_COLUMNS = [
-    # lightweight detector (SSDLite)
-    pa.field("vehicle_light_label", pa.string()),
-    pa.field("vehicle_light_confidence", pa.float32()),
-    pa.field("vehicle_light_bbox_area_pct", pa.float32()),
-
-    # heavy detector (Faster R-CNN) — used for ambulance narrative
-    pa.field("vehicle_label", pa.string()),
+    # vehicle detector (SSDLite CPU or Faster R-CNN GPU — same column names)
+    pa.field("vehicle_label",         pa.string()),
+    pa.field("vehicle_confidence",    pa.float32()),
+    pa.field("vehicle_bbox_area_pct", pa.float32()),
 
     # white balance
     pa.field("white_balance", pa.float32()),

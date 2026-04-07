@@ -35,7 +35,7 @@ without manual curation work?
                          └──────────┬────────────┘
                                     │  backfill_geneva.py
                                     │  Geneva UDFs: has_person,
-                                    │  has_rider, vehicle_light_*
+                                    │  has_rider, vehicle_*
                                     ▼
                          ┌───────────────────────┐
                          │  bdd100k + UDF columns │
@@ -136,25 +136,25 @@ There are two tiers of backfill depending on which training narrative you want t
 python -m object_detection.backfill_geneva --columns has_person has_rider
 ```
 
-**Tier 2 — Model-inference-based** (needed for the ambulance narrative). Pick one:
+**Tier 2 — Model-inference-based** (needed for the ambulance narrative):
 
 ```bash
-# Option A — SSDLite (CPU-friendly, runs without a GPU):
+# CPU (SSDLite — no GPU required, good for local dev):
 python -m object_detection.backfill_geneva \
-    --columns vehicle_light_label vehicle_light_confidence vehicle_light_bbox_area_pct
+    --columns vehicle_label vehicle_confidence vehicle_bbox_area_pct
 
-# Option B — Faster R-CNN (GPU recommended, more accurate):
-python -m object_detection.backfill_geneva --columns vehicle_label
+# GPU (Faster R-CNN — more accurate, recommended for final backfill):
+python -m object_detection.backfill_geneva --gpu \
+    --columns vehicle_label vehicle_confidence vehicle_bbox_area_pct
 ```
 
-Option A populates `vehicle_light_label`; Option B populates `vehicle_label`. The ambulance
-view in Step 4 uses whichever you ran — they produce the same enriched labels (`red_ambulance`,
-`yellow_ambulance`, etc.) from different models.
+Both variants write to the same `vehicle_label`, `vehicle_confidence`, and
+`vehicle_bbox_area_pct` columns.  The only difference is which model runs under the hood.
 
 To restart a stuck backfill job, add `--overwrite` — it drops and re-adds the column from scratch:
 
 ```bash
-python -m object_detection.backfill_geneva --columns vehicle_light_label --overwrite
+python -m object_detection.backfill_geneva --columns vehicle_label --overwrite
 ```
 
 Backfill is incremental — re-running without `--overwrite` only processes newly added rows.
@@ -172,15 +172,10 @@ python -m object_detection.spec_queries
 # Built-in views (pedestrian + rider narrative, needs Tier 1 backfill):
 python -m object_detection.manage_views --action curate
 
-# Ambulance view — use the column matching whichever Tier 2 option you ran:
-# Option A (SSDLite):
+# Ambulance view — same command regardless of CPU or GPU backfill:
 python -m object_detection.manage_views --action add \
     --name bdd100k_ambulance \
-    --filter "vehicle_light_label = 'red_ambulance'"
-# Option B (Faster R-CNN):
-python -m object_detection.manage_views --action add \
-    --name bdd100k_ambulance \
-    --filter "vehicle_label = 'red_ambulance'"
+    --filter "vehicle_label = 'red_ambulance' AND vehicle_bbox_area_pct > 5.0"
 ```
 
 `--action curate` creates:
@@ -192,7 +187,7 @@ python -m object_detection.manage_views --action add \
 | `bdd100k_nighttime_rider` | `timeofday='night' AND has_rider=true` |
 
 `--action add` works for any SQL filter over any backfilled column — the ambulance example
-above uses `vehicle_light_label`, but you could equally filter on `scene`, `weather`,
+above uses `vehicle_label`, but you could equally filter on `scene`, `weather`,
 `timeofday`, or any combination.
 
 ### Step 5 — Train
@@ -239,21 +234,11 @@ python -m object_detection.train_detector \
 **Narrative B — Ambulance** (requires Tier 2 backfill):
 
 ```bash
-# If you ran Option A (SSDLite → vehicle_light_label):
 python -m object_detection.train_detector \
     --train-table bdd100k_ambulance \
     --val-table bdd100k \
     --train-where "split='train'" \
-    --val-where "split='val' AND vehicle_light_label='red_ambulance'" \
-    --epochs 10 --batch-size 4 --lr 0.002 --num-workers 4 \
-    --output-dir checkpoints/ambulance
-
-# If you ran Option B (Faster R-CNN → vehicle_label):
-python -m object_detection.train_detector \
-    --train-table bdd100k_ambulance \
-    --val-table bdd100k \
-    --train-where "split='train'" \
-    --val-where "split='val' AND vehicle_label='red_ambulance'" \
+    --val-where "split='val' AND vehicle_label='red_ambulance' AND vehicle_bbox_area_pct > 5.0" \
     --epochs 10 --batch-size 4 --lr 0.002 --num-workers 4 \
     --output-dir checkpoints/ambulance
 ```
@@ -331,7 +316,7 @@ then fine-tunes, and prints a side-by-side delta. No separate baseline run neede
 
 ### Narrative B — Ambulance *(GPU required, results pending)*
 
-Requires Tier 2 backfill (`vehicle_light_label`). Results pending after GPU run.
+Requires Tier 2 backfill (`vehicle_label`). Results pending after GPU run.
 
 ---
 
@@ -417,9 +402,8 @@ db.create_table(name, data=reader, schema=schema)
 
 **Incremental Geneva backfill** — only processes NULL rows, safe to re-run:
 ```bash
-python -m object_detection.backfill_geneva --db $DB --table $TABLE \
-    --columns has_person has_rider vehicle_light_label \
-    --min-checkpoint-size $TOTAL_ROWS --max-checkpoint-size $TOTAL_ROWS
+python -m object_detection.backfill_geneva --db data/bdd100k/lancedb \
+    --columns has_person has_rider vehicle_label vehicle_confidence vehicle_bbox_area_pct
 ```
 
 **Materialized view refresh** — one call, all views stay current:

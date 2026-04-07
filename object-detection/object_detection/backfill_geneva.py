@@ -39,7 +39,7 @@ import lancedb
 
 import geneva
 from object_detection.schema import GENEVA_UDF_COLUMNS
-from object_detection.geneva_udfs import ALL_UDFS, LIGHT_UDFS
+from object_detection.geneva_udfs import ALL_UDFS, CPU_VEHICLE_UDFS, GPU_VEHICLE_UDFS, METADATA_UDFS
 
 # Default LanceDB path and table name (override via CLI)
 DEFAULT_DB = "data/bdd100k/lancedb"
@@ -92,7 +92,11 @@ def backfill(
     min_checkpoint_size: int,
     max_checkpoint_size: int,
     overwrite: bool = False,
+    gpu: bool = False,
 ) -> None:
+    # Merge the right vehicle-detector variant into the lookup table.
+    udf_registry = {**ALL_UDFS, **(GPU_VEHICLE_UDFS if gpu else CPU_VEHICLE_UDFS)}
+
     conn = geneva.connect(db_path)
     tbl = conn.open_table(table_name)
 
@@ -111,7 +115,7 @@ def backfill(
 
     with conn.local_ray_context():
         for col in columns:
-            udf_fn = ALL_UDFS.get(col)
+            udf_fn = udf_registry.get(col)
             if udf_fn is None:
                 print(f"  [SKIP] No UDF registered for column '{col}'")
                 continue
@@ -130,7 +134,7 @@ def backfill(
 
 
 def _parse_args(argv=None):
-    default_light = list(LIGHT_UDFS.keys())
+    default_cols = list({**CPU_VEHICLE_UDFS, **METADATA_UDFS}.keys())
 
     p = argparse.ArgumentParser(
         description="Run Geneva UDF backfills on the BDD100K Lance table."
@@ -138,15 +142,22 @@ def _parse_args(argv=None):
     p.add_argument("--db", default=DEFAULT_DB, help="LanceDB database path")
     p.add_argument("--table", default=DEFAULT_TABLE, help="Lance table name")
     p.add_argument(
-        "--columns", nargs="+", default=default_light,
+        "--columns", nargs="+", default=default_cols,
         help=(
-            "UDF columns to backfill.  Defaults to all lightweight columns: "
-            + ", ".join(default_light)
+            "UDF columns to backfill.  Defaults to all columns: "
+            + ", ".join(default_cols)
+        ),
+    )
+    p.add_argument(
+        "--gpu", action="store_true",
+        help=(
+            "Use Faster R-CNN (GPU) for vehicle_* columns instead of SSDLite (CPU). "
+            "Recommended on a GPU cluster for the final backfill."
         ),
     )
     p.add_argument(
         "--concurrency", type=int, default=4,
-        help="Parallel Ray actor processes (default: 4; each heavy UDF requests 0.25 GPU)",
+        help="Parallel Ray actor processes (default: 4)",
     )
     p.add_argument(
         "--min-checkpoint-size", type=int, default=10,
@@ -158,7 +169,7 @@ def _parse_args(argv=None):
     )
     p.add_argument(
         "--overwrite", action="store_true",
-        help="Reset columns to NULL before backfilling — use to restart a stuck job",
+        help="Drop and re-add columns before backfilling — use to restart a stuck job",
     )
     return p.parse_args(argv)
 
@@ -173,6 +184,7 @@ def main(argv=None):
         min_checkpoint_size=args.min_checkpoint_size,
         max_checkpoint_size=args.max_checkpoint_size,
         overwrite=args.overwrite,
+        gpu=args.gpu,
     )
 
 

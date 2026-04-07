@@ -110,8 +110,11 @@ def _top_detection(predictions, score_thresh: float = 0.3):
 
 
 # ---------------------------------------------------------------------------
-# Lightweight detector  (SSDLite320, CPU-friendly)
+# Vehicle detector — two implementations, same output column names.
+# backfill_geneva.py picks CPU or GPU variant via --gpu flag.
 # ---------------------------------------------------------------------------
+
+# CPU implementation: SSDLite320 (no GPU required)
 
 _ssd_model: Optional[torch.nn.Module] = None
 
@@ -123,50 +126,41 @@ def _get_ssd_model():
             ssdlite320_mobilenet_v3_large,
             SSDLite320_MobileNet_V3_Large_Weights,
         )
-        weights = SSDLite320_MobileNet_V3_Large_Weights.COCO_V1
-        _ssd_model = ssdlite320_mobilenet_v3_large(weights=weights)
-        _ssd_model.eval()
+        _ssd_model = ssdlite320_mobilenet_v3_large(
+            weights=SSDLite320_MobileNet_V3_Large_Weights.COCO_V1
+        ).eval()
     return _ssd_model
 
 
 def _run_ssd(image_bytes: bytes):
-    """Decode image, run SSDLite, return (img, label_idx, score, bbox)."""
     from torchvision.transforms.functional import to_tensor
     img = _decode_image(image_bytes)
-    tensor = to_tensor(img).unsqueeze(0)
     with torch.no_grad():
-        preds = _get_ssd_model()(tensor)[0]
-    label_idx, score, bbox = _top_detection(preds)
-    return img, label_idx, score, bbox
+        preds = _get_ssd_model()(to_tensor(img).unsqueeze(0))[0]
+    return img, *_top_detection(preds)
 
 
 @udf(data_type=pa.string(), input_columns=["image_bytes"], batch_size=32)
-def vehicle_light_label(image_bytes: bytes) -> str:
-    """Enriched label from the lightweight SSDLite detector."""
+def _vehicle_label_cpu(image_bytes: bytes) -> str:
     img, label_idx, _, bbox = _run_ssd(image_bytes)
     if label_idx is None:
         return "no_detection"
-    h, s, v = _dominant_hsv(img, bbox)
-    return _enrich_label(label_idx, h, s, v)
+    return _enrich_label(label_idx, *_dominant_hsv(img, bbox))
 
 
 @udf(data_type=pa.float32(), input_columns=["image_bytes"], batch_size=32)
-def vehicle_light_confidence(image_bytes: bytes) -> float:
-    """Detection confidence from the lightweight SSDLite detector."""
+def _vehicle_confidence_cpu(image_bytes: bytes) -> float:
     _, _, score, _ = _run_ssd(image_bytes)
     return score
 
 
 @udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"], batch_size=32)
-def vehicle_light_bbox_area_pct(image_bytes: bytes, width: int, height: int) -> float:
-    """Bounding-box area of the top SSDLite detection as a % of frame area."""
+def _vehicle_bbox_area_pct_cpu(image_bytes: bytes, width: int, height: int) -> float:
     _, _, _, bbox = _run_ssd(image_bytes)
     return _bbox_area_pct(bbox, width, height)
 
 
-# ---------------------------------------------------------------------------
-# Heavy detector  (Faster R-CNN ResNet50 FPN v2, GPU recommended)
-# ---------------------------------------------------------------------------
+# GPU implementation: Faster R-CNN ResNet50 FPN v2
 
 _frcnn_model: Optional[torch.nn.Module] = None
 
@@ -178,39 +172,43 @@ def _get_frcnn_model():
             fasterrcnn_resnet50_fpn_v2,
             FasterRCNN_ResNet50_FPN_V2_Weights,
         )
-        weights = FasterRCNN_ResNet50_FPN_V2_Weights.COCO_V1
-        _frcnn_model = fasterrcnn_resnet50_fpn_v2(weights=weights)
-        _frcnn_model.eval()
+        _frcnn_model = fasterrcnn_resnet50_fpn_v2(
+            weights=FasterRCNN_ResNet50_FPN_V2_Weights.COCO_V1
+        ).eval()
         if torch.cuda.is_available():
             _frcnn_model = _frcnn_model.cuda()
     return _frcnn_model
 
 
 def _run_frcnn(image_bytes: bytes):
-    img = _decode_image(image_bytes)
-    model = _get_frcnn_model()
     from torchvision.transforms.functional import to_tensor
+    img = _decode_image(image_bytes)
     tensor = to_tensor(img)
     if torch.cuda.is_available():
         tensor = tensor.cuda()
     with torch.no_grad():
-        preds = model([tensor])[0]
-    label_idx, score, bbox = _top_detection(preds)
-    return img, label_idx, score, bbox
+        preds = _get_frcnn_model()([tensor])[0]
+    return img, *_top_detection(preds)
 
 
 @udf(data_type=pa.string(), input_columns=["image_bytes"], num_gpus=0.25, batch_size=32)
-def vehicle_label(image_bytes: bytes) -> str:
-    """Enriched label from the heavy Faster R-CNN detector (GPU recommended).
-
-    Used to filter the ambulance materialized view:
-      vehicle_label = 'red_ambulance'
-    """
+def _vehicle_label_gpu(image_bytes: bytes) -> str:
     img, label_idx, _, bbox = _run_frcnn(image_bytes)
     if label_idx is None:
         return "no_detection"
-    h, s, v = _dominant_hsv(img, bbox)
-    return _enrich_label(label_idx, h, s, v)
+    return _enrich_label(label_idx, *_dominant_hsv(img, bbox))
+
+
+@udf(data_type=pa.float32(), input_columns=["image_bytes"], num_gpus=0.25, batch_size=32)
+def _vehicle_confidence_gpu(image_bytes: bytes) -> float:
+    _, _, score, _ = _run_frcnn(image_bytes)
+    return score
+
+
+@udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"], num_gpus=0.25, batch_size=32)
+def _vehicle_bbox_area_pct_gpu(image_bytes: bytes, width: int, height: int) -> float:
+    _, _, _, bbox = _run_frcnn(image_bytes)
+    return _bbox_area_pct(bbox, width, height)
 
 
 # ---------------------------------------------------------------------------
@@ -284,22 +282,33 @@ def scene_description(weather: str, scene: str, timeofday: str) -> str:
 # Registry  — used by backfill_geneva.py
 # ---------------------------------------------------------------------------
 
-#: Lightweight UDFs — SSDLite-based, use GPU when available, fall back to CPU.
-LIGHT_UDFS: dict[str, object] = {
-    "vehicle_light_label": vehicle_light_label,
-    "vehicle_light_confidence": vehicle_light_confidence,
-    "vehicle_light_bbox_area_pct": vehicle_light_bbox_area_pct,
-    "white_balance": white_balance,
+#: CPU vehicle UDFs — SSDLite320 + MobileNetV3 (no GPU required).
+CPU_VEHICLE_UDFS: dict[str, object] = {
+    "vehicle_label":         _vehicle_label_cpu,
+    "vehicle_confidence":    _vehicle_confidence_cpu,
+    "vehicle_bbox_area_pct": _vehicle_bbox_area_pct_cpu,
+}
+
+#: GPU vehicle UDFs — Faster R-CNN ResNet50 FPN v2 (GPU recommended).
+#: Same column names as CPU_VEHICLE_UDFS — pass --gpu to backfill_geneva.py
+#: to select this variant.
+GPU_VEHICLE_UDFS: dict[str, object] = {
+    "vehicle_label":         _vehicle_label_gpu,
+    "vehicle_confidence":    _vehicle_confidence_gpu,
+    "vehicle_bbox_area_pct": _vehicle_bbox_area_pct_gpu,
+}
+
+#: Non-vehicle UDFs — annotation-derived and image statistics, no detector.
+METADATA_UDFS: dict[str, object] = {
+    "white_balance":      white_balance,
     "scene_has_crossroad": scene_has_crossroad,
-    "scene_has_mountain": scene_has_mountain,
-    "scene_description": scene_description,
-    "has_person": has_person,
-    "has_rider":  has_rider,
+    "scene_has_mountain":  scene_has_mountain,
+    "scene_description":   scene_description,
+    "has_person":          has_person,
+    "has_rider":           has_rider,
 }
 
-#: Heavy UDFs that need a GPU for reasonable throughput.
-HEAVY_UDFS: dict[str, object] = {
-    "vehicle_label": vehicle_label,
-}
-
-ALL_UDFS: dict[str, object] = {**LIGHT_UDFS, **HEAVY_UDFS}
+#: All UDFs keyed by column name.  Vehicle columns resolve to the CPU variant
+#: by default; backfill_geneva.py --gpu swaps them to GPU_VEHICLE_UDFS before
+#: calling backfill().
+ALL_UDFS: dict[str, object] = {**CPU_VEHICLE_UDFS, **METADATA_UDFS}
