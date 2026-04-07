@@ -42,8 +42,8 @@ import geneva
 
 PARENT_TABLE = "bdd100k"
 
-# Built-in curated views — annotation-based filters, no GPU backfill required.
-# Each view is split into _train and _val to match BDD100K's native split column.
+# Tier 1 — annotation-based filters, no GPU backfill required.
+# Run: python -m object_detection.manage_views --action curate
 BUILTIN_VIEWS: dict[str, str] = {
     "bdd100k_nighttime_person_train": "timeofday = 'night' AND has_person = true AND split = 'train'",
     "bdd100k_nighttime_person_val":   "timeofday = 'night' AND has_person = true AND split = 'val'",
@@ -51,6 +51,13 @@ BUILTIN_VIEWS: dict[str, str] = {
     "bdd100k_rider_val":              "has_rider = true AND split = 'val'",
     "bdd100k_nighttime_rider_train":  "timeofday = 'night' AND has_rider = true AND split = 'train'",
     "bdd100k_nighttime_rider_val":    "timeofday = 'night' AND has_rider = true AND split = 'val'",
+}
+
+# Tier 2 — requires vehicle_label + vehicle_bbox_area_pct backfill first.
+# Run: python -m object_detection.manage_views --action curate-ambulance
+AMBULANCE_VIEWS: dict[str, str] = {
+    "bdd100k_ambulance_train": "vehicle_label = 'red_ambulance' AND vehicle_bbox_area_pct > 5.0 AND split = 'train'",
+    "bdd100k_ambulance_val":   "vehicle_label = 'red_ambulance' AND vehicle_bbox_area_pct > 5.0 AND split = 'val'",
 }
 
 
@@ -72,7 +79,7 @@ def _all_views(lconn) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def curate(db_path: str) -> None:
-    """Create the three built-in materialized views (idempotent)."""
+    """Create Tier 1 materialized views (annotation-based, no GPU needed)."""
     gconn, lconn = _connect(db_path)
     existing = set(lconn.list_tables().tables)
     gtbl = gconn.open_table(PARENT_TABLE)
@@ -81,7 +88,20 @@ def curate(db_path: str) -> None:
         for name, sql_filter in BUILTIN_VIEWS.items():
             _create_or_refresh(gconn, gtbl, name, sql_filter, existing)
 
-    print("All built-in views ready.")
+    print("All Tier 1 views ready.")
+
+
+def curate_ambulance(db_path: str) -> None:
+    """Create Tier 2 ambulance views (requires vehicle_label backfill first)."""
+    gconn, lconn = _connect(db_path)
+    existing = set(lconn.list_tables().tables)
+    gtbl = gconn.open_table(PARENT_TABLE)
+
+    with gconn.local_ray_context():
+        for name, sql_filter in AMBULANCE_VIEWS.items():
+            _create_or_refresh(gconn, gtbl, name, sql_filter, existing)
+
+    print("Ambulance views ready.")
 
 
 def add(db_path: str, name: str, sql_filter: str) -> None:
@@ -159,7 +179,7 @@ def _create_or_refresh(gconn, gtbl, name: str, sql_filter: str, existing: set) -
 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(description="Manage Geneva materialized views for BDD100K.")
-    p.add_argument("--action", choices=["status", "curate", "refresh", "add"],
+    p.add_argument("--action", choices=["status", "curate", "curate-ambulance", "refresh", "add"],
                    default="status")
     p.add_argument("--db",     default="data/bdd100k/lancedb")
     p.add_argument("--name",   default=None,
@@ -179,6 +199,8 @@ def main(argv=None):
         add(args.db, args.name, args.filter)
     elif args.action == "curate":
         curate(args.db)
+    elif args.action == "curate-ambulance":
+        curate_ambulance(args.db)
     elif args.action == "refresh":
         refresh(args.db)
     elif args.action == "status":
