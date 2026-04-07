@@ -69,6 +69,37 @@ def _download(url: str, dest: Path) -> None:
     print()  # newline after progress
 
 
+def _extract_zip(zip_path: Path, dest: Path) -> None:
+    """
+    Extract zip into dest, stripping any top-level 'bdd100k/' prefix.
+
+    The Berkeley zips may pack files as 'bdd100k/images/...' or 'images/...' depending
+    on how they were created. We normalise to the latter so the result is always at
+    dest/images/... and dest/labels/...
+    """
+    with zipfile.ZipFile(zip_path) as z:
+        names = z.namelist()
+        # Detect a common top-level prefix like "bdd100k/"
+        prefix = ""
+        first = names[0] if names else ""
+        if "/" in first:
+            candidate = first.split("/")[0] + "/"
+            if all(n.startswith(candidate) for n in names):
+                prefix = candidate
+
+        for member in z.infolist():
+            rel = member.filename[len(prefix):]  # strip prefix
+            if not rel:  # was the prefix directory itself
+                continue
+            out_path = dest / rel
+            if member.is_dir():
+                out_path.mkdir(parents=True, exist_ok=True)
+            else:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(member) as src, open(out_path, "wb") as dst:
+                    dst.write(src.read())
+
+
 def _ensure_dataset(data_root: Path) -> tuple[Path, Path]:
     """
     Download and extract BDD100K images + detection labels if not already present.
@@ -93,8 +124,7 @@ def _ensure_dataset(data_root: Path) -> tuple[Path, Path]:
         if not zip_path.exists():
             _download(_IMAGES_URL, zip_path)
         print(f"Extracting {zip_path.name} …")
-        with zipfile.ZipFile(zip_path) as z:
-            z.extractall(data_root)
+        _extract_zip(zip_path, data_root)
         zip_path.unlink()
 
     if need_labels:
@@ -102,8 +132,7 @@ def _ensure_dataset(data_root: Path) -> tuple[Path, Path]:
         if not zip_path.exists():
             _download(_LABELS_URL, zip_path)
         print(f"Extracting {zip_path.name} …")
-        with zipfile.ZipFile(zip_path) as z:
-            z.extractall(data_root)
+        _extract_zip(zip_path, data_root)
         zip_path.unlink()
 
     zip_dir.rmdir()  # remove if empty

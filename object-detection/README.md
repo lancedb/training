@@ -98,56 +98,49 @@ All commands run from the `object-detection/` directory.
 
 ```bash
 cd object-detection/
-export DB=data/bdd100k/lancedb
-export TABLE=bdd100k
 export GENEVA_PIPELINE_STALL_TIMEOUT_S=7200
 ```
 
+`--output` defaults to `data/bdd100k/lancedb` and `--table-name` defaults to `bdd100k`,
+so those flags are omitted below.
+
 ### Step 1 — Ingest
 
-The script downloads BDD100K automatically (~6.4 GB) on first run if `data/bdd100k/` is empty.
+Downloads BDD100K automatically (~6.4 GB) on first run if `data/bdd100k/` is empty.
 
 ```bash
 # Full dataset (GPU training — ~80k frames):
-python -m object_detection.ingest_bdd \
-    --splits train val \
-    --output $DB --table-name $TABLE --overwrite
+python -m object_detection.ingest_bdd --splits train val --overwrite
 
 # Subset for local dev (--limit caps frames per split):
-python -m object_detection.ingest_bdd \
-    --splits train val --limit 5000 \
-    --output $DB --table-name $TABLE --overwrite
+python -m object_detection.ingest_bdd --splits train val --limit 5000 --overwrite
 ```
 
-> **No dataset yet and want to skip the download?** Use `--synthetic N` to generate fake
-> frames and verify the full pipeline works first:
+> **Want to skip the download?** Use `--synthetic N` to generate fake frames and verify
+> the full pipeline works first:
 > ```bash
-> python -m object_detection.ingest_bdd --synthetic 500 --output $DB --table-name $TABLE --overwrite
+> python -m object_detection.ingest_bdd --synthetic 500 --overwrite
 > ```
 
 > **Important**: the table is created with `new_table_enable_stable_row_ids=true`.
-> This is required for Geneva materialized view refresh to work across table versions
-> (i.e. after appending new footage). Without stable row IDs, `mv.refresh()` fails
-> once any new data has been appended.
+> This is required for Geneva materialized view refresh to work across table versions.
+> Without stable row IDs, `mv.refresh()` fails once any new data has been appended.
 
 ### Step 2 — Geneva backfill
 
 ```bash
 # Annotation-presence flags (fast — no image decoding):
 python -m object_detection.backfill_geneva \
-    --db $DB --table $TABLE \
     --columns has_person has_rider \
     --min-checkpoint-size 25200 --max-checkpoint-size 25200
 
 # Vehicle detector labels (SSDLite, ~30 min CPU):
 python -m object_detection.backfill_geneva \
-    --db $DB --table $TABLE \
     --columns vehicle_light_label vehicle_light_confidence vehicle_light_bbox_area_pct \
     --min-checkpoint-size 25200 --max-checkpoint-size 25200
 
 # Heavy Faster R-CNN columns (GPU recommended):
 python -m object_detection.backfill_geneva \
-    --db $DB --table $TABLE \
     --columns vehicle_label vehicle_confidence vehicle_bbox_area_pct \
     --concurrency 8
 ```
@@ -161,7 +154,7 @@ Explore what the Geneva columns reveal before committing to curation filters:
 
 ```bash
 # Row counts by spec — pure metadata, no image loading:
-python -m object_detection.spec_queries --db $DB --table $TABLE
+python -m object_detection.spec_queries
 
 # Or open the EDA notebook:
 jupyter notebook notebooks/eda_bdd100k.ipynb
@@ -175,7 +168,7 @@ table is never loaded into memory.
 ### Step 4 — Create materialized views
 
 ```bash
-python -m object_detection.manage_views --action curate --db $DB
+python -m object_detection.manage_views --action curate
 ```
 
 This creates three Geneva materialized views as child tables:
@@ -199,9 +192,8 @@ automatically — no extra flags needed. On an A100 each experiment takes ~10–
 # Exp 1 — Nighttime pedestrian  (~1165 train frames, ~20 min on A100)
 python -m object_detection.train_detector \
     --mode finetune \
-    --db $DB \
     --train-table bdd100k_nighttime_person \
-    --val-table $TABLE \
+    --val-table bdd100k \
     --train-where "split='train'" \
     --val-where "split='val' AND timeofday='night' AND has_person=true" \
     --epochs 10 --batch-size 8 --num-workers 4 \
@@ -210,9 +202,8 @@ python -m object_detection.train_detector \
 # Exp 2 — Rider  (~747 train frames, ~10 min on A100)
 python -m object_detection.train_detector \
     --mode finetune \
-    --db $DB \
     --train-table bdd100k_rider \
-    --val-table $TABLE \
+    --val-table bdd100k \
     --train-where "split='train'" \
     --val-where "split='val' AND has_rider=true" \
     --epochs 10 --batch-size 8 --num-workers 4 \
@@ -222,9 +213,8 @@ python -m object_detection.train_detector \
 # Lower LR because the slice is tiny; use all available frames, no subsampling
 python -m object_detection.train_detector \
     --mode finetune \
-    --db $DB \
     --train-table bdd100k_nighttime_rider \
-    --val-table $TABLE \
+    --val-table bdd100k \
     --train-where "split='train'" \
     --val-where "split='val' AND timeofday='night' AND has_rider=true" \
     --epochs 10 --batch-size 4 --lr 0.001 --num-workers 4 \
@@ -237,9 +227,8 @@ python -m object_detection.train_detector \
 # Exp 1 random baseline — train on full table, eval on the same curated slice:
 python -m object_detection.train_detector \
     --mode finetune \
-    --db $DB \
-    --train-table $TABLE \
-    --val-table $TABLE \
+    --train-table bdd100k \
+    --val-table bdd100k \
     --train-where "split='train' AND num_annotations > 0" \
     --val-where "split='val' AND timeofday='night' AND has_person=true" \
     --epochs 10 --batch-size 8 --num-workers 4 \
@@ -248,9 +237,8 @@ python -m object_detection.train_detector \
 # Exp 2 random baseline:
 python -m object_detection.train_detector \
     --mode finetune \
-    --db $DB \
-    --train-table $TABLE \
-    --val-table $TABLE \
+    --train-table bdd100k \
+    --val-table bdd100k \
     --train-where "split='train' AND num_annotations > 0" \
     --val-where "split='val' AND has_rider=true" \
     --epochs 10 --batch-size 8 --num-workers 4 \
@@ -267,19 +255,15 @@ Checkpoint ↔ exact data snapshot. If you retrain after a refresh, the version 
 ### Step 6 — New data arrives → refresh views
 
 ```bash
-# 1. Append new footage (no --overwrite = append mode):
-python -m object_detection.ingest_bdd \
-    --synthetic 500 --output $DB --table-name $TABLE
+# 1. Append new footage (omit --overwrite to append, not replace):
+python -m object_detection.ingest_bdd --synthetic 500
 
 # 2. Incremental backfill (Geneva skips already-computed rows):
-TOTAL=$(python -c "import lancedb; print(lancedb.connect('$DB').open_table('$TABLE').count_rows())")
 python -m object_detection.backfill_geneva \
-    --db $DB --table $TABLE \
-    --columns has_person has_rider \
-    --min-checkpoint-size $TOTAL --max-checkpoint-size $TOTAL
+    --columns has_person has_rider
 
 # 3. Refresh all views — one command, all splits update:
-python -m object_detection.manage_views --action refresh --db $DB
+python -m object_detection.manage_views --action refresh
 ```
 
 Output:
@@ -295,7 +279,7 @@ Retrain — same command, different data, new version number in the logs.
 ### Check status any time
 
 ```bash
-python -m object_detection.manage_views --action status --db $DB
+python -m object_detection.manage_views --action status
 ```
 
 ```
@@ -351,42 +335,36 @@ to keep CPU runtimes manageable. GPU runs should use the full dataset (no `--lim
 
 ```bash
 cd object-detection/
-export DB=data/bdd100k/lancedb
-export TABLE=bdd100k
 export GENEVA_PIPELINE_STALL_TIMEOUT_S=7200
 
 # 1. Ingest subset (15k train + 10.2k val — downloads automatically on first run)
-python -m object_detection.ingest_bdd \
-    --splits train val --limit 15000 \
-    --output $DB --table-name $TABLE --overwrite
+python -m object_detection.ingest_bdd --splits train val --limit 15000 --overwrite
 
 # 2. Backfill annotation-presence flags (fast — no image decoding)
 python -m object_detection.backfill_geneva \
-    --db $DB --table $TABLE \
     --columns has_person has_rider \
     --min-checkpoint-size 25200 --max-checkpoint-size 25200
 
 # 3. Backfill vehicle light labels (SSDLite, ~30 min CPU)
 python -m object_detection.backfill_geneva \
-    --db $DB --table $TABLE \
     --columns vehicle_light_label vehicle_light_confidence vehicle_light_bbox_area_pct \
     --min-checkpoint-size 25200 --max-checkpoint-size 25200
 
 # 4. Create materialized views
-python -m object_detection.manage_views --action curate --db $DB
+python -m object_detection.manage_views --action curate
 
-# 5a. Exp 1 — Nighttime pedestrian (train on curated view, eval on nighttime person slice)
+# 5a. Exp 1 — Nighttime pedestrian
 python -m object_detection.train_detector \
-    --mode finetune --db $DB \
-    --train-table bdd100k_nighttime_person --val-table $TABLE \
+    --mode finetune \
+    --train-table bdd100k_nighttime_person --val-table bdd100k \
     --train-where "split='train'" \
     --val-where "split='val' AND timeofday='night' AND has_person=true" \
     --epochs 1 --batch-size 4 --num-workers 0
 
 # 5b. Exp 2 — Rider (best result)
 python -m object_detection.train_detector \
-    --mode finetune --db $DB \
-    --train-table bdd100k_rider --val-table $TABLE \
+    --mode finetune \
+    --train-table bdd100k_rider --val-table bdd100k \
     --train-where "split='train'" \
     --val-where "split='val' AND has_rider=true" \
     --epochs 1 --batch-size 4 --num-workers 0
