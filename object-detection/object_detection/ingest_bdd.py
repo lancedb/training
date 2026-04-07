@@ -2,36 +2,32 @@
 Ingest BDD100K detection data into a LanceDB table.
 
 Supports two modes:
-  1. Local BDD100K files  (downloaded from https://bdd-data.berkeley.edu)
-     --image-root  path/to/bdd100k/images/100k
-     --annotation-root  path/to/bdd100k/labels/det_20
+  1. Real BDD100K — downloaded automatically on first run (~6.4 GB) if data/bdd100k/ is empty.
+     No account required. Use --data-root to override the download location.
+     --splits train val          # ingest both splits
+     --limit 5000                # optional: cap frames per split for local dev
 
-  2. Synthetic data  (no download needed — great for local smoke tests)
-     --synthetic 1000   generates N fake frames with random annotations
+  2. Synthetic data  (no download — useful for verifying the pipeline end-to-end first)
+     --synthetic 500             # generates N fake frames with random annotations
 
-Ingestion uses a RecordBatch generator so the full dataset is never loaded
-into memory at once.  Each batch is written with table.add(reader=...) which
-Lance handles as a streaming write.
+Ingestion streams data as RecordBatches so the full dataset is never loaded into
+memory at once.  The table is created with stable row IDs, which Geneva requires
+for materialized view refresh to work across table versions.
 
-Usage examples
---------------
-# Synthetic smoke test (1k frames, CPU laptop friendly):
-python -m object_detection.ingest_bdd --synthetic 1000 --output data/bdd100k/lancedb
-
-# Real BDD100K val split (10k frames):
+Usage
+-----
+# Full dataset (GPU training — downloads BDD100K if not present):
 python -m object_detection.ingest_bdd \\
-    --splits val \\
-    --image-root data/bdd100k/images/100k \\
-    --annotation-root data/bdd100k/labels/det_20 \\
-    --output data/bdd100k/lancedb
+    --splits train val \\
+    --output data/bdd100k/lancedb --overwrite
 
-# Sample 5k frames from train split for quick iteration:
+# Subset for local dev (5k frames per split):
 python -m object_detection.ingest_bdd \\
-    --splits train \\
-    --image-root data/bdd100k/images/100k \\
-    --annotation-root data/bdd100k/labels/det_20 \\
-    --limit 5000 \\
-    --output data/bdd100k/lancedb
+    --splits train val --limit 5000 \\
+    --output data/bdd100k/lancedb --overwrite
+
+# Synthetic smoke test (no data download needed):
+python -m object_detection.ingest_bdd --synthetic 500 --output data/bdd100k/lancedb --overwrite
 """
 
 from __future__ import annotations
@@ -42,6 +38,8 @@ import json
 import os
 import random
 import sys
+import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Generator
 
@@ -50,6 +48,66 @@ import pyarrow as pa
 from PIL import Image, ImageDraw
 
 from object_detection.schema import BDD_SCHEMA
+
+# ---------------------------------------------------------------------------
+# Dataset download
+# ---------------------------------------------------------------------------
+
+_IMAGES_URL = "http://128.32.162.150/bdd100k/bdd100k_images_100k.zip"
+_LABELS_URL = "http://128.32.162.150/bdd100k/bdd100k_det_20_labels.zip"
+
+
+def _download(url: str, dest: Path) -> None:
+    print(f"Downloading {url} → {dest} …")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    def _progress(count, block_size, total):
+        pct = min(count * block_size / total * 100, 100) if total > 0 else 0
+        print(f"\r  {pct:.0f}%", end="", flush=True)
+
+    urllib.request.urlretrieve(url, dest, reporthook=_progress)
+    print()  # newline after progress
+
+
+def _ensure_dataset(data_root: Path) -> tuple[Path, Path]:
+    """
+    Download and extract BDD100K images + detection labels if not already present.
+
+    Returns (image_root, annotation_root) pointing at the extracted directories.
+    """
+    image_root = data_root / "images"
+    annotation_root = data_root / "labels"
+
+    need_images = not (image_root / "train").exists() or not any((image_root / "train").glob("*.jpg"))
+    need_labels = not (annotation_root / "train").exists() or not any((annotation_root / "train").glob("*.json"))
+
+    if not need_images and not need_labels:
+        print(f"Dataset already present at {data_root}")
+        return image_root, annotation_root
+
+    zip_dir = data_root / "_zips"
+    zip_dir.mkdir(parents=True, exist_ok=True)
+
+    if need_images:
+        zip_path = zip_dir / "bdd100k_images_100k.zip"
+        if not zip_path.exists():
+            _download(_IMAGES_URL, zip_path)
+        print(f"Extracting {zip_path.name} …")
+        with zipfile.ZipFile(zip_path) as z:
+            z.extractall(data_root)
+        zip_path.unlink()
+
+    if need_labels:
+        zip_path = zip_dir / "bdd100k_det_20_labels.zip"
+        if not zip_path.exists():
+            _download(_LABELS_URL, zip_path)
+        print(f"Extracting {zip_path.name} …")
+        with zipfile.ZipFile(zip_path) as z:
+            z.extractall(data_root)
+        zip_path.unlink()
+
+    zip_dir.rmdir()  # remove if empty
+    return image_root, annotation_root
 
 # BDD100K ten-class detection taxonomy
 BDD_CATEGORIES = [
@@ -370,12 +428,16 @@ def _parse_args(argv=None):
         help="Dataset splits to ingest (default: val)",
     )
     p.add_argument(
+        "--data-root", type=Path, default=Path("data/bdd100k"),
+        help="Root directory for BDD100K data; downloaded here if not present (default: data/bdd100k)",
+    )
+    p.add_argument(
         "--image-root", type=Path, default=None,
-        help="Root directory containing <split>/<image>.jpg files",
+        help="Override image directory (default: <data-root>/images)",
     )
     p.add_argument(
         "--annotation-root", type=Path, default=None,
-        help="Directory containing det_<split>.json annotation files",
+        help="Override annotation directory (default: <data-root>/labels)",
     )
     p.add_argument(
         "--synthetic", type=int, default=None, metavar="N",
@@ -395,18 +457,25 @@ def _parse_args(argv=None):
 def main(argv=None):
     args = _parse_args(argv)
 
-    if args.synthetic is None and (args.image_root is None or args.annotation_root is None):
-        print(
-            "Error: either --synthetic N or both --image-root and --annotation-root are required.",
-            file=sys.stderr,
+    if args.synthetic is not None:
+        image_root = annotation_root = None
+    else:
+        # Auto-download if paths not explicitly provided
+        image_root = args.image_root or args.data_root / "images"
+        annotation_root = args.annotation_root or args.data_root / "labels"
+
+        need_download = (
+            not image_root.exists()
+            or not any(image_root.glob("*/*.jpg"))
         )
-        sys.exit(1)
+        if need_download:
+            image_root, annotation_root = _ensure_dataset(args.data_root)
 
     ingest(
         output=args.output,
         splits=args.splits,
-        image_root=args.image_root,
-        annotation_root=args.annotation_root,
+        image_root=image_root,
+        annotation_root=annotation_root,
         synthetic=args.synthetic,
         limit=args.limit,
         table_name=args.table_name,

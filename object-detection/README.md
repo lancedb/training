@@ -72,37 +72,7 @@ know or care when that view last changed.
 
 ### 1. Download BDD100K
 
-BDD100K requires a free account — there is no unauthenticated bulk download.
-
-**Option A — Kaggle (automated, ~30 GB download):**
-
-```bash
-pip install kaggle
-# Put your kaggle.json API token at ~/.kaggle/kaggle.json  (download from kaggle.com → Settings → API)
-
-mkdir -p data/bdd100k
-cd data/bdd100k
-kaggle datasets download -d bdd-iva/bdd100k --unzip
-cd ../..
-```
-
-**Option B — Berkeley portal (manual):**
-
-1. Register at https://bdd-data.berkeley.edu/portal.html
-2. Download **BDD100K Images** (train + val) and **BDD100K Labels — Detection 2020**
-3. Extract the archives
-
-Either way, the final layout must look like this:
-
-```
-object-detection/data/bdd100k/
-├── images/
-│   ├── train/    ← 70 000 JPEGs
-│   └── val/      ← 10 000 JPEGs
-└── labels/
-    ├── train/    ← one JSON per image
-    └── val/
-```
+The ingestion script handles this automatically — skip ahead to **Step 1**.
 
 ### 2. Python environment
 
@@ -135,25 +105,22 @@ export GENEVA_PIPELINE_STALL_TIMEOUT_S=7200
 
 ### Step 1 — Ingest
 
+The script downloads BDD100K automatically (~6.4 GB) on first run if `data/bdd100k/` is empty.
+
 ```bash
-# Full dataset (GPU training — ingests all ~80k frames):
+# Full dataset (GPU training — ~80k frames):
 python -m object_detection.ingest_bdd \
     --splits train val \
-    --image-root data/bdd100k/images \
-    --annotation-root data/bdd100k/labels \
     --output $DB --table-name $TABLE --overwrite
 
 # Subset for local dev (--limit caps frames per split):
 python -m object_detection.ingest_bdd \
-    --splits train val \
-    --image-root data/bdd100k/images \
-    --annotation-root data/bdd100k/labels \
-    --limit 5000 \
+    --splits train val --limit 5000 \
     --output $DB --table-name $TABLE --overwrite
 ```
 
-> **No dataset yet?** Use `--synthetic N` to generate fake frames and verify the
-> full pipeline works before downloading BDD100K:
+> **No dataset yet and want to skip the download?** Use `--synthetic N` to generate fake
+> frames and verify the full pipeline works first:
 > ```bash
 > python -m object_detection.ingest_bdd --synthetic 500 --output $DB --table-name $TABLE --overwrite
 > ```
@@ -388,12 +355,9 @@ export DB=data/bdd100k/lancedb
 export TABLE=bdd100k
 export GENEVA_PIPELINE_STALL_TIMEOUT_S=7200
 
-# 1. Ingest subset (15k train + 10.2k val — use --limit to cap per split)
+# 1. Ingest subset (15k train + 10.2k val — downloads automatically on first run)
 python -m object_detection.ingest_bdd \
-    --splits train val \
-    --image-root data/bdd100k/images \
-    --annotation-root data/bdd100k/labels \
-    --limit 15000 \
+    --splits train val --limit 15000 \
     --output $DB --table-name $TABLE --overwrite
 
 # 2. Backfill annotation-presence flags (fast — no image decoding)
