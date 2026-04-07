@@ -51,7 +51,7 @@ _NULL_EXPR: dict[pa.DataType, str] = {
 }
 
 
-def _ensure_columns(tbl, columns: list[str]) -> None:
+def _ensure_columns(tbl, columns: list[str], silent: bool = False) -> None:
     """Add null-initialised columns to the table for any that are missing."""
     existing = set(tbl.schema.names)
     to_add = {}
@@ -67,7 +67,8 @@ def _ensure_columns(tbl, columns: list[str]) -> None:
         to_add[col] = sql_expr
 
     if to_add:
-        print(f"  Adding {len(to_add)} new column(s): {list(to_add)}")
+        if not silent:
+            print(f"  Adding {len(to_add)} new column(s): {list(to_add)}")
         tbl.add_columns(to_add)
 
 
@@ -95,15 +96,15 @@ def backfill(
     print(f"Opened table '{table_name}' — {tbl.count_rows()} rows")
     print(f"Columns to backfill: {columns}")
     if overwrite:
-        print("Mode: overwrite — resetting columns to NULL before backfill\n")
-
-    if overwrite:
+        print("Mode: overwrite — dropping columns and recreating from scratch\n")
         for col in columns:
             _drop_column(tbl, col)
         # Re-open to get a fresh schema after drops
         tbl = conn.open_table(table_name)
-
-    _ensure_columns(tbl, columns)
+        # Geneva requires the column to exist before backfill can populate it
+        _ensure_columns(tbl, columns, silent=True)
+    else:
+        _ensure_columns(tbl, columns)
 
     with conn.local_ray_context():
         for col in columns:
@@ -113,11 +114,12 @@ def backfill(
                 continue
 
             print(f"  [backfill] {col} …")
+            checkpoint_size = 256 if gpu else 32
             job_id = tbl.backfill(
                 col,
                 udf=udf_fn,
                 concurrency=concurrency,
-                batch_size=32,
+                checkpoint_size=checkpoint_size,
             )
             print(f"  [done]     {col}  (job_id={job_id})\n")
 
