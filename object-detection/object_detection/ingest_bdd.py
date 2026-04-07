@@ -92,25 +92,11 @@ def _ensure_dataset(data_root: Path) -> tuple[Path, Path]:
     zip_dir = data_root / "_zips"
     zip_dir.mkdir(parents=True, exist_ok=True)
 
-    # Download and extract images if train split is missing
-    image_root = _find_dir_with_files(data_root, "train/*.jpg")
-    if image_root is None:
-        zip_path = zip_dir / "bdd100k_images_100k.zip"
-        if not zip_path.exists():
-            _download(_IMAGES_URL, zip_path)
-        print(f"Extracting {zip_path.name} …")
-        _extract_zip(zip_path, data_root)
-        zip_path.unlink()
-        image_root = _find_dir_with_files(data_root, "train/*.jpg")
-        if image_root is None:
-            raise RuntimeError(f"Could not find images/train/*.jpg anywhere under {data_root}")
-    else:
-        print(f"Images already present at {image_root}")
-
-    # Download and extract labels if train split is missing
+    # Labels first — both zips extract into the same subdirectory (e.g. 100k/),
+    # so we find labels, then expect images in the same place.
     annotation_root = _find_dir_with_files(data_root, "train/*.json")
     if annotation_root is None:
-        zip_path = zip_dir / "bdd100k_det_20_labels.zip"
+        zip_path = zip_dir / "bdd100k_labels.zip"
         if not zip_path.exists():
             _download(_LABELS_URL, zip_path)
         print(f"Extracting {zip_path.name} …")
@@ -118,9 +104,28 @@ def _ensure_dataset(data_root: Path) -> tuple[Path, Path]:
         zip_path.unlink()
         annotation_root = _find_dir_with_files(data_root, "train/*.json")
         if annotation_root is None:
-            raise RuntimeError(f"Could not find labels/train/*.json anywhere under {data_root}")
+            raise RuntimeError(f"Could not find train/*.json anywhere under {data_root}")
     else:
         print(f"Labels already present at {annotation_root}")
+
+    # Images should be co-located with labels (same extraction root).
+    # Only fall back to a broader search if not found there.
+    if any((annotation_root / "train").glob("*.jpg")):
+        image_root = annotation_root
+        print(f"Images already present at {image_root}")
+    else:
+        image_root = _find_dir_with_files(data_root, "train/*.jpg")
+        if image_root is None:
+            zip_path = zip_dir / "bdd100k_images_100k.zip"
+            if not zip_path.exists():
+                _download(_IMAGES_URL, zip_path)
+            print(f"Extracting {zip_path.name} …")
+            _extract_zip(zip_path, data_root)
+            zip_path.unlink()
+            image_root = _find_dir_with_files(data_root, "train/*.jpg")
+            if image_root is None:
+                raise RuntimeError(f"Could not find train/*.jpg anywhere under {data_root}")
+        print(f"Images present at {image_root}")
 
     try:
         zip_dir.rmdir()
