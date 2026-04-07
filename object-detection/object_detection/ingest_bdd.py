@@ -70,15 +70,13 @@ def _download(url: str, dest: Path) -> None:
 
 
 def _extract_zip(zip_path: Path, dest: Path) -> None:
-    """Extract zip into dest, printing the top-level structure for debugging."""
-    print(f"  zip top-level entries: {sorted({n.split('/')[0] for n in zipfile.ZipFile(zip_path).namelist()})[:10]}")
     with zipfile.ZipFile(zip_path) as z:
         z.extractall(dest)
 
 
 def _find_dir_with_files(root: Path, glob: str) -> Path | None:
-    """Walk root and return the first directory containing files matching glob."""
-    for p in sorted(root.rglob("*")):
+    """Return the first directory (including root itself) containing files matching glob."""
+    for p in [root, *sorted(root.rglob("*"))]:
         if p.is_dir() and any(p.glob(glob)):
             return p
     return None
