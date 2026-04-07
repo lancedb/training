@@ -125,6 +125,7 @@ def backfill(
                 col,
                 udf=udf_fn,
                 concurrency=concurrency,
+                batch_size=32,
                 min_checkpoint_size=min_checkpoint_size,
                 max_checkpoint_size=max_checkpoint_size,
             )
