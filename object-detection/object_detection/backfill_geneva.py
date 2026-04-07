@@ -147,8 +147,8 @@ def _parse_args(argv=None):
         ),
     )
     p.add_argument(
-        "--concurrency", type=int, default=4,
-        help="Parallel Ray actor processes (default: 4)",
+        "--concurrency", type=int, default=2,
+        help="Parallel Ray actor processes (default: 2)",
     )
     p.add_argument(
         "--overwrite", action="store_true",
