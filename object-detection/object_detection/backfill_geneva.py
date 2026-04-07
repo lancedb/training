@@ -147,8 +147,11 @@ def _parse_args(argv=None):
         ),
     )
     p.add_argument(
-        "--concurrency", type=int, default=2,
-        help="Parallel Ray actor processes (default: 2)",
+        "--concurrency", type=int, default=None,
+        help=(
+            "Parallel Ray actor processes. "
+            "Defaults to 1 for --gpu (one worker per GPU), 2 for CPU."
+        ),
     )
     p.add_argument(
         "--overwrite", action="store_true",
@@ -159,11 +162,12 @@ def _parse_args(argv=None):
 
 def main(argv=None):
     args = _parse_args(argv)
+    concurrency = args.concurrency if args.concurrency is not None else (1 if args.gpu else 2)
     backfill(
         db_path=args.db,
         table_name=args.table,
         columns=args.columns,
-        concurrency=args.concurrency,
+        concurrency=concurrency,
         overwrite=args.overwrite,
         gpu=args.gpu,
     )

@@ -46,13 +46,13 @@ without manual curation work?
                                     ▼
               ┌─────────────────────────────────────────────────┐
               │           Geneva Materialized Views              │
-              │  bdd100k_nighttime_person  (WHERE night+person)  │
-              │  bdd100k_rider             (WHERE has_rider)      │
-              │  bdd100k_nighttime_rider   (WHERE night+rider)    │
+              │  bdd100k_nighttime_person_train / _val           │
+              │  bdd100k_rider_train / _val                      │
+              │  bdd100k_nighttime_rider_train / _val            │
               │                                                   │
               │  mv.refresh() keeps them in sync automatically   │
               └──────────────────────┬──────────────────────────┘
-                                     │  train_detector.py --train-table bdd100k_rider
+                                     │  train_detector.py --train-table bdd100k_rider_train
                                      ▼
                          ┌───────────────────────┐
                          │  Faster R-CNN          │
@@ -83,12 +83,16 @@ source .venv/bin/activate
 uv pip install lancedb geneva torch torchvision pyarrow pillow
 ```
 
-### 3. Geneva local setup (macOS only)
+### 3. Geneva setup
 
 ```bash
-export GENEVA_PIPELINE_STALL_TIMEOUT_S=7200  # prevents timeout on slow CPU runs
-sudo chmod a+rw /tmp/.geneva_zip_setup        # fixes permission error on first run
+export GENEVA_PIPELINE_STALL_TIMEOUT_S=7200  # prevents timeout on slow runs — required on GPU machines too
+sudo chmod a+rw /tmp/.geneva_zip_setup        # fixes permission error on first run (macOS)
 ```
+
+> **GPU machines**: export `GENEVA_PIPELINE_STALL_TIMEOUT_S=7200` before the GPU backfill step.
+> The default is 600 s, which times out before Faster R-CNN finishes loading weights and
+> processing its first batch.
 
 ---
 
@@ -169,26 +173,33 @@ python -m object_detection.spec_queries
 ### Step 4 — Create materialized views
 
 ```bash
-# Built-in views (pedestrian + rider narrative, needs Tier 1 backfill):
+# Tier 1 — built-in views (pedestrian + rider narrative, needs Tier 1 backfill):
 python -m object_detection.manage_views --action curate
 
-# Ambulance view — same command regardless of CPU or GPU backfill:
-python -m object_detection.manage_views --action add \
-    --name bdd100k_ambulance \
-    --filter "vehicle_label = 'red_ambulance' AND vehicle_bbox_area_pct > 5.0"
+# Tier 2 — ambulance views (requires vehicle_label backfill first):
+python -m object_detection.manage_views --action curate-ambulance
 ```
 
-`--action curate` creates:
+`--action curate` creates pre-split train/val pairs:
 
 | View | Filter |
 |---|---|
-| `bdd100k_nighttime_person` | `timeofday='night' AND has_person=true` |
-| `bdd100k_rider` | `has_rider=true` |
-| `bdd100k_nighttime_rider` | `timeofday='night' AND has_rider=true` |
+| `bdd100k_nighttime_person_train` | `timeofday='night' AND has_person=true AND split='train'` |
+| `bdd100k_nighttime_person_val` | `timeofday='night' AND has_person=true AND split='val'` |
+| `bdd100k_rider_train` | `has_rider=true AND split='train'` |
+| `bdd100k_rider_val` | `has_rider=true AND split='val'` |
+| `bdd100k_nighttime_rider_train` | `timeofday='night' AND has_rider=true AND split='train'` |
+| `bdd100k_nighttime_rider_val` | `timeofday='night' AND has_rider=true AND split='val'` |
 
-`--action add` works for any SQL filter over any backfilled column — the ambulance example
-above uses `vehicle_label`, but you could equally filter on `scene`, `weather`,
-`timeofday`, or any combination.
+`--action curate-ambulance` adds:
+
+| View | Filter |
+|---|---|
+| `bdd100k_ambulance_train` | `vehicle_label='red_ambulance' AND vehicle_bbox_area_pct>5.0 AND split='train'` |
+| `bdd100k_ambulance_val` | `vehicle_label='red_ambulance' AND vehicle_bbox_area_pct>5.0 AND split='val'` |
+
+For one-off custom views, `--action add --name <name> --filter "<SQL>"` works for any
+SQL filter over any backfilled column.
 
 ### Step 5 — Train
 
@@ -214,31 +225,25 @@ recall                  0.4900      0.6493      +0.1593
 ```bash
 # Nighttime pedestrian
 python -m object_detection.train_detector \
-    --train-table bdd100k_nighttime_person \
-    --val-table bdd100k \
-    --train-where "split='train'" \
-    --val-where "split='val' AND timeofday='night' AND has_person=true" \
+    --train-table bdd100k_nighttime_person_train \
+    --val-table bdd100k_nighttime_person_val \
     --epochs 10 --batch-size 8 --num-workers 4 \
     --output-dir checkpoints/nighttime_person
 
 # Rider
 python -m object_detection.train_detector \
-    --train-table bdd100k_rider \
-    --val-table bdd100k \
-    --train-where "split='train'" \
-    --val-where "split='val' AND has_rider=true" \
+    --train-table bdd100k_rider_train \
+    --val-table bdd100k_rider_val \
     --epochs 10 --batch-size 8 --num-workers 4 \
     --output-dir checkpoints/rider
 ```
 
-**Narrative B — Ambulance** (requires Tier 2 backfill):
+**Narrative B — Ambulance** (requires Tier 2 backfill + `--action curate-ambulance`):
 
 ```bash
 python -m object_detection.train_detector \
-    --train-table bdd100k_ambulance \
-    --val-table bdd100k \
-    --train-where "split='train'" \
-    --val-where "split='val' AND vehicle_label='red_ambulance' AND vehicle_bbox_area_pct > 5.0" \
+    --train-table bdd100k_ambulance_train \
+    --val-table bdd100k_ambulance_val \
     --epochs 10 --batch-size 4 --lr 0.002 --num-workers 4 \
     --output-dir checkpoints/ambulance
 ```
@@ -269,9 +274,12 @@ python -m object_detection.manage_views --action refresh
 Output:
 ```
 Parent 'bdd100k': 25700 rows (version 21)
-[bdd100k_nighttime_person]   1165 → 1230 rows  (+65)  version 5
-[bdd100k_rider]               747 →  793 rows  (+46)  version 5
-[bdd100k_nighttime_rider]     139 →  152 rows  (+13)  version 5
+[bdd100k_nighttime_person_train]   932 →  984 rows  (+52)  version 5
+[bdd100k_nighttime_person_val]     233 →  246 rows  (+13)  version 5
+[bdd100k_rider_train]              598 →  634 rows  (+36)  version 5
+[bdd100k_rider_val]                149 →  159 rows  (+10)  version 5
+[bdd100k_nighttime_rider_train]    111 →  122 rows  (+11)  version 5
+[bdd100k_nighttime_rider_val]       28 →   30 rows   (+2)  version 5
 ```
 
 Retrain — same command, different data, new version number in the logs.
@@ -286,10 +294,14 @@ python -m object_detection.manage_views --action status
 table                                rows   version
 ------------------------------------------------------------
   bdd100k                           25200        19  (source)
-  bdd100k_nighttime_person           2024         4
-  bdd100k_rider                      1269         4
-  bdd100k_nighttime_rider             247         4
-  bdd100k_ambulance                   312         2
+  bdd100k_nighttime_person_train     1620         4
+  bdd100k_nighttime_person_val        404         4
+  bdd100k_rider_train                1016         4
+  bdd100k_rider_val                   253         4
+  bdd100k_nighttime_rider_train       198         4
+  bdd100k_nighttime_rider_val          49         4
+  bdd100k_ambulance_train             250         2
+  bdd100k_ambulance_val                62         2
 ```
 
 Custom views show up automatically — `refresh` and `status` discover all views in the DB.
@@ -306,13 +318,13 @@ then fine-tunes, and prints a side-by-side delta. No separate baseline run neede
 | metric | baseline (COCO) | curated fine-tune | Δ |
 |---|---|---|---|
 | **Nighttime pedestrian** | | | |
-| mAP@0.5 | 0.2569 | 0.2509 | -0.006 |
-| Precision | 0.3288 | **0.4288** | **+0.100** |
-| Recall | 0.5887 | 0.5875 | ~0 |
+| mAP@0.5 | 0.4007 | **0.5002** | **+0.100** |
+| Precision | 0.4722 | **0.5104** | **+0.038** |
+| Recall | 0.5919 | **0.7624** | **+0.171** |
 | **Rider** | | | |
-| mAP@0.5 | 0.3101 | **0.4076** | **+0.098** |
-| Precision | 0.4523 | **0.5188** | **+0.067** |
-| Recall | 0.6157 | **0.6493** | **+0.034** |
+| mAP@0.5 | 0.5295 | **0.6370** | **+0.108** |
+| Precision | 0.5670 | 0.5435 | -0.024 |
+| Recall | 0.6828 | **0.7922** | **+0.109** |
 
 ### Narrative B — Ambulance *(GPU required, results pending)*
 
@@ -340,16 +352,14 @@ python -m object_detection.manage_views --action curate
 
 # 4a. Nighttime pedestrian
 python -m object_detection.train_detector \
-    --train-table bdd100k_nighttime_person --val-table bdd100k \
-    --train-where "split='train'" \
-    --val-where "split='val' AND timeofday='night' AND has_person=true" \
+    --train-table bdd100k_nighttime_person_train \
+    --val-table bdd100k_nighttime_person_val \
     --epochs 1 --batch-size 4 --num-workers 0
 
 # 4b. Rider
 python -m object_detection.train_detector \
-    --train-table bdd100k_rider --val-table bdd100k \
-    --train-where "split='train'" \
-    --val-where "split='val' AND has_rider=true" \
+    --train-table bdd100k_rider_train \
+    --val-table bdd100k_rider_val \
     --epochs 1 --batch-size 4 --num-workers 0
 ```
 
@@ -368,7 +378,7 @@ object-detection/
 │   ├── geneva_udfs.py       # all Geneva UDF functions
 │   ├── backfill_geneva.py   # Geneva backfill runner (incremental, checkpointed)
 │   ├── manage_views.py      # create / refresh / status of materialized views  ← lifecycle
-│   ├── dataloader.py        # LanceArrowDetectionDataset + make_detection_loader
+│   ├── dataloader.py        # LanceDetectionDataset + make_detection_loader (Permutation API)
 │   ├── train_detector.py    # Faster R-CNN fine-tune (logs table version)
 │   ├── eval.py              # torchmetrics mAP evaluation
 │   └── spec_queries.py      # SQL filter specs + EDA / FTS helpers
@@ -377,9 +387,14 @@ object-detection/
 ├── e2e_verify.py            # integration test against real BDD100K data
 └── data/bdd100k/lancedb/    # Lance tables (gitignored)
     ├── bdd100k.lance
-    ├── bdd100k_nighttime_person.lance
-    ├── bdd100k_rider.lance
-    └── bdd100k_nighttime_rider.lance
+    ├── bdd100k_nighttime_person_train.lance
+    ├── bdd100k_nighttime_person_val.lance
+    ├── bdd100k_rider_train.lance
+    ├── bdd100k_rider_val.lance
+    ├── bdd100k_nighttime_rider_train.lance
+    ├── bdd100k_nighttime_rider_val.lance
+    ├── bdd100k_ambulance_train.lance    # Tier 2 — requires GPU backfill
+    └── bdd100k_ambulance_val.lance
 ```
 
 ---
@@ -409,13 +424,13 @@ python -m object_detection.backfill_geneva --db data/bdd100k/lancedb \
 **Materialized view refresh** — one call, all views stay current:
 ```python
 gconn = geneva.connect("data/bdd100k/lancedb")
-mv = gconn.open_table("bdd100k_rider")
+mv = gconn.open_table("bdd100k_rider_train")
 mv.refresh()   # picks up any new rows matching the view's WHERE clause
 ```
 
 **Training provenance** — `train_detector.py` logs `table.version` automatically:
 ```
-Table 'bdd100k_rider'  version=4  rows=1269
+Table 'bdd100k_rider_train'  version=4  rows=1016
 ```
 
 **Flat schema only** — no nested structs (LanceDB SQL query bug):
