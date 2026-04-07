@@ -5,7 +5,7 @@ Each UDF adds one flat scalar column to the Lance table so it stays directly
 queryable without hitting LanceDB's nested-struct query bug.
 
 Two detector variants are provided:
-  - vehicle_light_*  : SSDLite320 + MobileNetV3 (fast, CPU-only, for local dev)
+  - vehicle_* (CPU)  : SSDLite320 + MobileNetV3 (fast, no GPU required)
   - vehicle_*        : Faster R-CNN ResNet50 FPN v2 (accurate, GPU recommended)
 
 The lightweight variant is what you run locally when iterating on the pipeline.

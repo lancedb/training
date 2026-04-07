@@ -22,7 +22,7 @@ python -m object_detection.train_detector --mode finetune \\
     --db data/bdd100k/lancedb \\
     --train-table bdd100k_red_ambulance \\
     --val-table bdd100k \\
-    --val-where "vehicle_light_label = 'red_ambulance'" \\
+    --val-where "vehicle_label = 'red_ambulance' AND vehicle_bbox_area_pct > 5.0" \\
     --epochs 5 \\
     --batch-size 4 \\
     --lr 0.005
@@ -194,7 +194,7 @@ def _parse_args(argv=None):
     p.add_argument("--train-table", default="bdd100k")
     p.add_argument("--val-table", default="bdd100k")
     p.add_argument("--train-where", default=None,
-                   help="SQL filter on the training table, e.g. \"split='train' AND vehicle_light_label='yellow_ambulance'\"")
+                   help="SQL filter on the training table, e.g. \"split='train' AND vehicle_label='red_ambulance'\"")
     p.add_argument("--val-where", default=None,
                    help="SQL filter on the validation table, e.g. \"split='val'\"")
     p.add_argument("--epochs", type=int, default=5)

@@ -63,16 +63,16 @@ _SKIP_COLS = {"image_bytes", "ann_bboxes", "ann_occluded", "ann_truncated"}
 
 SPEC_FILTERS: dict[str, str] = {
     "red_ambulance": (
-        "vehicle_light_label = 'red_ambulance' "
-        "AND vehicle_light_bbox_area_pct >= {bbox_pct}"
+        "vehicle_label = 'red_ambulance' "
+        "AND vehicle_bbox_area_pct >= {bbox_pct}"
     ),
     "yellow_ambulance": (
-        "vehicle_light_label = 'yellow_ambulance' "
-        "AND vehicle_light_bbox_area_pct >= {bbox_pct}"
+        "vehicle_label = 'yellow_ambulance' "
+        "AND vehicle_bbox_area_pct >= {bbox_pct}"
     ),
     "traffic_light": (
-        "vehicle_light_label = 'traffic_light' "
-        "AND vehicle_light_confidence >= {min_confidence}"
+        "vehicle_label = 'traffic_light' "
+        "AND vehicle_confidence >= {min_confidence}"
     ),
     "daytime_clear": (
         "timeofday = 'daytime' AND weather = 'clear'"

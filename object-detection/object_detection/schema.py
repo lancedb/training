@@ -46,7 +46,7 @@ BDD_SCHEMA = pa.schema(
 #
 # All flat scalars — no structs — so they stay directly queryable with SQL.
 #
-# vehicle_light_*  : lightweight SSDLite detector (CPU-friendly, for local dev)
+# vehicle_*        : SSDLite (CPU) or Faster R-CNN (GPU) — same column names, --gpu flag selects model
 # vehicle_*        : full Faster R-CNN detector (GPU recommended)
 # white_balance    : estimated colour temperature (K)
 # scene_*          : lightweight scene classifier

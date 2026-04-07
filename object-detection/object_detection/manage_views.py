@@ -21,10 +21,10 @@ Usage
 # Built-in views (annotation-based, no GPU backfill needed):
 python -m object_detection.manage_views --action curate
 
-# Custom view — ambulance detection (requires vehicle_light_label backfill):
+# Custom view — ambulance detection (requires vehicle_label backfill):
 python -m object_detection.manage_views --action add \\
     --name bdd100k_ambulance \\
-    --filter "vehicle_light_label = 'red_ambulance'"
+    --filter "vehicle_label = 'red_ambulance' AND vehicle_bbox_area_pct > 5.0"
 
 # After new data arrives:
 python -m object_detection.manage_views --action refresh

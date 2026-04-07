@@ -42,7 +42,7 @@ n_val   = tbl.count_rows(filter="split = 'val'")
 print(f"Train      : {n_train:,}  Val: {n_val:,}")
 
 # Verify key Geneva UDF columns are present and populated
-required_cols = ["has_person", "has_rider", "vehicle_light_label",
+required_cols = ["has_person", "has_rider", "vehicle_label",
                  "white_balance", "scene_description"]
 missing = [c for c in required_cols if c not in tbl.schema.names]
 if missing:
