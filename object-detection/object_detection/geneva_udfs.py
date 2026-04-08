@@ -135,11 +135,22 @@ class _FRCNNBase:
         self.device = next(self.model.parameters()).device
 
     def _infer(self, image_bytes: pa.Array):
-        """Decode a batch of images and run one GPU forward pass."""
-        from torchvision.transforms.functional import to_tensor
+        """Decode a batch of images and run one GPU forward pass.
+
+        Uses torchvision.io.decode_jpeg with device='cuda' (nvjpeg) so JPEG
+        decoding happens on the GPU, not the CPU.  This keeps the A100 busy
+        throughout the batch rather than stalling on sequential PIL decodes.
+        """
+        import torchvision.io as tvio
         self._load()
-        imgs    = [_decode_image(b.as_py()) for b in image_bytes]
-        tensors = [to_tensor(img).to(self.device) for img in imgs]
+        tensors = []
+        for b in image_bytes:
+            raw = b.as_py()
+            # frombuffer: zero-copy view of the bytes object (stays on CPU)
+            byte_t = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
+            # decode_jpeg with device='cuda' uses nvjpeg → output lands on GPU
+            img_t = tvio.decode_jpeg(byte_t, device=self.device).float() / 255.0
+            tensors.append(img_t)
         with torch.no_grad():
             predictions = self.model(tensors)
         return predictions
