@@ -18,14 +18,16 @@ Two tiers of views, matching the two tiers of backfill:
   Tier 1  Annotation-based (has_person, has_rider) — fast, no GPU needed.
           Covers nighttime pedestrians, riders, nighttime riders.
 
-  Tier 2  Model-inference-based (vehicle_label, vehicle_bbox_area_pct) —
-          requires GPU UDF backfill first.
-          Covers emergency vehicles (red + yellow, detected by HSV heuristic).
+  Tier 2  Model-inference-based (person_bbox_area_pct) — requires GPU UDF
+          backfill first.  Covers prominent close-range pedestrians: frames
+          where a person occupies >5% of the frame area, ensuring the
+          training signal focuses on legible, nearby pedestrians rather than
+          distant background figures.
 
 Actions
 -------
   curate          Create Tier 1 views (run once after Tier 1 backfill).
-  curate-vehicle  Create Tier 2 emergency-vehicle views (after GPU backfill).
+  curate-person   Create Tier 2 close-range pedestrian views (after GPU backfill).
   add             Create any custom view from an arbitrary SQL filter.
   refresh         Refresh all views after new data is ingested + backfilled.
   status          Print row counts and versions for parent + all views.
@@ -35,8 +37,8 @@ Usage
 # Tier 1 — annotation-based views:
 python -m object_detection.manage_views --action curate
 
-# Tier 2 — emergency vehicle views (requires vehicle_label backfill):
-python -m object_detection.manage_views --action curate-vehicle
+# Tier 2 — close-range pedestrian views (requires person_bbox_area_pct backfill):
+python -m object_detection.manage_views --action curate-person
 
 # Custom view (any SQL filter over any backfilled column):
 python -m object_detection.manage_views --action add \\
@@ -70,17 +72,13 @@ BUILTIN_VIEWS: dict[str, str] = {
     "bdd100k_nighttime_rider_val":    "timeofday = 'night' AND has_rider = true AND split = 'val'",
 }
 
-# Tier 2 — requires vehicle_label + vehicle_bbox_area_pct backfill first.
-# Covers all emergency vehicles detected by the HSV heuristic (red + yellow).
-# red_ambulance alone is only ~11 rows; combined gives ~1750 rows — enough to train.
-# Run: python -m object_detection.manage_views --action curate-vehicle
-_EV_FILTER = (
-    "vehicle_label IN ('red_ambulance', 'yellow_ambulance') "
-    "AND vehicle_bbox_area_pct > 5.0"
-)
-VEHICLE_VIEWS: dict[str, str] = {
-    "bdd100k_emergency_vehicle_train": f"{_EV_FILTER} AND split = 'train'",
-    "bdd100k_emergency_vehicle_val":   f"{_EV_FILTER} AND split = 'val'",
+# Tier 2 — requires person_bbox_area_pct GPU backfill first.
+# Frames where a detected person covers >5% of the frame — close-range pedestrians.
+# Run: python -m object_detection.manage_views --action curate-person
+_CP_FILTER = "has_person = true AND person_bbox_area_pct > 15.0"
+PERSON_VIEWS: dict[str, str] = {
+    "bdd100k_close_range_person_train": f"{_CP_FILTER} AND split = 'train'",
+    "bdd100k_close_range_person_val":   f"{_CP_FILTER} AND split = 'val'",
 }
 
 
@@ -114,17 +112,17 @@ def curate(db_path: str) -> None:
     print("All Tier 1 views ready.")
 
 
-def curate_vehicle(db_path: str) -> None:
-    """Create Tier 2 emergency-vehicle views (requires vehicle_label backfill first)."""
+def curate_person(db_path: str) -> None:
+    """Create Tier 2 close-range pedestrian views (requires person_bbox_area_pct backfill)."""
     gconn, lconn = _connect(db_path)
     existing = set(lconn.list_tables().tables)
     gtbl = gconn.open_table(PARENT_TABLE)
 
     with gconn.local_ray_context():
-        for name, sql_filter in VEHICLE_VIEWS.items():
+        for name, sql_filter in PERSON_VIEWS.items():
             _create_or_refresh(gconn, gtbl, name, sql_filter, existing)
 
-    print("Emergency vehicle views ready.")
+    print("Close-range pedestrian views ready.")
 
 
 def add(db_path: str, name: str, sql_filter: str) -> None:
@@ -168,13 +166,13 @@ def status(db_path: str) -> None:
     views = _all_views(lconn)
 
     parent = lconn.open_table(PARENT_TABLE)
-    print(f"\n{'table':<35}  {'rows':>8}  {'version':>8}")
-    print("-" * 60)
-    print(f"  {PARENT_TABLE:<33}  {parent.count_rows():>8}  {parent.version:>8}  (source)")
+    print(f"\n{'table':<40}  {'rows':>8}  {'version':>8}")
+    print("-" * 65)
+    print(f"  {PARENT_TABLE:<38}  {parent.count_rows():>8}  {parent.version:>8}  (source)")
 
     for view_name in views:
         tbl = lconn.open_table(view_name)
-        print(f"  {view_name:<33}  {tbl.count_rows():>8}  {tbl.version:>8}")
+        print(f"  {view_name:<38}  {tbl.count_rows():>8}  {tbl.version:>8}")
     print()
 
 
@@ -202,7 +200,8 @@ def _create_or_refresh(gconn, gtbl, name: str, sql_filter: str, existing: set) -
 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(description="Manage Geneva materialized views for BDD100K.")
-    p.add_argument("--action", choices=["status", "curate", "curate-vehicle", "refresh", "add"],
+    p.add_argument("--action",
+                   choices=["status", "curate", "curate-person", "refresh", "add"],
                    default="status")
     p.add_argument("--db",     default="data/bdd100k/lancedb")
     p.add_argument("--name",   default=None,
@@ -222,8 +221,8 @@ def main(argv=None):
         add(args.db, args.name, args.filter)
     elif args.action == "curate":
         curate(args.db)
-    elif args.action == "curate-vehicle":
-        curate_vehicle(args.db)
+    elif args.action == "curate-person":
+        curate_person(args.db)
     elif args.action == "refresh":
         refresh(args.db)
     elif args.action == "status":

@@ -1,27 +1,27 @@
 """
-Geneva UDFs for BDD100K emergency-vehicle feature engineering.
+Geneva UDFs for BDD100K feature engineering.
 
-Each UDF adds one flat scalar column to the Lance table so it stays directly
-queryable without hitting LanceDB's nested-struct query bug.
+Two tiers:
 
-Two detector variants are provided:
-  - vehicle_* (CPU)  : SSDLite320 + MobileNetV3 (fast, no GPU required)
-  - vehicle_*        : Faster R-CNN ResNet50 FPN v2 (accurate, GPU recommended)
+  Tier 1 — Annotation-derived (CPU, fast, no image decoding):
+    has_person, has_rider, scene_description, scene_has_crossroad,
+    scene_has_mountain, white_balance.
 
-The lightweight variant is what you run locally when iterating on the pipeline.
-Swap to the heavy variant on a GPU cluster for the final backfill.
+  Tier 2 — GPU inference (Faster R-CNN ResNet50 FPN v2):
+    person_bbox_area_pct — area of the largest detected person as a percentage
+    of the total frame area.  Use this to find frames where pedestrians are
+    prominent (close to camera, large in frame) vs. distant background figures.
 
-UDF colour-enrichment logic
----------------------------
-Both detectors operate on COCO classes (car, truck, bus, etc. — no "ambulance").
-We enrich the label by inspecting HSV statistics inside the top bounding box:
-  - (car | truck | bus) + dominant hue in red range  → "red_ambulance"
-  - (car | truck | bus) + dominant hue in yellow range → "yellow_ambulance"
-  - "traffic light" stays as "traffic_light"
-  - everything else keeps its COCO label
+    CPU fallback (SSDLite320) available for local dev — selected by default;
+    pass --gpu to backfill_geneva.py to use Faster R-CNN on a GPU cluster.
 
-This is intentionally heuristic — the goal is to surface candidate frames for
-the Geneva-filtered training split, not to be a ground-truth detector.
+Stateful GPU UDF pattern (Geneva docs):
+  - @udf decorator goes on the CLASS
+  - __init__ runs on the driver — keep it cheap (no model loading)
+  - __call__ runs on the Ray worker; model is loaded lazily and then reused
+    for every subsequent batch that worker processes
+  - input_columns receive pa.Array batches; return a pa.Array
+  - cuda=True routes tasks to GPU workers; num_gpus=1 allocates the resource
 """
 
 from __future__ import annotations
@@ -40,48 +40,12 @@ from geneva.transformer import udf
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-# COCO class index → label string (91-class COCO, torchvision convention)
-_COCO_LABELS: dict[int, str] = {
-    1: "person", 2: "bicycle", 3: "car", 4: "motorcycle",
-    5: "airplane", 6: "bus", 7: "train", 8: "truck",
-    9: "boat", 10: "traffic light", 11: "fire hydrant",
-    13: "stop sign", 14: "parking meter", 15: "bench",
-    # … only vehicle-relevant ones matter for us
-}
-_VEHICLE_COCO = {3, 6, 8}   # car, bus, truck
-_TRAFFIC_LIGHT_COCO = {10}
+# COCO person class index
+_PERSON_COCO = 1
 
 
 def _decode_image(image_bytes: bytes) -> Image.Image:
     return Image.open(io.BytesIO(image_bytes)).convert("RGB")
-
-
-def _dominant_hsv(img: Image.Image, bbox: list[float]) -> tuple[float, float, float]:
-    """Return mean HSV of the pixels inside `bbox` = [x1, y1, x2, y2]."""
-    x1, y1, x2, y2 = (int(v) for v in bbox)
-    crop = img.crop((x1, y1, x2, y2))
-    if crop.width < 2 or crop.height < 2:
-        return 0.0, 0.0, 0.0
-    hsv = crop.convert("HSV")
-    arr = np.array(hsv, dtype=np.float32)
-    return float(arr[:, :, 0].mean()), float(arr[:, :, 1].mean()), float(arr[:, :, 2].mean())
-
-
-def _enrich_label(coco_idx: int, h: float, s: float, v: float) -> str:
-    """Map a COCO detection + HSV stats to an enriched emergency-vehicle label."""
-    if coco_idx in _TRAFFIC_LIGHT_COCO:
-        return "traffic_light"
-
-    if coco_idx in _VEHICLE_COCO and s > 60:
-        # OpenCV-style HSV: hue in [0, 180] when stored as uint8
-        # Pillow HSV: hue in [0, 255]
-        hue_norm = h / 255.0  # normalise to [0, 1]
-        if hue_norm < 0.05 or hue_norm > 0.95:   # red wraps at 0/1
-            return "red_ambulance"
-        if 0.10 < hue_norm < 0.17:               # yellow ~25-45° of 360°
-            return "yellow_ambulance"
-
-    return _COCO_LABELS.get(coco_idx, "other")
 
 
 def _bbox_area_pct(bbox: list[float], w: int, h: int) -> float:
@@ -91,35 +55,30 @@ def _bbox_area_pct(bbox: list[float], w: int, h: int) -> float:
     return float(box_area / frame_area * 100) if frame_area > 0 else 0.0
 
 
-def _top_detection(predictions, score_thresh: float = 0.3):
-    """Return (label_idx, score, bbox) for the highest-scoring detection above threshold."""
-    boxes = predictions["boxes"].cpu().numpy()
+def _largest_person_bbox(predictions, score_thresh: float = 0.3) -> list[float]:
+    """Return the bbox of the highest-area person detection above threshold, or zeros."""
+    boxes  = predictions["boxes"].cpu().numpy()
     scores = predictions["scores"].cpu().numpy()
     labels = predictions["labels"].cpu().numpy()
 
-    mask = scores >= score_thresh
+    mask = (scores >= score_thresh) & (labels == _PERSON_COCO)
     if not mask.any():
-        return None, 0.0, [0.0, 0.0, 0.0, 0.0]
+        return [0.0, 0.0, 0.0, 0.0]
 
-    best = int(np.argmax(scores[mask]))
-    filtered_boxes = boxes[mask]
-    filtered_scores = scores[mask]
-    filtered_labels = labels[mask]
-    bbox = filtered_boxes[best].tolist()
-    return int(filtered_labels[best]), float(filtered_scores[best]), bbox
+    person_boxes = boxes[mask]
+    areas = (person_boxes[:, 2] - person_boxes[:, 0]) * (person_boxes[:, 3] - person_boxes[:, 1])
+    best = int(np.argmax(areas))
+    return person_boxes[best].tolist()
 
 
 # ---------------------------------------------------------------------------
-# Vehicle detector — two implementations, same output column names.
-# backfill_geneva.py picks CPU or GPU variant via --gpu flag.
+# Tier 2a — CPU fallback: SSDLite320 + MobileNetV3 (no GPU required)
 # ---------------------------------------------------------------------------
-
-# CPU implementation: SSDLite320 (no GPU required)
 
 _ssd_model: Optional[torch.nn.Module] = None
 
 
-def _get_ssd_model():
+def _get_ssd_model() -> torch.nn.Module:
     global _ssd_model
     if _ssd_model is None:
         from torchvision.models.detection import (
@@ -132,51 +91,30 @@ def _get_ssd_model():
     return _ssd_model
 
 
-def _run_ssd(image_bytes: bytes):
+def _run_ssd_person(image_bytes: bytes, width: int, height: int) -> float:
     from torchvision.transforms.functional import to_tensor
     img = _decode_image(image_bytes)
     with torch.no_grad():
         preds = _get_ssd_model()(to_tensor(img).unsqueeze(0))[0]
-    return img, *_top_detection(preds)
-
-
-@udf(data_type=pa.string(), input_columns=["image_bytes"])
-def _vehicle_label_cpu(image_bytes: bytes) -> str:
-    img, label_idx, _, bbox = _run_ssd(image_bytes)
-    if label_idx is None:
-        return "no_detection"
-    return _enrich_label(label_idx, *_dominant_hsv(img, bbox))
-
-
-@udf(data_type=pa.float32(), input_columns=["image_bytes"])
-def _vehicle_confidence_cpu(image_bytes: bytes) -> float:
-    _, _, score, _ = _run_ssd(image_bytes)
-    return score
-
-
-@udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"])
-def _vehicle_bbox_area_pct_cpu(image_bytes: bytes, width: int, height: int) -> float:
-    _, _, _, bbox = _run_ssd(image_bytes)
+    bbox = _largest_person_bbox(preds)
     return _bbox_area_pct(bbox, width, height)
 
 
-# GPU implementation: Faster R-CNN ResNet50 FPN v2 — stateful class-based UDFs
-#
-# Geneva stateful UDF rules (from docs):
-#   - @udf decorator goes on the CLASS
-#   - __init__ runs on the driver — keep cheap, no model loading
-#   - __call__ runs on the Ray worker; lazy model loading on first call,
-#     then self.model persists for every subsequent batch that worker handles
-#   - pa.Array inputs → Geneva calls __call__ once per checkpoint batch
-#     (one GPU forward pass per batch, not per row)
-#   - Return pa.Array (docs: "Batch UDFs require data_type in @udf which
-#     defines pyarrow.DataType of the returned pyarrow.Array")
-#   - cuda=True required: tells Geneva's scheduler to route tasks to GPU workers
-#   - Pass an INSTANCE to backfill(), not the class: backfill("col", udf=MyUDF())
+@udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"])
+def _person_bbox_area_pct_cpu(image_bytes: bytes, width: int, height: int) -> float:
+    """Largest detected person bbox as % of frame area (SSDLite — CPU)."""
+    return _run_ssd_person(image_bytes, width, height)
 
+
+# ---------------------------------------------------------------------------
+# Tier 2b — GPU: Faster R-CNN ResNet50 FPN v2 (accurate, GPU recommended)
+#
+# Stateful class-based UDF: __init__ on driver (cheap), __call__ on worker.
+# Geneva calls __call__ once per checkpoint batch (one GPU forward pass).
+# ---------------------------------------------------------------------------
 
 class _FRCNNBase:
-    """Shared model lifecycle for all three GPU vehicle UDFs."""
+    """Shared model lifecycle for Faster R-CNN GPU UDFs."""
 
     def __init__(self) -> None:
         # NOT loaded here — __init__ runs on the driver which has no GPU.
@@ -197,52 +135,36 @@ class _FRCNNBase:
         self.device = next(self.model.parameters()).device
 
     def _infer(self, image_bytes: pa.Array):
-        """Decode batch + one GPU forward pass. Returns (imgs, predictions)."""
+        """Decode a batch of images and run one GPU forward pass."""
         from torchvision.transforms.functional import to_tensor
         self._load()
-        imgs = [_decode_image(b.as_py()) for b in image_bytes]
+        imgs    = [_decode_image(b.as_py()) for b in image_bytes]
         tensors = [to_tensor(img).to(self.device) for img in imgs]
         with torch.no_grad():
             predictions = self.model(tensors)
-        return imgs, predictions
+        return predictions
 
 
-@udf(data_type=pa.string(), input_columns=["image_bytes"], num_gpus=1, num_cpus=1, cuda=True)
-class _VehicleLabelGPU(_FRCNNBase, Callable):
-    def __call__(self, image_bytes: pa.Array) -> pa.Array:
-        imgs, predictions = self._infer(image_bytes)
-        labels = []
-        for img, pred in zip(imgs, predictions):
-            label_idx, _, bbox = _top_detection(pred)
-            labels.append(
-                "no_detection" if label_idx is None
-                else _enrich_label(label_idx, *_dominant_hsv(img, bbox))
-            )
-        return pa.array(labels, type=pa.string())
+@udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"],
+     num_gpus=1, num_cpus=1, cuda=True)
+class _PersonBboxAreaPctGPU(_FRCNNBase, Callable):
+    """
+    Largest detected person bbox as % of frame area (Faster R-CNN — GPU).
 
+    Returns 0.0 when no person is detected above the score threshold.
+    High values (>5%) indicate pedestrians close to the camera — useful for
+    curating training splits focused on prominent, close-range pedestrians.
+    """
 
-@udf(data_type=pa.float32(), input_columns=["image_bytes"], num_gpus=1, num_cpus=1, cuda=True)
-class _VehicleConfidenceGPU(_FRCNNBase, Callable):
-    def __call__(self, image_bytes: pa.Array) -> pa.Array:
-        _, predictions = self._infer(image_bytes)
-        return pa.array(
-            [_top_detection(pred)[1] for pred in predictions], type=pa.float32()
-        )
-
-
-@udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"], num_gpus=1, num_cpus=1, cuda=True)
-class _VehicleBboxAreaPctGPU(_FRCNNBase, Callable):
     def __call__(
         self, image_bytes: pa.Array, width: pa.Array, height: pa.Array
     ) -> pa.Array:
-        _, predictions = self._infer(image_bytes)
-        return pa.array(
-            [
-                _bbox_area_pct(_top_detection(pred)[2], w.as_py(), h.as_py())
-                for pred, w, h in zip(predictions, width, height)
-            ],
-            type=pa.float32(),
-        )
+        predictions = self._infer(image_bytes)
+        results = []
+        for pred, w, h in zip(predictions, width, height):
+            bbox = _largest_person_bbox(pred)
+            results.append(_bbox_area_pct(bbox, w.as_py(), h.as_py()))
+        return pa.array(results, type=pa.float32())
 
 
 # ---------------------------------------------------------------------------
@@ -260,22 +182,13 @@ def white_balance(image_bytes: bytes) -> float:
     img = _decode_image(image_bytes)
     arr = np.array(img, dtype=np.float32)
     r_mean = arr[:, :, 0].mean()
-    g_mean = arr[:, :, 1].mean()
     b_mean = arr[:, :, 2].mean()
-
-    eps = 1e-6
-    rb_ratio = r_mean / (b_mean + eps)
-
-    # Simple heuristic mapping rb_ratio → CCT:
-    # rb_ratio > 1  (more red than blue)  → warm  ~3000 K
-    # rb_ratio < 1  (more blue than red)  → cool  ~7000 K
-    cct = float(np.clip(6500.0 / (rb_ratio + eps), 2500.0, 10000.0))
-    return cct
+    rb_ratio = r_mean / (b_mean + 1e-6)
+    return float(np.clip(6500.0 / (rb_ratio + 1e-6), 2500.0, 10000.0))
 
 
 # ---------------------------------------------------------------------------
-# Scene context  (lightweight keyword heuristic — swap for a real classifier
-#                 on GPU cluster)
+# Scene context
 # ---------------------------------------------------------------------------
 
 @udf(data_type=pa.bool_(), input_columns=["ann_categories"])
@@ -316,27 +229,20 @@ def scene_description(weather: str, scene: str, timeofday: str) -> str:
 # Registry  — used by backfill_geneva.py
 # ---------------------------------------------------------------------------
 
-#: CPU vehicle UDFs — SSDLite320 + MobileNetV3 (no GPU required).
-CPU_VEHICLE_UDFS: dict[str, object] = {
-    "vehicle_label":         _vehicle_label_cpu,
-    "vehicle_confidence":    _vehicle_confidence_cpu,
-    "vehicle_bbox_area_pct": _vehicle_bbox_area_pct_cpu,
+#: CPU person UDF — SSDLite320 + MobileNetV3 (no GPU required).
+CPU_PERSON_UDFS: dict[str, object] = {
+    "person_bbox_area_pct": _person_bbox_area_pct_cpu,
 }
 
-#: GPU vehicle UDFs — Faster R-CNN ResNet50 FPN v2 (GPU recommended).
-#: Same column names as CPU_VEHICLE_UDFS — pass --gpu to backfill_geneva.py
-#: to select this variant.
-#: Stateful class instances: __init__ is called here (on the driver, cheap),
-#: model loading happens lazily inside __call__ on the Ray worker.
-GPU_VEHICLE_UDFS: dict[str, object] = {
-    "vehicle_label":         _VehicleLabelGPU(),
-    "vehicle_confidence":    _VehicleConfidenceGPU(),
-    "vehicle_bbox_area_pct": _VehicleBboxAreaPctGPU(),
+#: GPU person UDF — Faster R-CNN ResNet50 FPN v2 (GPU recommended).
+#: Pass --gpu to backfill_geneva.py to select this variant.
+GPU_PERSON_UDFS: dict[str, object] = {
+    "person_bbox_area_pct": _PersonBboxAreaPctGPU(),
 }
 
-#: Non-vehicle UDFs — annotation-derived and image statistics, no detector.
+#: Tier 1 — annotation-derived and image statistics, no detector.
 METADATA_UDFS: dict[str, object] = {
-    "white_balance":      white_balance,
+    "white_balance":       white_balance,
     "scene_has_crossroad": scene_has_crossroad,
     "scene_has_mountain":  scene_has_mountain,
     "scene_description":   scene_description,
@@ -344,7 +250,6 @@ METADATA_UDFS: dict[str, object] = {
     "has_rider":           has_rider,
 }
 
-#: All UDFs keyed by column name.  Vehicle columns resolve to the CPU variant
-#: by default; backfill_geneva.py --gpu swaps them to GPU_VEHICLE_UDFS before
-#: calling backfill().
-ALL_UDFS: dict[str, object] = {**CPU_VEHICLE_UDFS, **METADATA_UDFS}
+#: All UDFs keyed by column name.  Person column resolves to CPU variant
+#: by default; backfill_geneva.py --gpu swaps it to GPU_PERSON_UDFS.
+ALL_UDFS: dict[str, object] = {**CPU_PERSON_UDFS, **METADATA_UDFS}

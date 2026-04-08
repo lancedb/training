@@ -46,28 +46,26 @@ BDD_SCHEMA = pa.schema(
 #
 # All flat scalars — no structs — so they stay directly queryable with SQL.
 #
-# vehicle_*        : SSDLite (CPU) or Faster R-CNN (GPU) — same column names, --gpu flag selects model
-# vehicle_*        : full Faster R-CNN detector (GPU recommended)
-# white_balance    : estimated colour temperature (K)
-# scene_*          : lightweight scene classifier
+# Tier 1 (CPU, annotation-derived): has_person, has_rider, scene_*
+# Tier 2 (GPU, Faster R-CNN):       person_bbox_area_pct
 # ---------------------------------------------------------------------------
 
 # Number of detection classes (10 BDD categories + 1 background)
 NUM_CLASSES = 11
 
 GENEVA_UDF_COLUMNS = [
-    # vehicle detector (SSDLite CPU or Faster R-CNN GPU — same column names)
-    pa.field("vehicle_label",         pa.string()),
-    pa.field("vehicle_confidence",    pa.float32()),
-    pa.field("vehicle_bbox_area_pct", pa.float32()),
+    # Tier 2: GPU detector — largest detected person as % of frame area.
+    # 0.0 when no person is detected above the score threshold.
+    # >15% → pedestrian is prominent/close; use for close-range pedestrian curation.
+    pa.field("person_bbox_area_pct", pa.float32()),
 
     # white balance
     pa.field("white_balance", pa.float32()),
 
     # scene context
     pa.field("scene_has_crossroad", pa.bool_()),
-    pa.field("scene_has_mountain", pa.bool_()),
-    pa.field("scene_description", pa.string()),
+    pa.field("scene_has_mountain",  pa.bool_()),
+    pa.field("scene_description",   pa.string()),
 
     # annotation presence flags (derived from ann_categories — no image needed)
     pa.field("has_person", pa.bool_()),

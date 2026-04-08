@@ -9,7 +9,7 @@ Covers three high-level operations:
 
 2. Full-text search on Geneva scene descriptions
    Requires an FTS index on scene_description; lets you iterate on filters
-   like "ambulance near crossroad" purely in natural language.
+   like "nighttime pedestrian crossroad" purely in natural language.
 
 3. Reproducible train/val splits via permutation_builder
    Splits live inside LanceDB — no external CSV manifests needed.
@@ -29,15 +29,15 @@ from object_detection.spec_queries import (
 db  = lancedb.connect("data/bdd100k/lancedb")
 tbl = db.open_table("bdd100k")
 
-# How many red-ambulance frames cover >= 20% of the frame?
-print(count_spec(tbl, "red_ambulance", bbox_pct=5.0))
+# How many close-range pedestrian frames (person > 5% of frame)?
+print(count_spec(tbl, "close_range_person", bbox_pct=5.0))
 
 # Preview 10 rows
-preview_spec(tbl, "red_ambulance").head(10)
+preview_spec(tbl, "nighttime_person").head(10)
 
-# FTS: find frames whose scene description mentions an intersection
+# FTS: find frames whose scene description mentions an intersection at night
 make_fts_index(tbl)
-fts_search(tbl, "city street crossroad daytime").head(5)
+fts_search(tbl, "night city street pedestrian").head(5)
 
 # Reproducible 80/20 split stored inside Lance
 perm_tbl = make_split(tbl, seed=42)
@@ -45,7 +45,7 @@ perm_tbl = make_split(tbl, seed=42)
 # Materialise as a Geneva view (requires a Geneva connection)
 gconn = geneva.connect("data/bdd100k/lancedb")
 gtbl  = gconn.open_table("bdd100k")
-mv    = materialize_spec(gconn, gtbl, spec="red_ambulance", bbox_pct=5.0)
+mv    = materialize_spec(gconn, gtbl, spec="close_range_person", bbox_pct=5.0)
 """
 
 from __future__ import annotations
@@ -62,29 +62,7 @@ _SKIP_COLS = {"image_bytes", "ann_bboxes", "ann_occluded", "ann_truncated"}
 # ---------------------------------------------------------------------------
 
 SPEC_FILTERS: dict[str, str] = {
-    # Combined emergency vehicle spec — red + yellow, detected by HSV heuristic.
-    # red_ambulance alone is ~11 rows; combined gives ~1750 — enough to train on.
-    "emergency_vehicle": (
-        "vehicle_label IN ('red_ambulance', 'yellow_ambulance') "
-        "AND vehicle_bbox_area_pct >= {bbox_pct}"
-    ),
-    # Individual colour variants kept for EDA / breakdown queries
-    "red_ambulance": (
-        "vehicle_label = 'red_ambulance' "
-        "AND vehicle_bbox_area_pct >= {bbox_pct}"
-    ),
-    "yellow_ambulance": (
-        "vehicle_label = 'yellow_ambulance' "
-        "AND vehicle_bbox_area_pct >= {bbox_pct}"
-    ),
-    "traffic_light": (
-        "vehicle_label = 'traffic_light' "
-        "AND vehicle_confidence >= {min_confidence}"
-    ),
-    "daytime_clear": (
-        "timeofday = 'daytime' AND weather = 'clear'"
-    ),
-    # Nighttime / rare-class specs (require has_person / has_rider UDF columns)
+    # Tier 1 — annotation-based, no GPU backfill required
     "nighttime_person": (
         "timeofday = 'night' AND has_person = true"
     ),
@@ -93,6 +71,22 @@ SPEC_FILTERS: dict[str, str] = {
     ),
     "nighttime_rider": (
         "timeofday = 'night' AND has_rider = true"
+    ),
+    "daytime_clear": (
+        "timeofday = 'daytime' AND weather = 'clear'"
+    ),
+
+    # Tier 2 — requires person_bbox_area_pct GPU backfill
+    # Frames where the largest detected person occupies > bbox_pct % of the frame.
+    # High values → pedestrian is close to the camera, well-lit, and large in frame.
+    # Low threshold (5%) already excludes distant background figures.
+    # >15% means the person fills a significant portion of frame — they are
+    # nearby (crossing, stop, intersection) rather than a distant background figure.
+    "close_range_person": (
+        "has_person = true AND person_bbox_area_pct > {bbox_pct}"
+    ),
+    "nighttime_close_range_person": (
+        "timeofday = 'night' AND has_person = true AND person_bbox_area_pct > {bbox_pct}"
     ),
 }
 
@@ -115,14 +109,13 @@ def count_spec(tbl, spec: str, **kwargs) -> int:
     Parameters
     ----------
     tbl     : open LanceDB table (must have Geneva UDF columns backfilled)
-    spec    : one of 'red_ambulance', 'yellow_ambulance', 'traffic_light',
-              'daytime_clear', 'nighttime_person', 'rider', 'nighttime_rider'
-    **kwargs: spec threshold overrides, e.g. bbox_pct=5.0, min_confidence=0.5
+    spec    : one of SPEC_FILTERS keys
+    **kwargs: spec threshold overrides, e.g. bbox_pct=5.0
 
     Examples
     --------
     count_spec(tbl, "rider")
-    count_spec(tbl, "red_ambulance", bbox_pct=5.0)
+    count_spec(tbl, "close_range_person", bbox_pct=5.0)
     """
     return tbl.count_rows(filter=_build_filter(spec, **kwargs))
 
@@ -150,24 +143,26 @@ def spec_counts_summary(tbl) -> dict[str, int]:
 
     Example output
     --------------
-    red_ambulance      :      423 rows  (bbox_pct >= 20%)
-    yellow_ambulance   :      187 rows  (bbox_pct >= 20%)
-    traffic_light      :     1832 rows  (conf    >= 0.50)
-    daytime_clear      :     3241 rows
+    nighttime_person        :   6,431 rows
+    rider                   :   4,105 rows
+    nighttime_rider         :     851 rows
+    close_range_person      :   3,200 rows  (person_bbox_area_pct > 5%)
+    daytime_clear           :  14,241 rows
     """
     defaults = {
-        "nighttime_person":  {},
-        "rider":             {},
-        "nighttime_rider":   {},
-        "emergency_vehicle": {"bbox_pct": 5.0},   # red + yellow combined
-        "red_ambulance":     {"bbox_pct": 5.0},
-        "yellow_ambulance":  {"bbox_pct": 5.0},
-        "traffic_light":     {"min_confidence": 0.5},
-        "daytime_clear":     {},
+        "nighttime_person":             {},
+        "rider":                        {},
+        "nighttime_rider":              {},
+        "daytime_clear":                {},
+        "close_range_person":           {"bbox_pct": 15.0},
+        "nighttime_close_range_person": {"bbox_pct": 15.0},
     }
     counts = {}
     for spec, kwargs in defaults.items():
-        counts[spec] = count_spec(tbl, spec, **kwargs)
+        try:
+            counts[spec] = count_spec(tbl, spec, **kwargs)
+        except Exception:
+            counts[spec] = -1   # column not yet backfilled
     return counts
 
 
@@ -190,8 +185,8 @@ def fts_search(tbl, query: str, limit: int = 20):
     Full-text search over Geneva scene descriptions.
 
     Lets researchers iterate on filters without writing SQL — e.g.:
-        fts_search(tbl, "city street daytime ambulance")
-        fts_search(tbl, "intersection rainy night")
+        fts_search(tbl, "night city street pedestrian")
+        fts_search(tbl, "rainy highway rider")
 
     Returns a pandas DataFrame (image_bytes excluded).
     """
@@ -234,9 +229,6 @@ def make_split(
     perm_tbl = make_split(tbl, seed=42)
     train = Permutation.from_tables(tbl, perm_tbl, split="train")
     val   = Permutation.from_tables(tbl, perm_tbl, split="val")
-    # Use in DataLoader:
-    train[0]                          # first training sample
-    train.__getitems__([0, 1, 2])     # batch fetch
     """
     val_ratio = round(1.0 - train_ratio, 4)
     builder = permutation_builder(tbl).shuffle(seed=seed)
@@ -254,7 +246,6 @@ def make_split(
         .execute()
     )
 
-    # split_id=0 → train, split_id=1 → val (names stored in schema metadata)
     n_train = perm_tbl.count_rows(filter="split_id = 0")
     n_val   = perm_tbl.count_rows(filter="split_id = 1")
     print(f"Split created — train: {n_train}  val: {n_val}  (seed={seed})")
@@ -282,25 +273,21 @@ def materialize_spec(
     ----------
     gconn     : open Geneva connection (geneva.connect(...))
     gtbl      : source Geneva table
-    spec      : one of 'red_ambulance', 'yellow_ambulance', etc.
+    spec      : one of SPEC_FILTERS keys
     view_name : destination table name (default: bdd100k_<spec>)
-    **spec_kwargs : spec threshold overrides, e.g. bbox_pct=15.0
+    **spec_kwargs : spec threshold overrides, e.g. bbox_pct=5.0
 
     Example
     -------
     import geneva
     gconn = geneva.connect("data/bdd100k/lancedb")
     gtbl  = gconn.open_table("bdd100k")
-    mv    = materialize_spec(gconn, gtbl, "red_ambulance", bbox_pct=5.0)
+    mv    = materialize_spec(gconn, gtbl, "close_range_person", bbox_pct=5.0)
 
     # Later — refresh to pick up newly ingested rows:
     mv.refresh()
-
-    # Query it like a normal table:
-    mv.count_rows()
-    mv.search().where("timeofday = 'daytime'").to_pandas()
     """
-    spec_kwargs.setdefault("bbox_pct", 20.0)
+    spec_kwargs.setdefault("bbox_pct", 15.0)
     spec_kwargs.setdefault("min_confidence", 0.5)
     view_name = view_name or f"bdd100k_{spec}"
 
@@ -331,7 +318,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Print spec row counts for EDA.")
     p.add_argument("--db", default="data/bdd100k/lancedb")
     p.add_argument("--table", default="bdd100k")
-    p.add_argument("--bbox-pct", type=float, default=20.0)
+    p.add_argument("--bbox-pct", type=float, default=5.0)
     args = p.parse_args()
 
     db  = lancedb.connect(args.db)
@@ -339,4 +326,8 @@ if __name__ == "__main__":
 
     print(f"\nSpec counts — table '{args.table}'  ({tbl.count_rows()} rows total)\n")
     for spec, n in spec_counts_summary(tbl).items():
-        print(f"  {spec:25s}  {n:>8,} rows")
+        label = f"  {spec:35s}"
+        if n == -1:
+            print(f"{label}  (column not yet backfilled)")
+        else:
+            print(f"{label}  {n:>8,} rows")

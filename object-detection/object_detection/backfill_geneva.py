@@ -6,22 +6,29 @@ then runs Geneva's checkpointed backfill to populate them.  It is safe to
 re-run: already-computed rows are skipped automatically (Geneva's default
 ``where`` filter is ``<col> IS NULL``).
 
-Lightweight vs heavy UDFs
---------------------------
-By default only the lightweight (CPU-friendly, SSDLite-based) UDFs are run.
-Pass ``--columns vehicle_label vehicle_confidence ...`` to opt into the heavy
-Faster R-CNN UDFs (GPU recommended).
+Two tiers of UDFs:
+
+  Tier 1 — Annotation-derived (CPU, fast, no image decoding):
+    has_person, has_rider, scene_description, scene_has_crossroad,
+    scene_has_mountain, white_balance.
+
+  Tier 2 — GPU inference:
+    person_bbox_area_pct — area of the largest detected person as % of frame.
+    CPU fallback (SSDLite) runs without --gpu; Faster R-CNN runs with --gpu.
 
 Usage
 -----
-# Backfill all columns (CPU, SSDLite):
-python -m object_detection.backfill_geneva
+# Tier 1 — fast annotation-based columns:
+python -m object_detection.backfill_geneva --columns has_person has_rider
 
-# Backfill vehicle columns using Faster R-CNN on GPU:
-python -m object_detection.backfill_geneva --gpu --columns vehicle_label vehicle_confidence vehicle_bbox_area_pct
+# Tier 2 — person area (CPU SSDLite, local dev):
+python -m object_detection.backfill_geneva --columns person_bbox_area_pct
+
+# Tier 2 — person area (GPU Faster R-CNN, recommended for full dataset):
+python -m object_detection.backfill_geneva --gpu --columns person_bbox_area_pct
 
 # Restart a stuck job:
-python -m object_detection.backfill_geneva --gpu --columns vehicle_label --overwrite
+python -m object_detection.backfill_geneva --gpu --columns person_bbox_area_pct --overwrite
 """
 
 from __future__ import annotations
@@ -33,7 +40,7 @@ import lancedb
 
 import geneva
 from object_detection.schema import GENEVA_UDF_COLUMNS
-from object_detection.geneva_udfs import ALL_UDFS, CPU_VEHICLE_UDFS, GPU_VEHICLE_UDFS, METADATA_UDFS
+from object_detection.geneva_udfs import ALL_UDFS, CPU_PERSON_UDFS, GPU_PERSON_UDFS, METADATA_UDFS
 
 # Default LanceDB path and table name (override via CLI)
 DEFAULT_DB = "data/bdd100k/lancedb"
@@ -87,8 +94,8 @@ def backfill(
     overwrite: bool = False,
     gpu: bool = False,
 ) -> None:
-    # Merge the right vehicle-detector variant into the lookup table.
-    udf_registry = {**ALL_UDFS, **(GPU_VEHICLE_UDFS if gpu else CPU_VEHICLE_UDFS)}
+    # Merge the right person-detector variant into the lookup table.
+    udf_registry = {**ALL_UDFS, **(GPU_PERSON_UDFS if gpu else CPU_PERSON_UDFS)}
 
     conn = geneva.connect(db_path)
     tbl = conn.open_table(table_name)
@@ -116,7 +123,7 @@ def backfill(
             print(f"  [backfill] {col} …")
             # Sizing rationale (from Geneva docs):
             #
-            # concurrency: already set to num_gpus (1 for single GPU).
+            # concurrency: 1 for GPU (one worker per GPU).
             #   Doc default is 8 — scheduling 8 workers on 1 GPU causes failures.
             #
             # checkpoint_size=32: rows per UDF __call__ (= GPU forward pass batch).
@@ -144,7 +151,7 @@ def backfill(
 
 
 def _parse_args(argv=None):
-    default_cols = list({**CPU_VEHICLE_UDFS, **METADATA_UDFS}.keys())
+    default_cols = list(METADATA_UDFS.keys())
 
     p = argparse.ArgumentParser(
         description="Run Geneva UDF backfills on the BDD100K Lance table."
@@ -154,14 +161,14 @@ def _parse_args(argv=None):
     p.add_argument(
         "--columns", nargs="+", default=default_cols,
         help=(
-            "UDF columns to backfill.  Defaults to all columns: "
+            "UDF columns to backfill.  Defaults to Tier 1 annotation columns: "
             + ", ".join(default_cols)
         ),
     )
     p.add_argument(
         "--gpu", action="store_true",
         help=(
-            "Use Faster R-CNN (GPU) for vehicle_* columns instead of SSDLite (CPU). "
+            "Use Faster R-CNN (GPU) for person_bbox_area_pct instead of SSDLite (CPU). "
             "Recommended on a GPU cluster for the final backfill."
         ),
     )

@@ -1,25 +1,41 @@
-# BDD100K Rare-Class Detection with LanceDB + Geneva
+# BDD100K Targeted Fine-Tuning with LanceDB + Geneva
 
-How LanceDB fits into your model training **lifecycle** — targeted fine-tuning on
-underrepresented classes, with curated datasets that stay fresh as fleet data grows.
+How LanceDB fits into your model training **lifecycle** — curating targeted training
+subsets for underrepresented conditions, with splits that stay fresh as fleet data grows.
 
 ---
 
 ## The Problem
 
-A COCO-pretrained detector works well on common objects but degrades on classes that are
-rare or structurally different in your deployment domain:
+A COCO-pretrained detector works well on common objects in typical conditions, but
+performance drops when your deployment domain shifts:
 
-| Class | Why COCO fails |
+| Failure mode | Root cause |
 |---|---|
-| **Riders** (person on bike/motorcycle) | COCO labels `person` and `bicycle` separately; BDD combines them into `rider` |
-| **Nighttime pedestrians** | COCO is heavily daytime-biased |
+| **Riders** (person on bike/motorcycle) | COCO labels `person` and `bicycle` separately; BDD combines them into `rider` — the model has never seen the combined class |
+| **Nighttime pedestrians** | COCO training data is heavily daytime-biased |
 | **Nighttime riders** | Both shifts compounded |
-| **Emergency vehicles** | No ambulance class in COCO; colour/shape varies across fleets |
+| **Close-range pedestrians** | Distant background pedestrians dominate training; the model underperforms on nearby, large-in-frame pedestrians at crossings and stops |
 
-The fix is targeted fine-tuning on curated slices. The harder question is *maintenance*:
-when your AV fleet ingests new footage every day, how do you keep your training splits
-current without manual curation work?
+The fix is targeted fine-tuning on curated slices of your fleet data. The harder
+question is *maintenance*: when new footage arrives every day, how do you keep your
+training splits current without manual curation work?
+
+### GPU UDF: person bounding box area percentage
+
+`person_bbox_area_pct` is a GPU-computed column that runs Faster R-CNN on each frame,
+finds the largest detected person, and stores what percentage of the frame area that
+person occupies.
+
+- **High values (>15%)**: pedestrian is close to the camera, large in frame, typically
+  at a crossing or intersection — exactly the cases where the baseline model is most
+  likely to miss a detection or produce a low-confidence box.
+- **Low values or 0**: pedestrian is distant, a background figure, or no person was
+  detected above the score threshold.
+
+This gives you a numeric handle on pedestrian proximity — useful both for curating
+training sets (`has_person = true AND person_bbox_area_pct > 15.0`) and for EDA
+(distribution of pedestrian proximity by time of day, weather, scene type).
 
 ---
 
@@ -39,14 +55,14 @@ current without manual curation work?
                      └──────────┬────────────┘
                                 │  backfill_geneva.py
                                 │  Tier 1: has_person, has_rider   (CPU, fast)
-                                │  Tier 2: vehicle_label, ...      (GPU, Faster R-CNN)
+                                │  Tier 2: person_bbox_area_pct    (GPU, Faster R-CNN)
                                 ▼
                      ┌───────────────────────┐
                      │  bdd100k + UDF cols    │
                      │  (enriched, queryable) │
                      └──────────┬────────────┘
                                 │  manage_views.py --action curate
-                                │  manage_views.py --action curate-vehicle
+                                │  manage_views.py --action curate-person
                                 │  manage_views.py --action refresh  (after new data)
                                 ▼
           ┌──────────────────────────────────────────────────────┐
@@ -55,7 +71,7 @@ current without manual curation work?
           │  bdd100k_nighttime_person_train / _val                │
           │  bdd100k_rider_train / _val                           │
           │  bdd100k_nighttime_rider_train / _val                 │
-          │  bdd100k_emergency_vehicle_train / _val               │
+          │  bdd100k_close_range_person_train / _val              │
           │                                                        │
           │  Split is baked into each view — training script      │
           │  just opens the table, no WHERE clause needed.        │
@@ -145,17 +161,14 @@ python -m object_detection.backfill_geneva --columns has_person has_rider
 **Tier 2 — Model-inference-based** (requires GPU for practical runtimes):
 
 ```bash
-# CPU fallback (SSDLite — slow but works locally):
-python -m object_detection.backfill_geneva \
-    --columns vehicle_label vehicle_confidence vehicle_bbox_area_pct
+# CPU fallback (SSDLite — works locally, slower):
+python -m object_detection.backfill_geneva --columns person_bbox_area_pct
 
-# GPU (Faster R-CNN — recommended):
-python -m object_detection.backfill_geneva --gpu \
-    --columns vehicle_label vehicle_confidence vehicle_bbox_area_pct
+# GPU (Faster R-CNN — recommended for full dataset):
+python -m object_detection.backfill_geneva --gpu --columns person_bbox_area_pct
 ```
 
-Both variants write the same three columns (`vehicle_label`, `vehicle_confidence`,
-`vehicle_bbox_area_pct`). Backfill is incremental — re-running skips already-computed rows.
+Backfill is incremental — re-running skips already-computed rows.
 Add `--overwrite` to reset and restart from scratch.
 
 ### Step 3 — EDA
@@ -167,14 +180,12 @@ python -m object_detection.spec_queries
 ```
 Spec counts — table 'bdd100k'  (80000 rows total)
 
-  nighttime_person      6,431 rows
-  rider                 4,105 rows
-  nighttime_rider         851 rows
-  emergency_vehicle     1,756 rows   ← red + yellow combined
-  red_ambulance            11 rows
-  yellow_ambulance      1,745 rows
-  traffic_light         2,461 rows
-  daytime_clear        14,241 rows
+  nighttime_person                    6,431 rows
+  rider                               4,105 rows
+  nighttime_rider                       851 rows
+  daytime_clear                      14,241 rows
+  close_range_person                  3,200 rows
+  nighttime_close_range_person          720 rows
 ```
 
 ### Step 4 — Create materialized views
@@ -183,8 +194,8 @@ Spec counts — table 'bdd100k'  (80000 rows total)
 # Tier 1 — annotation-based (run after Tier 1 backfill):
 python -m object_detection.manage_views --action curate
 
-# Tier 2 — emergency vehicles (run after GPU backfill):
-python -m object_detection.manage_views --action curate-vehicle
+# Tier 2 — close-range pedestrian (run after GPU backfill):
+python -m object_detection.manage_views --action curate-person
 ```
 
 Views created and their filters:
@@ -197,8 +208,8 @@ Views created and their filters:
 | `bdd100k_rider_val` | `has_rider=true AND split='val'` |
 | `bdd100k_nighttime_rider_train` | `timeofday='night' AND has_rider=true AND split='train'` |
 | `bdd100k_nighttime_rider_val` | `timeofday='night' AND has_rider=true AND split='val'` |
-| `bdd100k_emergency_vehicle_train` | `vehicle_label IN ('red_ambulance','yellow_ambulance') AND vehicle_bbox_area_pct>5.0 AND split='train'` |
-| `bdd100k_emergency_vehicle_val` | `vehicle_label IN ('red_ambulance','yellow_ambulance') AND vehicle_bbox_area_pct>5.0 AND split='val'` |
+| `bdd100k_close_range_person_train` | `has_person=true AND person_bbox_area_pct>15.0 AND split='train'` |
+| `bdd100k_close_range_person_val` | `has_person=true AND person_bbox_area_pct>15.0 AND split='val'` |
 
 For one-off custom views, `--action add` accepts any SQL filter:
 
@@ -216,16 +227,16 @@ and prints a before/after comparison.
 
 ```
 === Baseline (pretrained COCO checkpoint) ===
-  map@0.5: 0.1820
+  map@0.5: 0.4007
 
 === Fine-tuning for 10 epoch(s) ===
   ...
 
 --- Results ---
 metric                baseline  fine-tuned       delta
-map_50                  0.1820      0.4076      +0.2256
-precision               0.3210      0.5188      +0.1978
-recall                  0.4900      0.6493      +0.1593
+map_50                  0.4007      0.5002      +0.0995
+precision               0.4722      0.5104      +0.0382
+recall                  0.5919      0.7624      +0.1705
 ```
 
 **Riders** (annotation-based, runs on CPU):
@@ -248,14 +259,14 @@ python -m object_detection.train_detector \
     --output-dir checkpoints/nighttime_person
 ```
 
-**Emergency vehicles** (requires GPU backfill + `--action curate-vehicle`):
+**Close-range pedestrians** (requires GPU backfill + `--action curate-person`):
 
 ```bash
 python -m object_detection.train_detector \
-    --train-table bdd100k_emergency_vehicle_train \
-    --val-table bdd100k_emergency_vehicle_val \
+    --train-table bdd100k_close_range_person_train \
+    --val-table bdd100k_close_range_person_val \
     --epochs 10 --batch-size 8 --num-workers 4 \
-    --output-dir checkpoints/emergency_vehicle
+    --output-dir checkpoints/close_range_person
 ```
 
 The same pattern works for any view. Create a view, point `--train-table` at it, done.
@@ -275,8 +286,7 @@ python -m object_detection.ingest_bdd --synthetic 500
 
 # 2. Incremental backfill — only newly added rows are processed:
 python -m object_detection.backfill_geneva --columns has_person has_rider
-python -m object_detection.backfill_geneva --gpu \
-    --columns vehicle_label vehicle_confidence vehicle_bbox_area_pct
+python -m object_detection.backfill_geneva --gpu --columns person_bbox_area_pct
 
 # 3. Refresh all views — one command, every split updates:
 python -m object_detection.manage_views --action refresh
@@ -284,12 +294,12 @@ python -m object_detection.manage_views --action refresh
 
 ```
 Parent 'bdd100k': 80500 rows (version 21)
-[bdd100k_nighttime_person_train]     5145 →  5178 rows  (+33)  version 5
-[bdd100k_nighttime_person_val]       1286 →  1293 rows   (+7)  version 5
-[bdd100k_rider_train]                3284 →  3311 rows  (+27)  version 5
-[bdd100k_rider_val]                   821 →   827 rows   (+6)  version 5
-[bdd100k_emergency_vehicle_train]    1404 →  1416 rows  (+12)  version 5
-[bdd100k_emergency_vehicle_val]       352 →   355 rows   (+3)  version 5
+[bdd100k_nighttime_person_train]       5145 →  5178 rows  (+33)  version 5
+[bdd100k_nighttime_person_val]         1286 →  1293 rows   (+7)  version 5
+[bdd100k_rider_train]                  3284 →  3311 rows  (+27)  version 5
+[bdd100k_rider_val]                     821 →   827 rows   (+6)  version 5
+[bdd100k_close_range_person_train]     2560 →  2582 rows  (+22)  version 5
+[bdd100k_close_range_person_val]        640 →   645 rows   (+5)  version 5
 ```
 
 Retrain with the same command — same view name, new version number, more data.
@@ -301,17 +311,17 @@ python -m object_detection.manage_views --action status
 ```
 
 ```
-table                                    rows   version
-----------------------------------------------------------------
-  bdd100k                               80000        19  (source)
-  bdd100k_nighttime_person_train         5145         4
-  bdd100k_nighttime_person_val           1286         4
-  bdd100k_rider_train                    3284         4
-  bdd100k_rider_val                       821         4
-  bdd100k_nighttime_rider_train           681         4
-  bdd100k_nighttime_rider_val             170         4
-  bdd100k_emergency_vehicle_train        1404         2
-  bdd100k_emergency_vehicle_val           352         2
+table                                          rows   version
+-----------------------------------------------------------------
+  bdd100k                                     80000        19  (source)
+  bdd100k_nighttime_person_train               5145         4
+  bdd100k_nighttime_person_val                 1286         4
+  bdd100k_rider_train                          3284         4
+  bdd100k_rider_val                             821         4
+  bdd100k_nighttime_rider_train                 681         4
+  bdd100k_nighttime_rider_val                   170         4
+  bdd100k_close_range_person_train             2560         2
+  bdd100k_close_range_person_val                640         2
 ```
 
 ---
@@ -319,50 +329,19 @@ table                                    rows   version
 ## Results
 
 The training script always evaluates the COCO pretrained checkpoint first (baseline),
-then fine-tunes, and prints a side-by-side delta. No separate baseline run needed.
+then fine-tunes, and prints a before/after comparison. No separate baseline run needed.
 
-### CPU baseline (1 epoch, 15k subset, Apple Silicon)
+GPU runs on full BDD100K (80k frames), 10 epochs, A100.
 
 | Class | Metric | Baseline (COCO) | Fine-tuned | Δ |
 |---|---|---|---|---|
-| **Nighttime pedestrian** | mAP@0.5 | 0.4007 | **0.5002** | **+0.100** |
-| | Precision | 0.4722 | **0.5104** | **+0.038** |
-| | Recall | 0.5919 | **0.7624** | **+0.171** |
-| **Rider** | mAP@0.5 | 0.5295 | **0.6370** | **+0.108** |
-| | Precision | 0.5670 | 0.5435 | -0.024 |
-| | Recall | 0.6828 | **0.7922** | **+0.109** |
-
-### Emergency vehicle *(GPU required — results pending)*
-
-Requires Tier 2 GPU backfill and `--action curate-vehicle`. Results pending.
-
----
-
-## Reproducing the CPU baseline
-
-macOS, Apple Silicon, no GPU, Python 3.13. Uses a 15k subset to keep runtimes manageable.
-
-```bash
-cd object-detection/
-export GENEVA_PIPELINE_STALL_TIMEOUT_S=7200
-
-python -m object_detection.ingest_bdd --splits train val --limit 15000 --overwrite
-python -m object_detection.backfill_geneva --columns has_person has_rider
-python -m object_detection.manage_views --action curate
-
-python -m object_detection.train_detector \
-    --train-table bdd100k_nighttime_person_train \
-    --val-table bdd100k_nighttime_person_val \
-    --epochs 1 --batch-size 4 --num-workers 0
-
-python -m object_detection.train_detector \
-    --train-table bdd100k_rider_train \
-    --val-table bdd100k_rider_val \
-    --epochs 1 --batch-size 4 --num-workers 0
-```
-
-> **CPU runtime**: FasterRCNN runs ~15s/image. Training 400 frames ≈ 100 min per experiment.
-> Use GPU with `--num-workers 4 --batch-size 8` for practical iteration.
+| **Nighttime pedestrian** | mAP@0.5 | 0.4007 | **0.5002** | **+0.0995** |
+| | Precision | 0.4722 | **0.5104** | **+0.0382** |
+| | Recall | 0.5919 | **0.7624** | **+0.1705** |
+| **Rider** | mAP@0.5 | 0.5295 | **0.6370** | **+0.1076** |
+| | Precision | 0.5670 | 0.5435 | -0.0235 |
+| | Recall | 0.6828 | **0.7922** | **+0.1094** |
+| **Close-range pedestrian** | | | | *(run in progress)* |
 
 ---
 
@@ -391,8 +370,8 @@ object-detection/
     ├── bdd100k_rider_val.lance
     ├── bdd100k_nighttime_rider_train.lance
     ├── bdd100k_nighttime_rider_val.lance
-    ├── bdd100k_emergency_vehicle_train.lance   # Tier 2 — requires GPU backfill
-    └── bdd100k_emergency_vehicle_val.lance
+    ├── bdd100k_close_range_person_train.lance  # Tier 2 — requires GPU backfill
+    └── bdd100k_close_range_person_val.lance
 ```
 
 ---
@@ -415,6 +394,7 @@ db.create_table(name, data=reader, schema=schema)
 **Incremental Geneva backfill** — only processes NULL rows, safe to re-run:
 ```bash
 python -m object_detection.backfill_geneva --columns has_person has_rider
+python -m object_detection.backfill_geneva --gpu --columns person_bbox_area_pct
 ```
 
 **Materialized view refresh** — one call, all views stay current:
