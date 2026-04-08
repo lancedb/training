@@ -144,8 +144,10 @@ def evaluate(
     Run inference on ``loader`` and compute mAP@0.5, precision, recall.
 
     Returns a dict with keys: map_50, precision, recall.
+    AMP autocast is enabled automatically when running on CUDA.
     """
     model.eval()
+    use_amp = device.type == "cuda"
 
     # Accumulate per-class TP/FP lists and GT counts
     class_tp: dict[int, list[int]] = defaultdict(list)
@@ -155,7 +157,8 @@ def evaluate(
 
     for images, targets in loader:
         images_dev = [img.to(device) for img in images]
-        predictions = model(images_dev)
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            predictions = model(images_dev)
 
         for pred, tgt in zip(predictions, targets):
             gt_boxes = tgt["boxes"].to(device)

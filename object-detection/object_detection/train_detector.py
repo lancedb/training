@@ -11,29 +11,16 @@ Both runs use the same Lance dataloader, demonstrating that LanceDB removes
 the data pipeline bottleneck: the curated training subset is a WHERE filter,
 not a separate export step.
 
+Mixed-precision training (AMP) is enabled automatically on CUDA — roughly
+2× faster on Ampere GPUs (A100, 3090, etc.) with no accuracy impact.
+
 Usage
 -----
-# Evaluate the pretrained COCO checkpoint on the val split (no training):
-python -m object_detection.train_detector --mode baseline \\
-    --db data/bdd100k/lancedb --val-table bdd100k
-
-# Fine-tune on a curated red-ambulance subset and evaluate:
-python -m object_detection.train_detector --mode finetune \\
-    --db data/bdd100k/lancedb \\
-    --train-table bdd100k_red_ambulance \\
-    --val-table bdd100k \\
-    --val-where "vehicle_label = 'red_ambulance' AND vehicle_bbox_area_pct > 5.0" \\
-    --epochs 5 \\
-    --batch-size 4 \\
-    --lr 0.005
-
-# Quick smoke test with a tiny batch:
-python -m object_detection.train_detector --mode finetune \\
-    --db data/bdd100k/lancedb --train-table bdd100k \\
-    --train-where "split = 'train'" \\
-    --val-where "split = 'val'" \\
-    --limit-train 200 --limit-val 50 \\
-    --epochs 1 --batch-size 2
+python -m object_detection.train_detector \\
+    --train-table bdd100k_rider_train \\
+    --val-table   bdd100k_rider_val \\
+    --epochs 10 --batch-size 8 --num-workers 4 \\
+    --output-dir checkpoints/rider
 """
 
 from __future__ import annotations
@@ -82,26 +69,35 @@ def build_model(num_classes: int, pretrained: bool = True, replace_head: bool = 
 # Training loop
 # ---------------------------------------------------------------------------
 
-def train_one_epoch(model, optimizer, loader, device, epoch: int) -> float:
+def train_one_epoch(model, optimizer, scaler, loader, device, epoch: int) -> float:
     model.train()
     total_loss = 0.0
     n_batches = 0
+    use_amp = scaler is not None
 
     for batch_idx, (images, targets) in enumerate(loader):
-        images = [img.to(device) for img in images]
+        images  = [img.to(device) for img in images]
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
         # Skip empty batches (frames with no annotations)
         if all(t["labels"].numel() == 0 for t in targets):
             continue
 
-        loss_dict = model(images, targets)
-        losses = sum(loss_dict.values())
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            loss_dict = model(images, targets)
+            losses = sum(loss_dict.values())
 
         optimizer.zero_grad()
-        losses.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
-        optimizer.step()
+        if use_amp:
+            scaler.scale(losses).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            losses.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+            optimizer.step()
 
         total_loss += losses.item()
         n_batches += 1
@@ -121,9 +117,10 @@ def train_one_epoch(model, optimizer, loader, device, epoch: int) -> float:
 
 def run(args) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    use_amp = device.type == "cuda"
+    print(f"Device: {device}  AMP: {use_amp}")
 
-    db = lancedb.connect(args.db)
+    db  = lancedb.connect(args.db)
     tbl = db.open_table(args.train_table)
     print(f"Table '{tbl.name}'  version={tbl.version}  rows={len(tbl)}")
 
@@ -156,6 +153,7 @@ def run(args) -> None:
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, NUM_CLASSES).to(device)
 
     # --- fine-tune ---
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
 
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.SGD(params, lr=args.lr, momentum=0.9, weight_decay=1e-4)
@@ -164,7 +162,7 @@ def run(args) -> None:
     print(f"\n=== Fine-tuning for {args.epochs} epoch(s) ===")
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
-        avg_loss = train_one_epoch(model, optimizer, train_loader, device, epoch)
+        avg_loss = train_one_epoch(model, optimizer, scaler, train_loader, device, epoch)
         scheduler.step()
         print(f"  epoch {epoch}  avg_loss {avg_loss:.4f}  ({time.time() - t0:.1f}s)")
 
@@ -191,14 +189,14 @@ def run(args) -> None:
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(description="Train/evaluate Faster R-CNN on LanceDB BDD100K.")
     p.add_argument("--mode", choices=["baseline", "finetune"], default="finetune")
-    p.add_argument("--db", default="data/bdd100k/lancedb")
-    p.add_argument("--train-table", default="bdd100k_nighttime_person")
+    p.add_argument("--db",          default="data/bdd100k/lancedb")
+    p.add_argument("--train-table", default="bdd100k_nighttime_person_train")
     p.add_argument("--val-table",   default="bdd100k_nighttime_person_val")
-    p.add_argument("--epochs", type=int, default=5)
-    p.add_argument("--batch-size", type=int, default=4)
-    p.add_argument("--lr", type=float, default=0.005)
-    p.add_argument("--num-workers", type=int, default=0)
-    p.add_argument("--output-dir", default=None)
+    p.add_argument("--epochs",      type=int,   default=10)
+    p.add_argument("--batch-size",  type=int,   default=8)
+    p.add_argument("--lr",          type=float, default=0.005)
+    p.add_argument("--num-workers", type=int,   default=4)
+    p.add_argument("--output-dir",  default=None)
     return p.parse_args(argv)
 
 
