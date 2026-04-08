@@ -1,30 +1,47 @@
 """
 Manage Geneva materialized views for BDD100K curated training splits.
 
-This is the maintenance layer of the LanceDB + Geneva lifecycle:
+Each view is a permanent, refreshable slice of the parent table defined
+by a SQL WHERE clause.  The curation definition lives here — not in the
+training command.  Training scripts just open the view by name.
 
+Lifecycle
+---------
   ingest → backfill → curate (once) → train
                           ↑               ↓
               new data arrives         checkpoint
                   ↓                       ↓
               refresh views ←── mv.version logged in training run
 
+Two tiers of views, matching the two tiers of backfill:
+
+  Tier 1  Annotation-based (has_person, has_rider) — fast, no GPU needed.
+          Covers nighttime pedestrians, riders, nighttime riders.
+
+  Tier 2  Model-inference-based (vehicle_label, vehicle_bbox_area_pct) —
+          requires GPU UDF backfill first.
+          Covers emergency vehicles (red + yellow, detected by HSV heuristic).
+
 Actions
 -------
-  curate   Create the three built-in views (nighttime_person, rider, nighttime_rider).
-  add      Create a single custom view for any SQL filter you care about.
-  refresh  Refresh all views after new data is ingested + backfilled.
-  status   Print row counts and versions for parent + all views.
+  curate          Create Tier 1 views (run once after Tier 1 backfill).
+  curate-vehicle  Create Tier 2 emergency-vehicle views (after GPU backfill).
+  add             Create any custom view from an arbitrary SQL filter.
+  refresh         Refresh all views after new data is ingested + backfilled.
+  status          Print row counts and versions for parent + all views.
 
 Usage
 -----
-# Built-in views (annotation-based, no GPU backfill needed):
+# Tier 1 — annotation-based views:
 python -m object_detection.manage_views --action curate
 
-# Custom view — ambulance detection (requires vehicle_label backfill):
+# Tier 2 — emergency vehicle views (requires vehicle_label backfill):
+python -m object_detection.manage_views --action curate-vehicle
+
+# Custom view (any SQL filter over any backfilled column):
 python -m object_detection.manage_views --action add \\
-    --name bdd100k_ambulance \\
-    --filter "vehicle_label = 'red_ambulance' AND vehicle_bbox_area_pct > 5.0"
+    --name bdd100k_foggy \\
+    --filter "weather = 'foggy' AND split = 'train'"
 
 # After new data arrives:
 python -m object_detection.manage_views --action refresh
@@ -54,10 +71,16 @@ BUILTIN_VIEWS: dict[str, str] = {
 }
 
 # Tier 2 — requires vehicle_label + vehicle_bbox_area_pct backfill first.
-# Run: python -m object_detection.manage_views --action curate-ambulance
-AMBULANCE_VIEWS: dict[str, str] = {
-    "bdd100k_ambulance_train": "vehicle_label = 'red_ambulance' AND vehicle_bbox_area_pct > 5.0 AND split = 'train'",
-    "bdd100k_ambulance_val":   "vehicle_label = 'red_ambulance' AND vehicle_bbox_area_pct > 5.0 AND split = 'val'",
+# Covers all emergency vehicles detected by the HSV heuristic (red + yellow).
+# red_ambulance alone is only ~11 rows; combined gives ~1750 rows — enough to train.
+# Run: python -m object_detection.manage_views --action curate-vehicle
+_EV_FILTER = (
+    "vehicle_label IN ('red_ambulance', 'yellow_ambulance') "
+    "AND vehicle_bbox_area_pct > 5.0"
+)
+VEHICLE_VIEWS: dict[str, str] = {
+    "bdd100k_emergency_vehicle_train": f"{_EV_FILTER} AND split = 'train'",
+    "bdd100k_emergency_vehicle_val":   f"{_EV_FILTER} AND split = 'val'",
 }
 
 
@@ -91,17 +114,17 @@ def curate(db_path: str) -> None:
     print("All Tier 1 views ready.")
 
 
-def curate_ambulance(db_path: str) -> None:
-    """Create Tier 2 ambulance views (requires vehicle_label backfill first)."""
+def curate_vehicle(db_path: str) -> None:
+    """Create Tier 2 emergency-vehicle views (requires vehicle_label backfill first)."""
     gconn, lconn = _connect(db_path)
     existing = set(lconn.list_tables().tables)
     gtbl = gconn.open_table(PARENT_TABLE)
 
     with gconn.local_ray_context():
-        for name, sql_filter in AMBULANCE_VIEWS.items():
+        for name, sql_filter in VEHICLE_VIEWS.items():
             _create_or_refresh(gconn, gtbl, name, sql_filter, existing)
 
-    print("Ambulance views ready.")
+    print("Emergency vehicle views ready.")
 
 
 def add(db_path: str, name: str, sql_filter: str) -> None:
@@ -179,7 +202,7 @@ def _create_or_refresh(gconn, gtbl, name: str, sql_filter: str, existing: set) -
 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(description="Manage Geneva materialized views for BDD100K.")
-    p.add_argument("--action", choices=["status", "curate", "curate-ambulance", "refresh", "add"],
+    p.add_argument("--action", choices=["status", "curate", "curate-vehicle", "refresh", "add"],
                    default="status")
     p.add_argument("--db",     default="data/bdd100k/lancedb")
     p.add_argument("--name",   default=None,
@@ -199,8 +222,8 @@ def main(argv=None):
         add(args.db, args.name, args.filter)
     elif args.action == "curate":
         curate(args.db)
-    elif args.action == "curate-ambulance":
-        curate_ambulance(args.db)
+    elif args.action == "curate-vehicle":
+        curate_vehicle(args.db)
     elif args.action == "refresh":
         refresh(args.db)
     elif args.action == "status":

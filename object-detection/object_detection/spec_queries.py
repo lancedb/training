@@ -62,6 +62,13 @@ _SKIP_COLS = {"image_bytes", "ann_bboxes", "ann_occluded", "ann_truncated"}
 # ---------------------------------------------------------------------------
 
 SPEC_FILTERS: dict[str, str] = {
+    # Combined emergency vehicle spec — red + yellow, detected by HSV heuristic.
+    # red_ambulance alone is ~11 rows; combined gives ~1750 — enough to train on.
+    "emergency_vehicle": (
+        "vehicle_label IN ('red_ambulance', 'yellow_ambulance') "
+        "AND vehicle_bbox_area_pct >= {bbox_pct}"
+    ),
+    # Individual colour variants kept for EDA / breakdown queries
     "red_ambulance": (
         "vehicle_label = 'red_ambulance' "
         "AND vehicle_bbox_area_pct >= {bbox_pct}"
@@ -149,13 +156,14 @@ def spec_counts_summary(tbl) -> dict[str, int]:
     daytime_clear      :     3241 rows
     """
     defaults = {
-        "nighttime_person": {},
-        "rider":            {},
-        "nighttime_rider":  {},
-        "red_ambulance":    {"bbox_pct": 5.0},
-        "yellow_ambulance": {"bbox_pct": 5.0},
-        "traffic_light":    {"min_confidence": 0.5},
-        "daytime_clear":    {},
+        "nighttime_person":  {},
+        "rider":             {},
+        "nighttime_rider":   {},
+        "emergency_vehicle": {"bbox_pct": 5.0},   # red + yellow combined
+        "red_ambulance":     {"bbox_pct": 5.0},
+        "yellow_ambulance":  {"bbox_pct": 5.0},
+        "traffic_light":     {"min_confidence": 0.5},
+        "daytime_clear":     {},
     }
     counts = {}
     for spec, kwargs in defaults.items():
