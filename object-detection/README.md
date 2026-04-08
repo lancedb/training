@@ -15,7 +15,7 @@ performance drops when your deployment domain shifts:
 | **Riders** (person on bike/motorcycle) | COCO labels `person` and `bicycle` separately; BDD combines them into `rider` — the model has never seen the combined class |
 | **Nighttime pedestrians** | COCO training data is heavily daytime-biased |
 | **Nighttime riders** | Both shifts compounded |
-| **Close-range pedestrians** | Distant background pedestrians dominate training; the model underperforms on nearby, large-in-frame pedestrians at crossings and stops |
+| **Distant pedestrians** | COCO training data is biased toward large, prominent objects; the model underperforms on small, far-away pedestrians where a miss has the highest real-world consequence |
 
 The fix is targeted fine-tuning on curated slices of your fleet data. The harder
 question is *maintenance*: when new footage arrives every day, how do you keep your
@@ -27,14 +27,16 @@ training splits current without manual curation work?
 finds the largest detected person, and stores what percentage of the frame area that
 person occupies.
 
-- **High values (>5%)**: pedestrian is close to the camera, large in frame, typically
-  at a crossing or intersection — exactly the cases where the baseline model is most
-  likely to miss a detection or produce a low-confidence box.
-- **Low values or 0**: pedestrian is distant, a background figure, or no person was
-  detected above the score threshold.
+- **Low values (<30%)**: pedestrian is small and distant — the model saw them as a
+  few-pixel blob, or missed them entirely (value=0 means annotation says person
+  present but Faster R-CNN scored below threshold). These are the genuinely hard
+  cases: missing a distant pedestrian has far higher real-world consequence than
+  missing a large one right in front of the camera.
+- **High values (>30%)**: pedestrian is large and close — a relatively easy detection
+  that the COCO-pretrained baseline already handles well.
 
-This gives you a numeric handle on pedestrian proximity — useful both for curating
-training sets (`has_person = true AND person_bbox_area_pct > 5.0`) and for EDA
+This gives you a numeric handle on pedestrian size — useful both for curating
+hard-case training sets (`has_person = true AND person_bbox_area_pct < 30.0`) and for EDA
 (distribution of pedestrian proximity by time of day, weather, scene type).
 
 ---
@@ -208,8 +210,8 @@ Views created and their filters:
 | `bdd100k_rider_val` | `has_rider=true AND split='val'` |
 | `bdd100k_nighttime_rider_train` | `timeofday='night' AND has_rider=true AND split='train'` |
 | `bdd100k_nighttime_rider_val` | `timeofday='night' AND has_rider=true AND split='val'` |
-| `bdd100k_close_range_person_train` | `has_person=true AND person_bbox_area_pct>5.0 AND split='train'` |
-| `bdd100k_close_range_person_val` | `has_person=true AND person_bbox_area_pct>5.0 AND split='val'` |
+| `bdd100k_distant_person_train` | `has_person=true AND person_bbox_area_pct<30.0 AND split='train'` |
+| `bdd100k_distant_person_val` | `has_person=true AND person_bbox_area_pct<30.0 AND split='val'` |
 
 For one-off custom views, `--action add` accepts any SQL filter:
 
@@ -259,14 +261,14 @@ python -m object_detection.train_detector \
     --output-dir checkpoints/nighttime_person
 ```
 
-**Close-range pedestrians** (requires GPU backfill + `--action curate-person`):
+**Distant pedestrians** (requires GPU backfill + `--action curate-person`):
 
 ```bash
 python -m object_detection.train_detector \
-    --train-table bdd100k_close_range_person_train \
-    --val-table bdd100k_close_range_person_val \
+    --train-table bdd100k_distant_person_train \
+    --val-table bdd100k_distant_person_val \
     --epochs 10 --batch-size 8 --num-workers 4 \
-    --output-dir checkpoints/close_range_person
+    --output-dir checkpoints/distant_person
 ```
 
 The same pattern works for any view. Create a view, point `--train-table` at it, done.
@@ -341,7 +343,7 @@ GPU runs on full BDD100K (80k frames), 10 epochs, A100.
 | **Rider** | mAP@0.5 | 0.5295 | **0.6370** | **+0.1076** |
 | | Precision | 0.5670 | 0.5435 | -0.0235 |
 | | Recall | 0.6828 | **0.7922** | **+0.1094** |
-| **Close-range pedestrian** | | | | *(run in progress)* |
+| **Distant pedestrian** | | | | *(run in progress)* |
 
 ---
 
@@ -370,8 +372,8 @@ object-detection/
     ├── bdd100k_rider_val.lance
     ├── bdd100k_nighttime_rider_train.lance
     ├── bdd100k_nighttime_rider_val.lance
-    ├── bdd100k_close_range_person_train.lance  # Tier 2 — requires GPU backfill
-    └── bdd100k_close_range_person_val.lance
+    ├── bdd100k_distant_person_train.lance  # Tier 2 — requires GPU backfill
+    └── bdd100k_distant_person_val.lance
 ```
 
 ---

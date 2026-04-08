@@ -30,7 +30,7 @@ db  = lancedb.connect("data/bdd100k/lancedb")
 tbl = db.open_table("bdd100k")
 
 # How many close-range pedestrian frames (person > 5% of frame)?
-print(count_spec(tbl, "close_range_person", bbox_pct=5.0))
+print(count_spec(tbl, "distant_person", bbox_pct=5.0))
 
 # Preview 10 rows
 preview_spec(tbl, "nighttime_person").head(10)
@@ -45,7 +45,7 @@ perm_tbl = make_split(tbl, seed=42)
 # Materialise as a Geneva view (requires a Geneva connection)
 gconn = geneva.connect("data/bdd100k/lancedb")
 gtbl  = gconn.open_table("bdd100k")
-mv    = materialize_spec(gconn, gtbl, spec="close_range_person", bbox_pct=5.0)
+mv    = materialize_spec(gconn, gtbl, spec="distant_person", bbox_pct=5.0)
 """
 
 from __future__ import annotations
@@ -77,16 +77,16 @@ SPEC_FILTERS: dict[str, str] = {
     ),
 
     # Tier 2 — requires person_bbox_area_pct GPU backfill
-    # Frames where the largest detected person occupies > bbox_pct % of the frame.
-    # High values → pedestrian is close to the camera, well-lit, and large in frame.
-    # Low threshold (5%) already excludes distant background figures.
-    # >15% means the person fills a significant portion of frame — they are
-    # nearby (crossing, stop, intersection) rather than a distant background figure.
-    "close_range_person": (
-        "has_person = true AND person_bbox_area_pct > {bbox_pct}"
+    # Frames where the largest detected person covers <bbox_pct% of the frame,
+    # OR where the detector found no person at all (area=0) despite the annotation.
+    # These are the hard cases: distant pedestrians, partially occluded figures,
+    # and people the COCO-pretrained model already misses entirely (area=0).
+    # Fine-tuning on these teaches the model to detect small, far-away pedestrians.
+    "distant_person": (
+        "has_person = true AND person_bbox_area_pct < {bbox_pct}"
     ),
-    "nighttime_close_range_person": (
-        "timeofday = 'night' AND has_person = true AND person_bbox_area_pct > {bbox_pct}"
+    "nighttime_distant_person": (
+        "timeofday = 'night' AND has_person = true AND person_bbox_area_pct < {bbox_pct}"
     ),
 }
 
@@ -115,7 +115,7 @@ def count_spec(tbl, spec: str, **kwargs) -> int:
     Examples
     --------
     count_spec(tbl, "rider")
-    count_spec(tbl, "close_range_person", bbox_pct=5.0)
+    count_spec(tbl, "distant_person", bbox_pct=5.0)
     """
     return tbl.count_rows(filter=_build_filter(spec, **kwargs))
 
@@ -146,7 +146,7 @@ def spec_counts_summary(tbl) -> dict[str, int]:
     nighttime_person        :   6,431 rows
     rider                   :   4,105 rows
     nighttime_rider         :     851 rows
-    close_range_person      :   3,200 rows  (person_bbox_area_pct > 5%)
+    distant_person      :   3,200 rows  (person_bbox_area_pct > 5%)
     daytime_clear           :  14,241 rows
     """
     defaults = {
@@ -154,8 +154,8 @@ def spec_counts_summary(tbl) -> dict[str, int]:
         "rider":                        {},
         "nighttime_rider":              {},
         "daytime_clear":                {},
-        "close_range_person":           {"bbox_pct": 5.0},
-        "nighttime_close_range_person": {"bbox_pct": 5.0},
+        "distant_person":           {"bbox_pct": 30.0},
+        "nighttime_distant_person": {"bbox_pct": 30.0},
     }
     counts = {}
     for spec, kwargs in defaults.items():
@@ -282,12 +282,12 @@ def materialize_spec(
     import geneva
     gconn = geneva.connect("data/bdd100k/lancedb")
     gtbl  = gconn.open_table("bdd100k")
-    mv    = materialize_spec(gconn, gtbl, "close_range_person", bbox_pct=5.0)
+    mv    = materialize_spec(gconn, gtbl, "distant_person", bbox_pct=5.0)
 
     # Later — refresh to pick up newly ingested rows:
     mv.refresh()
     """
-    spec_kwargs.setdefault("bbox_pct", 5.0)
+    spec_kwargs.setdefault("bbox_pct", 30.0)
     spec_kwargs.setdefault("min_confidence", 0.5)
     view_name = view_name or f"bdd100k_{spec}"
 

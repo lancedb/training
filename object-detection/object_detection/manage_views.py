@@ -73,12 +73,15 @@ BUILTIN_VIEWS: dict[str, str] = {
 }
 
 # Tier 2 — requires person_bbox_area_pct GPU backfill first.
-# Frames where a detected person covers >5% of the frame — close-range pedestrians.
+# Frames where the largest detected person covers <5% of the frame, OR where the
+# detector found no person at all (area=0) despite the annotation flag being set.
+# These are the genuinely hard cases: distant pedestrians, partially occluded figures,
+# or pedestrians the pretrained COCO model already struggles to detect.
 # Run: python -m object_detection.manage_views --action curate-person
-_CP_FILTER = "has_person = true AND person_bbox_area_pct > 5.0"
+_DP_FILTER = "has_person = true AND person_bbox_area_pct < 30.0"
 PERSON_VIEWS: dict[str, str] = {
-    "bdd100k_close_range_person_train": f"{_CP_FILTER} AND split = 'train'",
-    "bdd100k_close_range_person_val":   f"{_CP_FILTER} AND split = 'val'",
+    "bdd100k_distant_person_train": f"{_DP_FILTER} AND split = 'train'",
+    "bdd100k_distant_person_val":   f"{_DP_FILTER} AND split = 'val'",
 }
 
 
@@ -93,6 +96,13 @@ def _all_views(lconn) -> list[str]:
         t for t in lconn.list_tables().tables
         if t != PARENT_TABLE and not t.startswith("__")
     ]
+
+
+def _drop_view(lconn, name: str) -> None:
+    """Drop a single materialized view (no-op if it doesn't exist)."""
+    if name in lconn.list_tables().tables:
+        lconn.drop_table(name)
+        print(f"[{name}] dropped.")
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +143,18 @@ def add(db_path: str, name: str, sql_filter: str) -> None:
 
     with gconn.local_ray_context():
         _create_or_refresh(gconn, gtbl, name, sql_filter, existing)
+
+
+def drop(db_path: str) -> None:
+    """Drop all materialized views (keeps the parent bdd100k table intact)."""
+    _, lconn = _connect(db_path)
+    views = _all_views(lconn)
+    if not views:
+        print("No views found.")
+        return
+    for name in views:
+        _drop_view(lconn, name)
+    print(f"\nDropped {len(views)} view(s). Run --action curate to recreate.")
 
 
 def refresh(db_path: str) -> None:
@@ -184,7 +206,19 @@ def _create_or_refresh(gconn, gtbl, name: str, sql_filter: str, existing: set) -
     if name in existing:
         print(f"[{name}] already exists — refreshing …")
         mv = gconn.open_table(name)
-        mv.refresh()
+        try:
+            mv.refresh()
+        except ValueError as e:
+            if "missing required columns" in str(e) or "no longer exist" in str(e):
+                # Source table schema changed (e.g. columns removed).
+                # Drop and recreate so the view reflects the current schema.
+                print(f"[{name}] schema mismatch — dropping and recreating …")
+                gconn.drop_table(name)
+                query = gtbl.search().where(sql_filter)
+                mv = gconn.create_materialized_view(name, query)
+                mv.refresh()
+            else:
+                raise
     else:
         print(f"[{name}] creating … (filter: {sql_filter})")
         query = gtbl.search().where(sql_filter)
@@ -201,7 +235,7 @@ def _create_or_refresh(gconn, gtbl, name: str, sql_filter: str, existing: set) -
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(description="Manage Geneva materialized views for BDD100K.")
     p.add_argument("--action",
-                   choices=["status", "curate", "curate-person", "refresh", "add"],
+                   choices=["status", "curate", "curate-person", "refresh", "add", "drop"],
                    default="status")
     p.add_argument("--db",     default="data/bdd100k/lancedb")
     p.add_argument("--name",   default=None,
@@ -225,6 +259,8 @@ def main(argv=None):
         curate_person(args.db)
     elif args.action == "refresh":
         refresh(args.db)
+    elif args.action == "drop":
+        drop(args.db)
     elif args.action == "status":
         status(args.db)
 
