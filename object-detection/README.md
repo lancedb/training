@@ -27,14 +27,14 @@ training splits current without manual curation work?
 finds the largest detected person, and stores what percentage of the frame area that
 person occupies.
 
-- **High values (>15%)**: pedestrian is close to the camera, large in frame, typically
+- **High values (>5%)**: pedestrian is close to the camera, large in frame, typically
   at a crossing or intersection — exactly the cases where the baseline model is most
   likely to miss a detection or produce a low-confidence box.
 - **Low values or 0**: pedestrian is distant, a background figure, or no person was
   detected above the score threshold.
 
 This gives you a numeric handle on pedestrian proximity — useful both for curating
-training sets (`has_person = true AND person_bbox_area_pct > 15.0`) and for EDA
+training sets (`has_person = true AND person_bbox_area_pct > 5.0`) and for EDA
 (distribution of pedestrian proximity by time of day, weather, scene type).
 
 ---
@@ -208,8 +208,8 @@ Views created and their filters:
 | `bdd100k_rider_val` | `has_rider=true AND split='val'` |
 | `bdd100k_nighttime_rider_train` | `timeofday='night' AND has_rider=true AND split='train'` |
 | `bdd100k_nighttime_rider_val` | `timeofday='night' AND has_rider=true AND split='val'` |
-| `bdd100k_close_range_person_train` | `has_person=true AND person_bbox_area_pct>15.0 AND split='train'` |
-| `bdd100k_close_range_person_val` | `has_person=true AND person_bbox_area_pct>15.0 AND split='val'` |
+| `bdd100k_close_range_person_train` | `has_person=true AND person_bbox_area_pct>5.0 AND split='train'` |
+| `bdd100k_close_range_person_val` | `has_person=true AND person_bbox_area_pct>5.0 AND split='val'` |
 
 For one-off custom views, `--action add` accepts any SQL filter:
 

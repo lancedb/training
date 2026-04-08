@@ -154,8 +154,8 @@ def spec_counts_summary(tbl) -> dict[str, int]:
         "rider":                        {},
         "nighttime_rider":              {},
         "daytime_clear":                {},
-        "close_range_person":           {"bbox_pct": 15.0},
-        "nighttime_close_range_person": {"bbox_pct": 15.0},
+        "close_range_person":           {"bbox_pct": 5.0},
+        "nighttime_close_range_person": {"bbox_pct": 5.0},
     }
     counts = {}
     for spec, kwargs in defaults.items():
@@ -287,7 +287,7 @@ def materialize_spec(
     # Later — refresh to pick up newly ingested rows:
     mv.refresh()
     """
-    spec_kwargs.setdefault("bbox_pct", 15.0)
+    spec_kwargs.setdefault("bbox_pct", 5.0)
     spec_kwargs.setdefault("min_confidence", 0.5)
     view_name = view_name or f"bdd100k_{spec}"
 

@@ -75,7 +75,7 @@ BUILTIN_VIEWS: dict[str, str] = {
 # Tier 2 — requires person_bbox_area_pct GPU backfill first.
 # Frames where a detected person covers >5% of the frame — close-range pedestrians.
 # Run: python -m object_detection.manage_views --action curate-person
-_CP_FILTER = "has_person = true AND person_bbox_area_pct > 15.0"
+_CP_FILTER = "has_person = true AND person_bbox_area_pct > 5.0"
 PERSON_VIEWS: dict[str, str] = {
     "bdd100k_close_range_person_train": f"{_CP_FILTER} AND split = 'train'",
     "bdd100k_close_range_person_val":   f"{_CP_FILTER} AND split = 'val'",

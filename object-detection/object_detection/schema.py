@@ -56,7 +56,7 @@ NUM_CLASSES = 11
 GENEVA_UDF_COLUMNS = [
     # Tier 2: GPU detector — largest detected person as % of frame area.
     # 0.0 when no person is detected above the score threshold.
-    # >15% → pedestrian is prominent/close; use for close-range pedestrian curation.
+    # >5% → pedestrian is prominent/close (~5-8m away); use for close-range curation.
     pa.field("person_bbox_area_pct", pa.float32()),
 
     # white balance
