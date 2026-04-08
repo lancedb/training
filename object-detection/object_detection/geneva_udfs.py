@@ -131,25 +131,19 @@ class _FRCNNBase:
         )
         self.model = fasterrcnn_resnet50_fpn_v2(
             weights=FasterRCNN_ResNet50_FPN_V2_Weights.COCO_V1
-        ).eval().cuda()
+        ).eval().half().cuda()
         self.device = next(self.model.parameters()).device
 
     def _infer(self, image_bytes: pa.Array):
-        """Decode a batch of images and run one GPU forward pass.
 
-        Uses torchvision.io.decode_jpeg with device='cuda' (nvjpeg) so JPEG
-        decoding happens on the GPU, not the CPU.  This keeps the A100 busy
-        throughout the batch rather than stalling on sequential PIL decodes.
-        """
         import torchvision.io as tvio
         self._load()
         tensors = []
         for b in image_bytes:
             raw = b.as_py()
-            # frombuffer: zero-copy view of the bytes object (stays on CPU)
             byte_t = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
-            # decode_jpeg with device='cuda' uses nvjpeg → output lands on GPU
-            img_t = tvio.decode_jpeg(byte_t, device=self.device).float() / 255.0
+            # decode_jpeg with device='cuda' uses nvjpeg → decoded tensor on GPU
+            img_t = tvio.decode_jpeg(byte_t, device=self.device).half() / 255.0
             tensors.append(img_t)
         with torch.no_grad():
             predictions = self.model(tensors)
@@ -175,6 +169,9 @@ class _PersonBboxAreaPctGPU(_FRCNNBase, Callable):
         for pred, w, h in zip(predictions, width, height):
             bbox = _largest_person_bbox(pred)
             results.append(_bbox_area_pct(bbox, w.as_py(), h.as_py()))
+        # Release GPU memory immediately so concurrent workers don't accumulate
+        # fragmented allocations across batches.
+        torch.cuda.empty_cache()
         return pa.array(results, type=pa.float32())
 
 
