@@ -196,7 +196,7 @@ class _FRCNNBase:
         self.device = next(self.model.parameters()).device
 
     def _infer(self, image_bytes: pa.Array):
-        """Decode + run one batched forward pass. Returns (imgs, predictions)."""
+        """Run one GPU forward pass on the batch. Returns (imgs, predictions)."""
         from torchvision.transforms.functional import to_tensor
         self._load_model()
         imgs = [_decode_image(b.as_py()) for b in image_bytes]

@@ -114,7 +114,7 @@ def backfill(
                 continue
 
             print(f"  [backfill] {col} …")
-            checkpoint_size = 256 if gpu else 32
+            checkpoint_size = 32
             job_id = tbl.backfill(
                 col,
                 udf=udf_fn,
