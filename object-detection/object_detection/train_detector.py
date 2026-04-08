@@ -99,16 +99,16 @@ def train_one_epoch(model, optimizer, scaler, loader, device, epoch: int) -> flo
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
             optimizer.step()
 
-        total_loss += losses.item()
+        total_loss += losses.detach()
         n_batches += 1
 
         if batch_idx % 20 == 0:
             print(
                 f"  epoch {epoch}  batch {batch_idx:4d}  "
-                f"loss {losses.item():.4f}"
+                f"loss {losses.detach().item():.4f}"
             )
 
-    return total_loss / max(n_batches, 1)
+    return (total_loss / max(n_batches, 1)).item()
 
 
 # ---------------------------------------------------------------------------
