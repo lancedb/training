@@ -200,7 +200,7 @@ def _run_frcnn_batch(image_bytes: pa.Array):
     return imgs, predictions
 
 
-@udf(data_type=pa.string(), input_columns=["image_bytes"], num_gpus=1, num_cpus=1)
+@udf(data_type=pa.string(), input_columns=["image_bytes"], num_gpus=1, num_cpus=1, cuda=True)
 def _vehicle_label_gpu(image_bytes: pa.Array) -> pa.Array:
     imgs, predictions = _run_frcnn_batch(image_bytes)
     labels = []
@@ -213,13 +213,13 @@ def _vehicle_label_gpu(image_bytes: pa.Array) -> pa.Array:
     return pa.array(labels, type=pa.string())
 
 
-@udf(data_type=pa.float32(), input_columns=["image_bytes"], num_gpus=1, num_cpus=1)
+@udf(data_type=pa.float32(), input_columns=["image_bytes"], num_gpus=1, num_cpus=1, cuda=True)
 def _vehicle_confidence_gpu(image_bytes: pa.Array) -> pa.Array:
     _, predictions = _run_frcnn_batch(image_bytes)
     return pa.array([_top_detection(pred)[1] for pred in predictions], type=pa.float32())
 
 
-@udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"], num_gpus=1, num_cpus=1)
+@udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"], num_gpus=1, num_cpus=1, cuda=True)
 def _vehicle_bbox_area_pct_gpu(
     image_bytes: pa.Array, width: pa.Array, height: pa.Array
 ) -> pa.Array:
