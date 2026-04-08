@@ -134,8 +134,11 @@ def run(args) -> None:
     )
     print(f"Train: {len(train_loader.dataset)} rows  Val: {len(val_loader.dataset)} rows")
 
-    # Baseline uses the intact COCO head (replace_head=False) so pretrained
-    # weights are not destroyed.  Fine-tune swaps in a fresh head afterwards.
+    # Baseline: intact COCO head (91 classes), evaluated against BDD ground truth
+    # which uses COCO class IDs via BDD_LABEL_MAP — so the comparison is valid.
+    # Fine-tune: same model, same COCO head, trained end-to-end on BDD data.
+    # BDD uses a subset of COCO class IDs (person=1, car=3, bus=6, truck=8, …)
+    # so the pretrained head weights are a strong starting point — no head swap needed.
     model = build_model(NUM_CLASSES, pretrained=True, replace_head=False).to(device)
 
     # --- baseline: just evaluate the COCO pretrained checkpoint ---
@@ -148,11 +151,7 @@ def run(args) -> None:
     if args.mode == "baseline":
         return
 
-    # Replace head for fine-tuning on BDD class IDs, keep on same device
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, NUM_CLASSES).to(device)
-
-    # --- fine-tune ---
+    # --- fine-tune: same COCO head, trained end-to-end on BDD data ---
     scaler = torch.cuda.amp.GradScaler() if use_amp else None
 
     params = [p for p in model.parameters() if p.requires_grad]

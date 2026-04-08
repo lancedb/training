@@ -25,7 +25,9 @@ training splits current without manual curation work?
 
 `person_bbox_area_pct` is a GPU-computed column that runs Faster R-CNN on each frame,
 finds the largest detected person, and stores what percentage of the frame area that
-person occupies.
+person occupies. A low value means the person is small and distant — hard to detect.
+A value of 0.0 means the annotation flags a person present but the pretrained model
+couldn't find them at all, making these the hardest frames of all.
 
 - **Low values (<30%)**: pedestrian is small and distant — the model saw them as a
   few-pixel blob, or missed them entirely (value=0 means annotation says person
@@ -300,8 +302,8 @@ Parent 'bdd100k': 80500 rows (version 21)
 [bdd100k_nighttime_person_val]         1286 →  1293 rows   (+7)  version 5
 [bdd100k_rider_train]                  3284 →  3311 rows  (+27)  version 5
 [bdd100k_rider_val]                     821 →   827 rows   (+6)  version 5
-[bdd100k_close_range_person_train]     2560 →  2582 rows  (+22)  version 5
-[bdd100k_close_range_person_val]        640 →   645 rows   (+5)  version 5
+[bdd100k_distant_person_train]         3100 →  3128 rows  (+28)  version 5
+[bdd100k_distant_person_val]            775 →   782 rows   (+7)  version 5
 ```
 
 Retrain with the same command — same view name, new version number, more data.
@@ -322,8 +324,8 @@ table                                          rows   version
   bdd100k_rider_val                             821         4
   bdd100k_nighttime_rider_train                 681         4
   bdd100k_nighttime_rider_val                   170         4
-  bdd100k_close_range_person_train             2560         2
-  bdd100k_close_range_person_val                640         2
+  bdd100k_distant_person_train                 3100         2
+  bdd100k_distant_person_val                    775         2
 ```
 
 ---

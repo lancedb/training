@@ -27,9 +27,16 @@ from lancedb.permutation import Permutation
 # BDD100K → COCO class ID mapping.
 # Torchvision Faster R-CNN is pretrained on 91-class COCO; we must use the
 # same IDs so baseline and fine-tuned evaluation are comparable.
-# BDD categories not present in COCO (rider, traffic sign) are dropped.
+#
+# BDD has 10 classes; 8 map directly to COCO:
+#   rider       — BDD-specific (person straddling a bike/motorcycle). No COCO
+#                 equivalent, but semantically a person, so mapped to person (1).
+#                 This gives the model more person training signal in rider frames.
+#   traffic sign — COCO only has stop sign (13), not a generic traffic sign class.
+#                 Dropped to avoid label noise.
 BDD_LABEL_MAP: dict[str, int] = {
     "person":        1,   # COCO: person
+    "rider":         1,   # BDD-specific → treated as person for detection purposes
     "bicycle":       2,   # COCO: bicycle
     "car":           3,   # COCO: car
     "motorcycle":    4,   # COCO: motorcycle
