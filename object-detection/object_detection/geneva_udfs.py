@@ -27,7 +27,7 @@ the Geneva-filtered training split, not to be a ground-truth detector.
 from __future__ import annotations
 
 import io
-from typing import Callable, Optional
+from typing import Optional
 
 import numpy as np
 import pyarrow as pa
@@ -160,85 +160,75 @@ def _vehicle_bbox_area_pct_cpu(image_bytes: bytes, width: int, height: int) -> f
     return _bbox_area_pct(bbox, width, height)
 
 
-# GPU implementation: Faster R-CNN ResNet50 FPN v2 — stateful class-based UDFs
+# GPU implementation: Faster R-CNN ResNet50 FPN v2
 #
-# Geneva's stateful UDF pattern:
-#   - @udf goes on the CLASS, not __call__
-#   - __init__ runs on the driver (kept cheap — no model loading here)
-#   - __call__ runs on each Ray worker; the model is loaded lazily on first
-#     invocation and then reused for every subsequent batch that worker handles
-#   - __call__ uses pa.Array inputs so Geneva passes the full checkpoint_size
-#     batch in one call (one GPU forward pass per batch, not per row)
+# Statefulness via module-level global: each Ray worker is a separate process.
+# The global _frcnn_model starts as None in every worker. _get_frcnn_model()
+# loads it on the first call and returns the cached instance on every subsequent
+# call — i.e. the model loads once per worker, exactly like a class-based UDF.
 #
-# All three UDFs share _FRCNNBase which owns the model lifecycle.
+# pa.Array inputs make these batched UDFs: Geneva passes the full
+# checkpoint_size rows in one __call__, giving us one GPU forward pass per
+# checkpoint instead of one per row.
+
+_frcnn_model: Optional[torch.nn.Module] = None
+_frcnn_device: Optional[torch.device] = None
 
 
-class _FRCNNBase:
-    """Mixin: loads Faster R-CNN once per worker, runs batched inference."""
-
-    def __init__(self):
-        # Intentionally None — model is NOT loaded on the driver.
-        # It is loaded lazily inside __call__, which runs on the Ray worker
-        # that actually has a GPU allocated to it.
-        self.model: Optional[torch.nn.Module] = None
-        self.device: Optional[torch.device] = None
-
-    def _load_model(self) -> None:
-        if self.model is not None:
-            return
+def _get_frcnn_model():
+    global _frcnn_model, _frcnn_device
+    if _frcnn_model is None:
         from torchvision.models.detection import (
             fasterrcnn_resnet50_fpn_v2,
             FasterRCNN_ResNet50_FPN_V2_Weights,
         )
-        self.model = fasterrcnn_resnet50_fpn_v2(
+        _frcnn_model = fasterrcnn_resnet50_fpn_v2(
             weights=FasterRCNN_ResNet50_FPN_V2_Weights.COCO_V1
         ).eval().cuda()
-        self.device = next(self.model.parameters()).device
+        _frcnn_device = next(_frcnn_model.parameters()).device
+    return _frcnn_model, _frcnn_device
 
-    def _infer(self, image_bytes: pa.Array):
-        """Run one GPU forward pass on the batch. Returns (imgs, predictions)."""
-        from torchvision.transforms.functional import to_tensor
-        self._load_model()
-        imgs = [_decode_image(b.as_py()) for b in image_bytes]
-        tensors = [to_tensor(img).to(self.device) for img in imgs]
-        with torch.no_grad():
-            predictions = self.model(tensors)
-        return imgs, predictions
+
+def _run_frcnn_batch(image_bytes: pa.Array):
+    """One batched GPU forward pass. Returns (imgs, predictions)."""
+    from torchvision.transforms.functional import to_tensor
+    model, device = _get_frcnn_model()
+    imgs = [_decode_image(b.as_py()) for b in image_bytes]
+    tensors = [to_tensor(img).to(device) for img in imgs]
+    with torch.no_grad():
+        predictions = model(tensors)
+    return imgs, predictions
 
 
 @udf(data_type=pa.string(), input_columns=["image_bytes"], num_gpus=1, num_cpus=1)
-class _VehicleLabelGPU(_FRCNNBase, Callable):
-    def __call__(self, image_bytes: pa.Array) -> pa.Array:
-        imgs, predictions = self._infer(image_bytes)
-        labels = []
-        for img, pred in zip(imgs, predictions):
-            label_idx, _, bbox = _top_detection(pred)
-            labels.append(
-                "no_detection" if label_idx is None
-                else _enrich_label(label_idx, *_dominant_hsv(img, bbox))
-            )
-        return pa.array(labels, type=pa.string())
+def _vehicle_label_gpu(image_bytes: pa.Array) -> pa.Array:
+    imgs, predictions = _run_frcnn_batch(image_bytes)
+    labels = []
+    for img, pred in zip(imgs, predictions):
+        label_idx, _, bbox = _top_detection(pred)
+        labels.append(
+            "no_detection" if label_idx is None
+            else _enrich_label(label_idx, *_dominant_hsv(img, bbox))
+        )
+    return pa.array(labels, type=pa.string())
 
 
 @udf(data_type=pa.float32(), input_columns=["image_bytes"], num_gpus=1, num_cpus=1)
-class _VehicleConfidenceGPU(_FRCNNBase, Callable):
-    def __call__(self, image_bytes: pa.Array) -> pa.Array:
-        _, predictions = self._infer(image_bytes)
-        scores = [_top_detection(pred)[1] for pred in predictions]
-        return pa.array(scores, type=pa.float32())
+def _vehicle_confidence_gpu(image_bytes: pa.Array) -> pa.Array:
+    _, predictions = _run_frcnn_batch(image_bytes)
+    return pa.array([_top_detection(pred)[1] for pred in predictions], type=pa.float32())
 
 
 @udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"], num_gpus=1, num_cpus=1)
-class _VehicleBboxAreaPctGPU(_FRCNNBase, Callable):
-    def __call__(
-        self, image_bytes: pa.Array, width: pa.Array, height: pa.Array
-    ) -> pa.Array:
-        _, predictions = self._infer(image_bytes)
-        pcts = [
-            _bbox_area_pct(_top_detection(pred)[2], w.as_py(), h.as_py())
-            for pred, w, h in zip(predictions, width, height)
-        ]
-        return pa.array(pcts, type=pa.float32())
+def _vehicle_bbox_area_pct_gpu(
+    image_bytes: pa.Array, width: pa.Array, height: pa.Array
+) -> pa.Array:
+    _, predictions = _run_frcnn_batch(image_bytes)
+    pcts = [
+        _bbox_area_pct(_top_detection(pred)[2], w.as_py(), h.as_py())
+        for pred, w, h in zip(predictions, width, height)
+    ]
+    return pa.array(pcts, type=pa.float32())
 
 
 # ---------------------------------------------------------------------------
@@ -325,9 +315,9 @@ CPU_VEHICLE_UDFS: dict[str, object] = {
 #: Stateful class instances: __init__ is called here (on the driver, cheap),
 #: model loading happens lazily inside __call__ on the Ray worker.
 GPU_VEHICLE_UDFS: dict[str, object] = {
-    "vehicle_label":         _VehicleLabelGPU(),
-    "vehicle_confidence":    _VehicleConfidenceGPU(),
-    "vehicle_bbox_area_pct": _VehicleBboxAreaPctGPU(),
+    "vehicle_label":         _vehicle_label_gpu,
+    "vehicle_confidence":    _vehicle_confidence_gpu,
+    "vehicle_bbox_area_pct": _vehicle_bbox_area_pct_gpu,
 }
 
 #: Non-vehicle UDFs — annotation-derived and image statistics, no detector.
