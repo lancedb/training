@@ -114,12 +114,29 @@ def backfill(
                 continue
 
             print(f"  [backfill] {col} …")
-            checkpoint_size = 32
+            # Sizing rationale (from Geneva docs):
+            #
+            # concurrency: already set to num_gpus (1 for single GPU).
+            #   Doc default is 8 — scheduling 8 workers on 1 GPU causes failures.
+            #
+            # checkpoint_size=32: rows per UDF __call__ (= GPU forward pass batch).
+            #   Doc default is 100. Reduced for 1280×720 images to stay within VRAM.
+            #   Setting min == max == checkpoint_size disables adaptive sizing
+            #   (docs: "force a checkpoint size, set all three to the same value").
+            #
+            # task_size=256: rows per Ray task.
+            #   Doc default: num_rows / (concurrency * intra_applier_concurrency * 2)
+            #   = 80000 / (1*1*2) = 40000 rows/task. At ~1s per 32-image batch that
+            #   is ~1250s/task — exceeds the 600s stall watchdog even with env var
+            #   not set. 256 rows = 8 batches × ~1s ≈ 8s/task, safe under any timeout.
             job_id = tbl.backfill(
                 col,
                 udf=udf_fn,
                 concurrency=concurrency,
-                checkpoint_size=checkpoint_size,
+                checkpoint_size=32,
+                min_checkpoint_size=32,
+                max_checkpoint_size=32,
+                task_size=256,
             )
             print(f"  [done]     {col}  (job_id={job_id})\n")
 
