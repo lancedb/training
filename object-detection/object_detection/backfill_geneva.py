@@ -98,9 +98,10 @@ def backfill(
     concurrency: int,
     overwrite: bool = False,
     gpu: bool = False,
+    dedup_threshold: float = 0.97,
 ) -> None:
-    # is_duplicate UDF is instantiated here so it picks up the correct db_path.
-    dedup_udfs = {"is_duplicate": _IsDuplicateCPU(db_path=db_path)}
+    # is_duplicate UDF is instantiated here so it picks up the correct db_path + threshold.
+    dedup_udfs = {"is_duplicate": _IsDuplicateCPU(db_path=db_path, threshold=dedup_threshold)}
 
     udf_registry = {
         **ALL_UDFS,
@@ -178,6 +179,14 @@ def _parse_args(argv=None):
         "--overwrite", action="store_true",
         help="Drop and re-add columns before backfilling — use to restart a stuck job",
     )
+    p.add_argument(
+        "--dedup-threshold", type=float, default=0.97,
+        help=(
+            "Cosine similarity threshold for is_duplicate backfill (default: 0.97). "
+            "Only used when 'is_duplicate' is in --columns. "
+            "0.97 = near-pixel-identical frames; lower = more aggressive dedup."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -191,6 +200,7 @@ def main(argv=None):
         concurrency=concurrency,
         overwrite=args.overwrite,
         gpu=args.gpu,
+        dedup_threshold=args.dedup_threshold,
     )
 
 

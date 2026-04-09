@@ -247,7 +247,7 @@ def scene_description(weather: str, scene: str, timeofday: str) -> str:
 # ---------------------------------------------------------------------------
 
 _DEDUP_DB_PATH = "data/bdd100k/lancedb"
-_DEDUP_THRESHOLD = 0.85
+_DEDUP_THRESHOLD = 0.97   # ResNet18 on dashcam: 0.97+ = near-pixel-identical frames only
 
 
 @udf(data_type=pa.list_(pa.float32(), 512), input_columns=["image_bytes"],
