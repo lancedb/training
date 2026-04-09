@@ -36,7 +36,6 @@ from __future__ import annotations
 import argparse
 
 import pyarrow as pa
-import lancedb
 
 import geneva
 from object_detection.schema import GENEVA_UDF_COLUMNS
@@ -53,34 +52,21 @@ DEFAULT_TABLE = "bdd100k"
 _FIELD_BY_NAME: dict[str, pa.Field] = {f.name: f for f in GENEVA_UDF_COLUMNS}
 
 
-# Map PyArrow type → the SQL null expression LanceDB expects when adding a column
-_NULL_EXPR: dict[pa.DataType, str] = {
-    pa.string():  "cast(null as string)",
-    pa.float32(): "cast(null as float)",
-    pa.bool_():   "cast(null as boolean)",
-    # Fixed-size list uses DataFusion's arrow_cast with the Arrow type string.
-    pa.list_(pa.float32(), 512): "arrow_cast(null, 'FixedSizeList(512, Float32)')",
-}
-
-
 def _ensure_columns(tbl, columns: list[str], silent: bool = False) -> None:
     """Add null-initialised columns to the table for any that are missing."""
     existing = set(tbl.schema.names)
-    to_add = {}
+    to_add = []
     for col in columns:
         if col in existing:
             continue
         field = _FIELD_BY_NAME.get(col)
         if field is None:
             raise ValueError(f"Unknown UDF column: '{col}'.  Valid options: {list(_FIELD_BY_NAME)}")
-        sql_expr = _NULL_EXPR.get(field.type)
-        if sql_expr is None:
-            raise NotImplementedError(f"No SQL null expression for type {field.type}")
-        to_add[col] = sql_expr
+        to_add.append(field)
 
     if to_add:
         if not silent:
-            print(f"  Adding {len(to_add)} new column(s): {list(to_add)}")
+            print(f"  Adding {len(to_add)} new column(s): {[f.name for f in to_add]}")
         tbl.add_columns(to_add)
 
 

@@ -109,13 +109,6 @@ def _all_views(lconn) -> list[str]:
     ]
 
 
-def _drop_view(lconn, name: str) -> None:
-    """Drop a single materialized view (no-op if it doesn't exist)."""
-    if name in lconn.list_tables().tables:
-        lconn.drop_table(name)
-        print(f"[{name}] dropped.")
-
-
 # ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
@@ -165,13 +158,17 @@ def add(db_path: str, name: str, sql_filter: str) -> None:
 
 def drop(db_path: str) -> None:
     """Drop all materialized views (keeps the parent bdd100k table intact)."""
-    _, lconn = _connect(db_path)
+    gconn, lconn = _connect(db_path)
     views = _all_views(lconn)
     if not views:
         print("No views found.")
         return
     for name in views:
-        _drop_view(lconn, name)
+        try:
+            gconn.drop_table(name)
+            print(f"[{name}] dropped.")
+        except Exception:
+            pass
     print(f"\nDropped {len(views)} view(s). Run --action curate to recreate.")
 
 

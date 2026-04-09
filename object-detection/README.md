@@ -207,6 +207,36 @@ Recall improvement dominates across all three failure modes — the model catche
 
 ---
 
+## Results — After Deduplication
+
+Dedup removes near-identical consecutive frames (cosine similarity ≥ 0.97 on ResNet18 embeddings) from training splits only. Val splits are unchanged so baseline numbers are identical.
+
+**Training data reduction per split**
+
+| Split | Before dedup | After dedup | Removed |
+|---|---|---|---|
+| rider_train | 3,590 | 3,150 | 440 (12.3%) |
+| nighttime_person_train | 5,594 | 3,022 | 2,572 (46.0%) |
+| distant_person_train | 22,092 | 19,004 | 3,088 (14.0%) |
+
+Nighttime is hit hardest — long monotonous highway clips with barely-changing frames. Rider and distant person are more episodic, so less redundancy.
+
+**Training results**
+
+| Failure mode | Metric | Baseline (COCO) | No dedup | Deduped | Δ vs no-dedup |
+|---|---|---|---|---|---|
+| **Rider** | mAP@0.5 | 0.5563 | 0.6565 | **0.6598** | **+0.0033** |
+| | Precision | 0.5872 | 0.6016 | 0.5983 | -0.0033 |
+| | Recall | 0.6788 | 0.7834 | **0.7829** | -0.0005 |
+| **Nighttime pedestrian** | mAP@0.5 | 0.4025 | 0.5260 | 0.5154 | -0.0106 |
+| | Precision | 0.4739 | 0.5569 | 0.5483 | -0.0086 |
+| | Recall | 0.5923 | 0.7579 | 0.7527 | -0.0052 |
+| **Distant pedestrian** | mAP@0.5 | 0.4746 | 0.5810 | **0.5803** | -0.0007 |
+| | Precision | 0.5847 | 0.6363 | **0.6374** | +0.0011 |
+| | Recall | 0.6794 | 0.8038 | **0.8023** | -0.0015 |
+
+---
+
 ## Project Structure
 
 ```

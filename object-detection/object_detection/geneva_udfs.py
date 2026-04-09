@@ -234,26 +234,32 @@ def scene_description(weather: str, scene: str, timeofday: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tier 3 — Dedup: ResNet18 embeddings + is_duplicate flag
+# Tier 3 — Dedup: DINOv2 embeddings + is_duplicate flag
 #
 # Two-step process:
-#   1. backfill_geneva --gpu --columns embedding   → GPU ResNet18 forward pass
+#   1. backfill_geneva --gpu --columns embedding   → GPU DINOv2 forward pass
 #   2. dedup --action index                        → IVF-PQ cosine index
 #   3. backfill_geneva --columns is_duplicate      → per-row vector search
 #
 # is_duplicate = True when nearest non-self neighbour has cosine similarity
-# >= threshold (default 0.85).  Both frames in a near-duplicate pair get
+# >= threshold (default 0.97). Both frames in a near-duplicate pair get
 # flagged; manage_views already filters them out automatically.
 # ---------------------------------------------------------------------------
 
 _DEDUP_DB_PATH = "data/bdd100k/lancedb"
-_DEDUP_THRESHOLD = 0.97   # ResNet18 on dashcam: 0.97+ = near-pixel-identical frames only
+_DEDUP_THRESHOLD = 0.97
 
 
-@udf(data_type=pa.list_(pa.float32(), 512), input_columns=["image_bytes"],
+@udf(data_type=pa.list_(pa.float32(), 384), input_columns=["image_bytes"],
      num_gpus=1, num_cpus=1, cuda=True)
 class _EmbeddingGPU:
-    """ResNet18 (512-d, L2-normalised) image embedding — GPU."""
+    """DINOv2 ViT-S/14 (384-d, L2-normalised) image embedding — GPU.
+
+    DINOv2's self-supervised patch features are far more discriminative than
+    ImageNet-classification features for appearance similarity: truly near-
+    identical frames cluster very tightly while frames from different scenes
+    stay well-separated even within the same domain (roads, night, etc.).
+    """
 
     def __init__(self) -> None:
         self.model: Optional[torch.nn.Module] = None
@@ -262,25 +268,28 @@ class _EmbeddingGPU:
     def _load(self) -> None:
         if self.model is not None:
             return
-        from torchvision.models import resnet18, ResNet18_Weights
-        base = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-        # Remove final FC layer — output shape (B, 512, 1, 1)
-        self.model = torch.nn.Sequential(*list(base.children())[:-1]).eval().half().cuda()
+        self.model = (
+            torch.hub.load("facebookresearch/dinov2", "dinov2_vits14", verbose=False)
+            .eval().half().cuda()
+        )
         self.device = next(self.model.parameters()).device
 
     def __call__(self, image_bytes: pa.Array) -> pa.Array:
         import torchvision.io as tvio
+        import torchvision.transforms.functional as TF
         self._load()
         tensors = []
         for b in image_bytes:
             byte_t = torch.frombuffer(bytearray(b.as_py()), dtype=torch.uint8)
-            img_t = tvio.decode_jpeg(byte_t, device=self.device).half() / 255.0
+            img_t = tvio.decode_jpeg(byte_t, device=self.device).float() / 255.0
+            img_t = TF.normalize(img_t, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            img_t = TF.resize(img_t, [224, 224], antialias=True).half()
             tensors.append(img_t)
         with torch.no_grad():
-            feats = self.model(torch.stack(tensors)).squeeze(-1).squeeze(-1)
+            feats = self.model(torch.stack(tensors))          # (B, 384) CLS token
             feats = torch.nn.functional.normalize(feats, dim=1)
         torch.cuda.empty_cache()
-        return pa.array(feats.cpu().float().tolist(), type=pa.list_(pa.float32(), 512))
+        return pa.array(feats.cpu().float().tolist(), type=pa.list_(pa.float32(), 384))
 
 
 @udf(data_type=pa.bool_(), input_columns=["image_id", "embedding"])
@@ -333,7 +342,7 @@ GPU_PERSON_UDFS: dict[str, object] = {
     "person_bbox_area_pct": _PersonBboxAreaPctGPU(),
 }
 
-#: GPU embedding UDF — ResNet18 (512-d). Requires --gpu flag.
+#: GPU embedding UDF — DINOv2 ViT-S/14 (384-d). Requires --gpu flag.
 GPU_EMBED_UDFS: dict[str, object] = {
     "embedding": _EmbeddingGPU(),
 }
