@@ -247,18 +247,19 @@ def scene_description(weather: str, scene: str, timeofday: str) -> str:
 # ---------------------------------------------------------------------------
 
 _DEDUP_DB_PATH = "data/bdd100k/lancedb"
-_DEDUP_THRESHOLD = 0.97
+_DEDUP_THRESHOLD = 0.98
 
 
-@udf(data_type=pa.list_(pa.float32(), 384), input_columns=["image_bytes"],
+@udf(data_type=pa.list_(pa.float32(), 512), input_columns=["image_bytes"],
      num_gpus=1, num_cpus=1, cuda=True)
 class _EmbeddingGPU:
-    """DINOv2 ViT-S/14 (384-d, L2-normalised) image embedding — GPU.
+    """ResNet34 (512-d, L2-normalised) image embedding — GPU.
 
-    DINOv2's self-supervised patch features are far more discriminative than
-    ImageNet-classification features for appearance similarity: truly near-
-    identical frames cluster very tightly while frames from different scenes
-    stay well-separated even within the same domain (roads, night, etc.).
+    ResNet34's ImageNet features capture edges, textures, and colour
+    distributions — the low-level appearance signals that change between
+    near-duplicate consecutive frames.  Better suited for pixel-level
+    dedup than semantic models (CLIP, DINOv2) which cluster by scene
+    type rather than frame identity.
     """
 
     def __init__(self) -> None:
@@ -268,10 +269,11 @@ class _EmbeddingGPU:
     def _load(self) -> None:
         if self.model is not None:
             return
-        self.model = (
-            torch.hub.load("facebookresearch/dinov2", "dinov2_vits14", verbose=False)
-            .eval().half().cuda()
-        )
+        import torch.nn as nn
+        from torchvision.models import resnet34, ResNet34_Weights
+        base = resnet34(weights=ResNet34_Weights.IMAGENET1K_V1).eval().half().cuda()
+        # Strip the classification head — keep everything up to avgpool
+        self.model = nn.Sequential(*list(base.children())[:-1])
         self.device = next(self.model.parameters()).device
 
     def __call__(self, image_bytes: pa.Array) -> pa.Array:
@@ -286,10 +288,10 @@ class _EmbeddingGPU:
             img_t = TF.resize(img_t, [224, 224], antialias=True).half()
             tensors.append(img_t)
         with torch.no_grad():
-            feats = self.model(torch.stack(tensors))          # (B, 384) CLS token
+            feats = self.model(torch.stack(tensors)).flatten(1)  # (B, 512)
             feats = torch.nn.functional.normalize(feats, dim=1)
         torch.cuda.empty_cache()
-        return pa.array(feats.cpu().float().tolist(), type=pa.list_(pa.float32(), 384))
+        return pa.array(feats.cpu().float().tolist(), type=pa.list_(pa.float32(), 512))
 
 
 @udf(data_type=pa.bool_(), input_columns=["image_id", "embedding"])
@@ -342,7 +344,7 @@ GPU_PERSON_UDFS: dict[str, object] = {
     "person_bbox_area_pct": _PersonBboxAreaPctGPU(),
 }
 
-#: GPU embedding UDF — DINOv2 ViT-S/14 (384-d). Requires --gpu flag.
+#: GPU embedding UDF — ResNet34 (512-d). Requires --gpu flag.
 GPU_EMBED_UDFS: dict[str, object] = {
     "embedding": _EmbeddingGPU(),
 }

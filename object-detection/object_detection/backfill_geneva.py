@@ -47,6 +47,7 @@ DEFAULT_TABLE = "bdd100k"
 
 
 def _ensure_columns(tbl, udf_registry: dict, columns: list[str], silent: bool = False) -> None:
+    """Register new columns on the table using their UDFs (type inferred from @udf decorator)."""
     existing = set(tbl.schema.names)
     to_add = {col: udf_registry[col] for col in columns if col not in existing and col in udf_registry}
 
@@ -70,7 +71,7 @@ def backfill(
     concurrency: int,
     overwrite: bool = False,
     gpu: bool = False,
-    dedup_threshold: float = 0.97,
+    dedup_threshold: float = 0.98,
 ) -> None:
     # is_duplicate UDF is instantiated here so it picks up the correct db_path + threshold.
     dedup_udfs = {"is_duplicate": _IsDuplicateCPU(db_path=db_path, threshold=dedup_threshold)}
@@ -153,9 +154,8 @@ def _parse_args(argv=None):
     p.add_argument(
         "--dedup-threshold", type=float, default=0.97,
         help=(
-            "Cosine similarity threshold for is_duplicate backfill (default: 0.97). "
+            "Cosine similarity threshold for is_duplicate backfill (default: 0.98). "
             "Only used when 'is_duplicate' is in --columns. "
-            "0.97 = near-pixel-identical frames; lower = more aggressive dedup."
         ),
     )
     return p.parse_args(argv)

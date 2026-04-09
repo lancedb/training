@@ -73,6 +73,6 @@ GENEVA_UDF_COLUMNS = [
 
     # Tier 3: dedup — DINOv2 ViT-S/14 384-d L2-normalised embedding (GPU backfill).
     # Build a vector index after embedding backfill, then backfill is_duplicate.
-    pa.field("embedding",     pa.list_(pa.float32(), 384)),
+    pa.field("embedding",     pa.list_(pa.float32(), 512)),
     pa.field("is_duplicate",  pa.bool_()),
 ]
