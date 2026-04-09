@@ -70,4 +70,9 @@ GENEVA_UDF_COLUMNS = [
     # annotation presence flags (derived from ann_categories — no image needed)
     pa.field("has_person", pa.bool_()),
     pa.field("has_rider",  pa.bool_()),
+
+    # Tier 3: dedup — ResNet18 512-d L2-normalised embedding (GPU backfill).
+    # Build a vector index after embedding backfill, then backfill is_duplicate.
+    pa.field("embedding",     pa.list_(pa.float32(), 512)),
+    pa.field("is_duplicate",  pa.bool_()),
 ]

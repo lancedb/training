@@ -234,6 +234,91 @@ def scene_description(weather: str, scene: str, timeofday: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tier 3 — Dedup: ResNet18 embeddings + is_duplicate flag
+#
+# Two-step process:
+#   1. backfill_geneva --gpu --columns embedding   → GPU ResNet18 forward pass
+#   2. dedup --action index                        → IVF-PQ cosine index
+#   3. backfill_geneva --columns is_duplicate      → per-row vector search
+#
+# is_duplicate = True when nearest non-self neighbour has cosine similarity
+# >= threshold (default 0.85).  Both frames in a near-duplicate pair get
+# flagged; manage_views already filters them out automatically.
+# ---------------------------------------------------------------------------
+
+_DEDUP_DB_PATH = "data/bdd100k/lancedb"
+_DEDUP_THRESHOLD = 0.85
+
+
+@udf(data_type=pa.list_(pa.float32(), 512), input_columns=["image_bytes"],
+     num_gpus=1, num_cpus=1, cuda=True)
+class _EmbeddingGPU:
+    """ResNet18 (512-d, L2-normalised) image embedding — GPU."""
+
+    def __init__(self) -> None:
+        self.model: Optional[torch.nn.Module] = None
+        self.device: Optional[torch.device] = None
+
+    def _load(self) -> None:
+        if self.model is not None:
+            return
+        from torchvision.models import resnet18, ResNet18_Weights
+        base = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+        # Remove final FC layer — output shape (B, 512, 1, 1)
+        self.model = torch.nn.Sequential(*list(base.children())[:-1]).eval().half().cuda()
+        self.device = next(self.model.parameters()).device
+
+    def __call__(self, image_bytes: pa.Array) -> pa.Array:
+        import torchvision.io as tvio
+        self._load()
+        tensors = []
+        for b in image_bytes:
+            byte_t = torch.frombuffer(bytearray(b.as_py()), dtype=torch.uint8)
+            img_t = tvio.decode_jpeg(byte_t, device=self.device).half() / 255.0
+            tensors.append(img_t)
+        with torch.no_grad():
+            feats = self.model(torch.stack(tensors)).squeeze(-1).squeeze(-1)
+            feats = torch.nn.functional.normalize(feats, dim=1)
+        torch.cuda.empty_cache()
+        return pa.array(feats.cpu().float().tolist(), type=pa.list_(pa.float32(), 512))
+
+
+@udf(data_type=pa.bool_(), input_columns=["image_id", "embedding"])
+class _IsDuplicateCPU:
+    """
+    Per-row duplicate flag: True when nearest non-self neighbour has cosine
+    similarity >= threshold.  Requires an IVF-PQ index on bdd100k.embedding
+    (run ``dedup --action index`` before backfilling this column).
+    """
+
+    def __init__(self, db_path: str = _DEDUP_DB_PATH, threshold: float = _DEDUP_THRESHOLD) -> None:
+        self.db_path = db_path
+        self.threshold = threshold
+        self._tbl = None
+
+    def __call__(self, image_id: pa.Array, embedding: pa.Array) -> pa.Array:
+        if self._tbl is None:
+            import lancedb as _ldb
+            self._tbl = _ldb.connect(self.db_path).open_table("bdd100k")
+        distance_threshold = 1.0 - self.threshold
+        results = []
+        for iid, emb in zip(image_id.to_pylist(), embedding.to_pylist()):
+            if emb is None:
+                results.append(None)
+                continue
+            result = (
+                self._tbl.search(emb, vector_column_name="embedding")
+                .metric("cosine")
+                .where(f"image_id != '{iid}'")
+                .limit(1)
+                .to_arrow()
+            )
+            is_dup = len(result) > 0 and result["_distance"][0].as_py() <= distance_threshold
+            results.append(is_dup)
+        return pa.array(results, type=pa.bool_())
+
+
+# ---------------------------------------------------------------------------
 # Registry  — used by backfill_geneva.py
 # ---------------------------------------------------------------------------
 
@@ -248,6 +333,11 @@ GPU_PERSON_UDFS: dict[str, object] = {
     "person_bbox_area_pct": _PersonBboxAreaPctGPU(),
 }
 
+#: GPU embedding UDF — ResNet18 (512-d). Requires --gpu flag.
+GPU_EMBED_UDFS: dict[str, object] = {
+    "embedding": _EmbeddingGPU(),
+}
+
 #: Tier 1 — annotation-derived and image statistics, no detector.
 METADATA_UDFS: dict[str, object] = {
     "white_balance":       white_balance,
@@ -260,4 +350,6 @@ METADATA_UDFS: dict[str, object] = {
 
 #: All UDFs keyed by column name.  Person column resolves to CPU variant
 #: by default; backfill_geneva.py --gpu swaps it to GPU_PERSON_UDFS.
+#: is_duplicate UDF is instantiated in backfill_geneva.py so it can receive
+#: the correct db_path from the CLI arg.
 ALL_UDFS: dict[str, object] = {**CPU_PERSON_UDFS, **METADATA_UDFS}

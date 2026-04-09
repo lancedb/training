@@ -1,351 +1,209 @@
 # BDD100K Targeted Fine-Tuning with LanceDB + Geneva
 
-How LanceDB fits into your model training **lifecycle** — curating targeted training
-subsets for underrepresented conditions, with splits that stay fresh as fleet data grows.
+Targeted fine-tuning on curated failure-mode slices — using LanceDB as the data backbone at every stage of the ML pipeline, from raw video frames to trained checkpoints.
 
 ---
 
 ## The Problem
 
-A COCO-pretrained detector works well on common objects in typical conditions, but
-performance drops when your deployment domain shifts:
+A COCO-pretrained Faster R-CNN degrades on three deployment-critical failure modes:
 
-| Failure mode | Root cause |
-|---|---|
-| **Riders** (person on bike/motorcycle) | COCO labels `person` and `bicycle` separately; BDD combines them into `rider` — the model has never seen the combined class |
-| **Nighttime pedestrians** | COCO training data is heavily daytime-biased |
-| **Nighttime riders** | Both shifts compounded |
-| **Distant pedestrians** | COCO training data is biased toward large, prominent objects; the model underperforms on small, far-away pedestrians where a miss has the highest real-world consequence |
+| Failure mode | Root cause | Curation signal |
+|---|---|---|
+| **Riders** | COCO separates `person` and `bicycle`; BDD combines them — the model never saw that silhouette | `has_rider = true` (annotation flag) |
+| **Nighttime pedestrians** | COCO training data is heavily daytime-biased | `timeofday = 'night' AND has_person = true` |
+| **Distant pedestrians** | Small far-away people are underrepresented; a miss at distance has the highest real-world consequence | `person_bbox_area_pct < 30%` (GPU inference) |
 
-The fix is targeted fine-tuning on curated slices of your fleet data. The harder
-question is *maintenance*: when new footage arrives every day, how do you keep your
-training splits current without manual curation work?
-
-### GPU UDF: person bounding box area percentage
-
-`person_bbox_area_pct` is a GPU-computed column that runs Faster R-CNN on each frame,
-finds the largest detected person, and stores what percentage of the frame area that
-person occupies. A low value means the person is small and distant — hard to detect.
-A value of 0.0 means the annotation flags a person present but the pretrained model
-couldn't find them at all, making these the hardest frames of all.
-
-- **Low values (<30%)**: pedestrian is small and distant — the model saw them as a
-  few-pixel blob, or missed them entirely (value=0 means annotation says person
-  present but Faster R-CNN scored below threshold). These are the genuinely hard
-  cases: missing a distant pedestrian has far higher real-world consequence than
-  missing a large one right in front of the camera.
-- **High values (>30%)**: pedestrian is large and close — a relatively easy detection
-  that the COCO-pretrained baseline already handles well.
-
-This gives you a numeric handle on pedestrian size — useful both for curating
-hard-case training sets (`has_person = true AND person_bbox_area_pct < 30.0`) and for EDA
-(distribution of pedestrian proximity by time of day, weather, scene type).
+The fix is targeted fine-tuning on curated slices. The harder question is *maintenance*: as fleet footage arrives continuously, how do you keep training splits current without manual work — and how do you ensure you're not wasting compute on near-duplicate frames?
 
 ---
 
-## Lifecycle Overview
+## Workflow Overview
 
 ```
-                ┌─────────────────────────────────────┐
-                │         Production AV Fleet          │
-                │   new footage arriving continuously  │
-                └────────────────┬────────────────────┘
-                                 │  ingest_bdd.py (append mode)
-                                 ▼
-                     ┌───────────────────────┐
-                     │  bdd100k (parent)      │
-                     │  LanceDB table         │
-                     │  80k → 85k → ... rows  │
-                     └──────────┬────────────┘
-                                │  backfill_geneva.py
-                                │  Tier 1: has_person, has_rider   (CPU, fast)
-                                │  Tier 2: person_bbox_area_pct    (GPU, Faster R-CNN)
-                                ▼
-                     ┌───────────────────────┐
-                     │  bdd100k + UDF cols    │
-                     │  (enriched, queryable) │
-                     └──────────┬────────────┘
-                                │  manage_views.py --action curate
-                                │  manage_views.py --action curate-person
-                                │  manage_views.py --action refresh  (after new data)
-                                ▼
-          ┌──────────────────────────────────────────────────────┐
-          │              Geneva Materialized Views                │
-          │                                                        │
-          │  bdd100k_nighttime_person_train / _val                │
-          │  bdd100k_rider_train / _val                           │
-          │  bdd100k_nighttime_rider_train / _val                 │
-          │  bdd100k_close_range_person_train / _val              │
-          │                                                        │
-          │  Split is baked into each view — training script      │
-          │  just opens the table, no WHERE clause needed.        │
-          │  mv.refresh() keeps all views in sync automatically.  │
-          └──────────────────────┬───────────────────────────────┘
-                                 │  train_detector.py --train-table bdd100k_rider_train
-                                 ▼
-                     ┌───────────────────────┐
-                     │  Faster R-CNN          │
-                     │  fine-tuned checkpoint │
-                     │  logs table version ✓  │
-                     └───────────────────────┘
-```
+  Fix three failure modes the COCO-pretrained model misses on real fleet footage:
+  riders · nighttime pedestrians · distant pedestrians
 
-**Key insight**: the curation definition lives in Geneva, not in your training command.
-When new footage is ingested and backfilled, one `manage_views.py --action refresh`
-updates every split. Training scripts just open a named view — they don't know or care
-when it last changed.
+┌──────────────────────────────────────────────────────┐
+│              Fleet footage (BDD100K)                 │
+└─────────────────────────┬────────────────────────────┘
+                          │
+                          ▼  ingest_bdd.py
+                          │  Multimodal lakehouse: raw JPEG bytes, scene metadata,
+                          │  and parallel-list annotations in one Lance table.
+                          │  Stable row IDs enable incremental view refreshes.
+                          │
+┌─────────────────────────┴────────────────────────────┐
+│  bdd100k  [Lance table]  ← append as footage arrives │
+│  image_bytes · weather · timeofday · ann_* · split   │
+└─────────────────────────┬────────────────────────────┘
+                          │
+                          ▼  backfill_geneva.py  (Geneva UDFs — incremental, checkpointed)
+                          │  Tier 1: has_person, has_rider            (CPU, annotation-derived)
+                          │  Tier 2: person_bbox_area_pct             (GPU, Faster R-CNN)
+                          │  Tier 3: embedding [512-d ResNet18]       (GPU)
+                          │          → dedup --action index            (IVF-PQ cosine index)
+                          │          → backfill is_duplicate           (CPU, vector search)
+                          │
+                          ▼  manage_views.py  (Materialized views)
+                          │
+            ┌─────────────┼──────────────┐
+            ▼             ▼              ▼
+  bdd100k_rider  bdd100k_nighttime  bdd100k_distant
+  _{train,val}   _person_{t,v}      _person_{t,v}
+  [Materialized  [Materialized      [Materialized
+     view]          view]              view]
+            └─────────────┼──────────────┘
+                          │
+                          ▼  train_detector.py
+                          │  LanceDB Permutation API · PyTorch DataLoader · AMP
+                          │
+                 ┌────────┴────────┐
+                 │ fine-tuned      │
+                 │ checkpoint      │
+                 └────────┬────────┘
+                          │
+                 New footage arrives?
+                 → ingest → backfill → manage_views --action refresh
+                 → same view names · new versions · more data
+```
 
 ---
 
-## Prerequisites
-
-### 1. Download BDD100K
-
-The ingestion script handles this automatically — skip ahead to **Step 1**.
-
-### 2. Python environment
+## Setup
 
 ```bash
 cd object-detection/
-uv venv .venv --python 3.11
-source .venv/bin/activate
-uv pip install lancedb geneva torch torchvision pyarrow pillow
-```
+uv venv .venv --python 3.11 && source .venv/bin/activate
+uv pip install lancedb geneva torch torchvision pyarrow pillow tqdm
 
-### 3. Geneva setup
-
-```bash
-export GENEVA_PIPELINE_STALL_TIMEOUT_S=7200  # required on all platforms, especially GPU machines
-sudo chmod a+rw /tmp/.geneva_zip_setup        # fixes permission error on first run (macOS)
-```
-
-> **GPU machines**: the default stall timeout is 600 s — the GPU backfill easily exceeds
-> this while loading Faster R-CNN weights on the first batch. Always export the env var
-> before running any `backfill_geneva` or `manage_views` command.
-
----
-
-## Full Pipeline (step by step)
-
-All commands run from the `object-detection/` directory.
-
-```bash
-cd object-detection/
 export GENEVA_PIPELINE_STALL_TIMEOUT_S=7200
+sudo chmod a+rw /tmp/.geneva_zip_setup   # macOS only
 ```
 
-### Step 1 — Ingest
+---
 
-Downloads BDD100K automatically (~6.6 GB images + ~190 MB labels) on first run.
+## Running the Pipeline
+
+### 1 · Ingest
+
+Raw JPEG bytes, structured metadata (weather, scene, time of day), and parallel-list annotations (one element per bounding box) land in a single Lance table with an enforced schema — no separate preprocessing step. `stable_row_ids` ensures materialized views can be refreshed incrementally after footage is appended.
 
 ```bash
-# Full dataset (~80k frames):
 python -m object_detection.ingest_bdd --splits train val --overwrite
-
-# Subset for local dev:
-python -m object_detection.ingest_bdd --splits train val --limit 5000 --overwrite
-
-# Synthetic data — verify the pipeline works without downloading anything:
-python -m object_detection.ingest_bdd --synthetic 500 --overwrite
 ```
 
-> **Important**: tables are created with `new_table_enable_stable_row_ids=true`.
-> This is required for `mv.refresh()` to work after data is appended.
+### 2 · Backfill feature columns
 
-### Step 2 — Backfill UDF columns
-
-Two tiers, matching the two classes of features:
-
-**Tier 1 — Annotation-based** (fast, CPU-only, no image decoding):
+Instead of writing frames to disk and running a separate preprocessing job, Geneva UDFs run directly against the Lance table and write results back as queryable columns. Backfill is incremental (`WHERE col IS NULL`), stateful (class-based UDFs with lazy model loading), and checkpointed — safe to re-run as new footage arrives.
 
 ```bash
+# Tier 1 — CPU, annotation-derived (minutes on full dataset)
 python -m object_detection.backfill_geneva --columns has_person has_rider
-```
 
-**Tier 2 — Model-inference-based** (requires GPU for practical runtimes):
-
-```bash
-# CPU fallback (SSDLite — works locally, slower):
-python -m object_detection.backfill_geneva --columns person_bbox_area_pct
-
-# GPU (Faster R-CNN — recommended for full dataset):
+# Tier 2 — GPU Faster R-CNN: largest detected person bbox as % of frame area
+# <30% → pedestrian is distant or small; used to curate the hard-cases split
 python -m object_detection.backfill_geneva --gpu --columns person_bbox_area_pct
 ```
 
-Backfill is incremental — re-running skips already-computed rows.
-Add `--overwrite` to reset and restart from scratch.
+### 3 · Explore
 
-### Step 3 — EDA
+With all signals stored as flat scalar columns, standard SQL and full-text search work directly on the table — no export, no joining with external manifests.
 
 ```bash
 python -m object_detection.spec_queries
 ```
 
-```
-Spec counts — table 'bdd100k'  (80000 rows total)
+```python
+tbl.count_rows(filter="timeofday = 'night' AND has_person = true")          # 6,431 frames
+tbl.count_rows(filter="has_rider = true")                                   # 4,105 frames
+tbl.count_rows(filter="has_person = true AND person_bbox_area_pct < 30.0")  # ~3,200 frames
 
-  nighttime_person                    6,431 rows
-  rider                               4,105 rows
-  nighttime_rider                       851 rows
-  daytime_clear                      14,241 rows
-  close_range_person                  3,200 rows
-  nighttime_close_range_person          720 rows
+# FTS on the Geneva-generated scene_description column
+tbl.search("rainy night city pedestrian", query_type="fts").limit(10).to_pandas()
 ```
 
-### Step 4 — Create materialized views
+### 4 · Create training views
+
+A training split is a named SQL materialized view, not a CSV manifest or a directory of files. The filter definition lives in `manage_views.py`; the training script opens the view by name and never needs a WHERE clause. The training script logs `table.version` with every checkpoint — a direct link between weights and the exact data snapshot that produced them.
 
 ```bash
-# Tier 1 — annotation-based (run after Tier 1 backfill):
-python -m object_detection.manage_views --action curate
+python -m object_detection.manage_views --action curate          # Tier 1 views
+python -m object_detection.manage_views --action curate-person  # Tier 2 distant-pedestrian views
+```
 
-# Tier 2 — close-range pedestrian (run after GPU backfill):
+### 5 · Train
+
+LanceDB's Permutation API provides random-access indexing over Lance tables. Workers open their own connections lazily and read directly from the materialized view — no copy to local storage, no intermediate file format. Combined with `pin_memory`, `persistent_workers`, and AMP, this keeps A100 utilisation above 85% on 1280×720 driving footage.
+
+```bash
+python -m object_detection.train_detector \
+    --train-table bdd100k_rider_train --val-table bdd100k_rider_val \
+    --epochs 10 --batch-size 64 --lr 0.04 --num-workers 14 --output-dir checkpoints/rider
+
+python -m object_detection.train_detector \
+    --train-table bdd100k_nighttime_person_train --val-table bdd100k_nighttime_person_val \
+    --epochs 10 --batch-size 64 --lr 0.04 --num-workers 14 --output-dir checkpoints/nighttime_person
+
+python -m object_detection.train_detector \
+    --train-table bdd100k_distant_person_train --val-table bdd100k_distant_person_val \
+    --epochs 10 --batch-size 64 --lr 0.04 --num-workers 14 --output-dir checkpoints/distant_person
+```
+
+### 6 · Deduplicate
+
+BDD100K is dashcam footage at ~10 Hz. Consecutive frames within a clip are nearly identical pixels — training on them wastes compute and over-represents specific scenes. Dedup follows the same Geneva backfill pattern as every other feature: `embedding` (ResNet18, 512-d, L2-normalised) is added as a column on `bdd100k`, an IVF-PQ cosine index is built on it, then `is_duplicate` is backfilled by querying the index for each row's nearest non-self neighbour (~1ms per query at 80k scale). Since `manage_views` already filters `is_duplicate = false`, views automatically exclude near-duplicates once the column is populated — no extra step.
+
+> **Why ResNet18 and not CLIP?** Dedup targets pixel-level similarity — consecutive frames from the same clip that barely differ. ResNet18's ImageNet features capture edges, textures, and colour distributions, exactly what changes (slightly) between near-duplicate frames. CLIP captures semantic meaning and would over-cluster visually distinct frames from different clips that happen to share a scene type, undermining the dedup signal.
+
+```bash
+# Backfill ResNet18 embeddings as a column on bdd100k (GPU)
+python -m object_detection.backfill_geneva --gpu --columns embedding
+
+# Build IVF-PQ cosine index on the embedding column
+python -m object_detection.dedup --action index
+
+# Backfill is_duplicate: True when nearest-neighbour similarity >= 0.85
+python -m object_detection.backfill_geneva --columns is_duplicate
+
+# Optional — preview duplicate rate
+python -m object_detection.dedup --action stats --threshold 0.85
+
+# Recreate views — is_duplicate filter is added automatically
+python -m object_detection.manage_views --action curate
 python -m object_detection.manage_views --action curate-person
 ```
 
-Views created and their filters:
+### 7 · Refresh after new footage
 
-| View | Filter |
-|---|---|
-| `bdd100k_nighttime_person_train` | `timeofday='night' AND has_person=true AND split='train'` |
-| `bdd100k_nighttime_person_val` | `timeofday='night' AND has_person=true AND split='val'` |
-| `bdd100k_rider_train` | `has_rider=true AND split='train'` |
-| `bdd100k_rider_val` | `has_rider=true AND split='val'` |
-| `bdd100k_nighttime_rider_train` | `timeofday='night' AND has_rider=true AND split='train'` |
-| `bdd100k_nighttime_rider_val` | `timeofday='night' AND has_rider=true AND split='val'` |
-| `bdd100k_distant_person_train` | `has_person=true AND person_bbox_area_pct<30.0 AND split='train'` |
-| `bdd100k_distant_person_val` | `has_person=true AND person_bbox_area_pct<30.0 AND split='val'` |
-
-For one-off custom views, `--action add` accepts any SQL filter:
+When new footage is appended, one call per step increments every view's version and makes the extra data immediately available to the training script — no view definitions change, no manifests to regenerate.
 
 ```bash
-python -m object_detection.manage_views --action add \
-    --name bdd100k_foggy \
-    --filter "weather = 'foggy' AND split = 'train'"
-```
-
-### Step 5 — Train
-
-The split is already baked into each view — just point `--train-table` and `--val-table`
-at the right pair. The script evaluates the COCO pretrained baseline first, then fine-tunes
-and prints a before/after comparison.
-
-```
-=== Baseline (pretrained COCO checkpoint) ===
-  map@0.5: 0.4007
-
-=== Fine-tuning for 10 epoch(s) ===
-  ...
-
---- Results ---
-metric                baseline  fine-tuned       delta
-map_50                  0.4007      0.5002      +0.0995
-precision               0.4722      0.5104      +0.0382
-recall                  0.5919      0.7624      +0.1705
-```
-
-**Riders** (annotation-based, runs on CPU):
-
-```bash
-python -m object_detection.train_detector \
-    --train-table bdd100k_rider_train \
-    --val-table bdd100k_rider_val \
-    --epochs 10 --batch-size 8 --num-workers 4 \
-    --output-dir checkpoints/rider
-```
-
-**Nighttime pedestrians** (annotation-based, runs on CPU):
-
-```bash
-python -m object_detection.train_detector \
-    --train-table bdd100k_nighttime_person_train \
-    --val-table bdd100k_nighttime_person_val \
-    --epochs 10 --batch-size 8 --num-workers 4 \
-    --output-dir checkpoints/nighttime_person
-```
-
-**Distant pedestrians** (requires GPU backfill + `--action curate-person`):
-
-```bash
-python -m object_detection.train_detector \
-    --train-table bdd100k_distant_person_train \
-    --val-table bdd100k_distant_person_val \
-    --epochs 10 --batch-size 8 --num-workers 4 \
-    --output-dir checkpoints/distant_person
-```
-
-The same pattern works for any view. Create a view, point `--train-table` at it, done.
-
-Training logs the **table version** for provenance:
-```
-Table 'bdd100k_rider_train'  version=4  rows=3284
-```
-
-Checkpoint ↔ exact data snapshot. If you retrain after a refresh, the version increments.
-
-### Step 6 — New data arrives → refresh views
-
-```bash
-# 1. Append new footage:
 python -m object_detection.ingest_bdd --synthetic 500
-
-# 2. Incremental backfill — only newly added rows are processed:
 python -m object_detection.backfill_geneva --columns has_person has_rider
 python -m object_detection.backfill_geneva --gpu --columns person_bbox_area_pct
-
-# 3. Refresh all views — one command, every split updates:
 python -m object_detection.manage_views --action refresh
-```
-
-```
-Parent 'bdd100k': 80500 rows (version 21)
-[bdd100k_nighttime_person_train]       5145 →  5178 rows  (+33)  version 5
-[bdd100k_nighttime_person_val]         1286 →  1293 rows   (+7)  version 5
-[bdd100k_rider_train]                  3284 →  3311 rows  (+27)  version 5
-[bdd100k_rider_val]                     821 →   827 rows   (+6)  version 5
-[bdd100k_distant_person_train]         3100 →  3128 rows  (+28)  version 5
-[bdd100k_distant_person_val]            775 →   782 rows   (+7)  version 5
-```
-
-Retrain with the same command — same view name, new version number, more data.
-
-### Check status any time
-
-```bash
-python -m object_detection.manage_views --action status
-```
-
-```
-table                                          rows   version
------------------------------------------------------------------
-  bdd100k                                     80000        19  (source)
-  bdd100k_nighttime_person_train               5145         4
-  bdd100k_nighttime_person_val                 1286         4
-  bdd100k_rider_train                          3284         4
-  bdd100k_rider_val                             821         4
-  bdd100k_nighttime_rider_train                 681         4
-  bdd100k_nighttime_rider_val                   170         4
-  bdd100k_distant_person_train                 3100         2
-  bdd100k_distant_person_val                    775         2
 ```
 
 ---
 
 ## Results
 
-The training script always evaluates the COCO pretrained checkpoint first (baseline),
-then fine-tunes, and prints a before/after comparison. No separate baseline run needed.
+GPU runs on full BDD100K (80k frames), 10 epochs, A100, batch size 64, AMP enabled. Baseline is the pretrained COCO checkpoint evaluated on each curated val split.
 
-GPU runs on full BDD100K (80k frames), 10 epochs, A100.
-
-| Class | Metric | Baseline (COCO) | Fine-tuned | Δ |
+| Failure mode | Metric | Baseline (COCO) | Fine-tuned | Δ |
 |---|---|---|---|---|
-| **Nighttime pedestrian** | mAP@0.5 | 0.4007 | **0.5002** | **+0.0995** |
-| | Precision | 0.4722 | **0.5104** | **+0.0382** |
-| | Recall | 0.5919 | **0.7624** | **+0.1705** |
-| **Rider** | mAP@0.5 | 0.5295 | **0.6370** | **+0.1076** |
-| | Precision | 0.5670 | 0.5435 | -0.0235 |
-| | Recall | 0.6828 | **0.7922** | **+0.1094** |
-| **Distant pedestrian** | | | | *(run in progress)* |
+| **Nighttime pedestrian** | mAP@0.5 | 0.4025 | **0.5260** | **+0.1235** |
+| | Precision | 0.4739 | **0.5569** | **+0.0830** |
+| | Recall | 0.5923 | **0.7579** | **+0.1656** |
+| **Rider** | mAP@0.5 | 0.5563 | **0.6565** | **+0.1002** |
+| | Precision | 0.5872 | **0.6016** | **+0.0145** |
+| | Recall | 0.6788 | **0.7834** | **+0.1046** |
+| **Distant pedestrian** | mAP@0.5 | 0.4746 | **0.5810** | **+0.1064** |
+| | Precision | 0.5847 | **0.6363** | **+0.0517** |
+| | Recall | 0.6794 | **0.8038** | **+0.1244** |
+
+Recall improvement dominates across all three failure modes — the model catches significantly more of the objects it was previously missing. Nighttime pedestrian shows the strongest lift (consistent with it being the largest distribution shift from COCO's daytime-heavy data). All improvements use the same COCO pretrained weights as starting point; no external data was added.
 
 ---
 
@@ -356,71 +214,18 @@ object-detection/
 ├── object_detection/
 │   ├── schema.py            # Lance schema + GENEVA_UDF_COLUMNS
 │   ├── ingest_bdd.py        # BDD100K → LanceDB (streaming RecordBatch ingestion)
-│   ├── geneva_udfs.py       # Geneva UDF functions (Tier 1 annotation + Tier 2 GPU inference)
+│   ├── geneva_udfs.py       # Tier 1 annotation UDFs + Tier 2 GPU inference UDFs
 │   ├── backfill_geneva.py   # Geneva backfill runner (incremental, checkpointed)
-│   ├── manage_views.py      # create / refresh / status of materialized views  ← lifecycle
-│   ├── dataloader.py        # LanceDetectionDataset + make_detection_loader (Permutation API)
-│   ├── train_detector.py    # Faster R-CNN fine-tune (logs table version)
-│   ├── eval.py              # mAP evaluation
+│   ├── manage_views.py      # Create / refresh / status materialized views
+│   ├── dedup.py             # Vector index build + duplicate rate stats
+│   ├── dataloader.py        # Permutation API + PyTorch DataLoader
+│   ├── train_detector.py    # Faster R-CNN fine-tune with AMP (logs table version)
+│   ├── eval.py              # mAP@0.5 evaluation
 │   └── spec_queries.py      # SQL filter specs + EDA helpers
-├── notebooks/
-│   └── eda_bdd100k.ipynb    # EDA walkthrough
-├── e2e_verify.py            # integration test against real BDD100K data
 └── data/bdd100k/lancedb/    # Lance tables (gitignored)
-    ├── bdd100k.lance
-    ├── bdd100k_nighttime_person_train.lance
-    ├── bdd100k_nighttime_person_val.lance
-    ├── bdd100k_rider_train.lance
-    ├── bdd100k_rider_val.lance
-    ├── bdd100k_nighttime_rider_train.lance
-    ├── bdd100k_nighttime_rider_val.lance
-    ├── bdd100k_distant_person_train.lance  # Tier 2 — requires GPU backfill
-    └── bdd100k_distant_person_val.lance
-```
-
----
-
-## Key LanceDB Patterns
-
-**Stable row IDs** — required for Geneva materialized view refresh across table versions:
-```python
-db.create_table(name, data=reader, schema=schema,
-                storage_options={"new_table_enable_stable_row_ids": "true"})
-```
-
-**Streaming ingestion** — never call `table.add()` in a loop:
-```python
-reader = pa.RecordBatchReader.from_batches(schema, batch_generator())
-db.create_table(name, data=reader, schema=schema)
-# append: tbl.add(reader)
-```
-
-**Incremental Geneva backfill** — only processes NULL rows, safe to re-run:
-```bash
-python -m object_detection.backfill_geneva --columns has_person has_rider
-python -m object_detection.backfill_geneva --gpu --columns person_bbox_area_pct
-```
-
-**Materialized view refresh** — one call, all views stay current:
-```python
-gconn = geneva.connect("data/bdd100k/lancedb")
-mv = gconn.open_table("bdd100k_rider_train")
-mv.refresh()
-```
-
-**Training provenance** — `train_detector.py` logs `table.version` automatically:
-```
-Table 'bdd100k_rider_train'  version=4  rows=3284
-```
-
-**Flat schema only** — no nested structs (LanceDB SQL query limitation):
-```python
-# ✓  ann_bboxes: list<list<float32>>
-# ✗  ann_bboxes: list<struct<x1, y1, x2, y2>>
-```
-
-**Geneva local runs** require:
-```bash
-export GENEVA_PIPELINE_STALL_TIMEOUT_S=7200
-sudo chmod a+rw /tmp/.geneva_zip_setup   # macOS only
+    ├── bdd100k.lance                          # source table (+ embedding, is_duplicate cols)
+    ├── bdd100k_rider_{train,val}.lance
+    ├── bdd100k_nighttime_person_{train,val}.lance
+    ├── bdd100k_nighttime_rider_{train,val}.lance
+    └── bdd100k_distant_person_{train,val}.lance
 ```

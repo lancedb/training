@@ -40,7 +40,10 @@ import lancedb
 
 import geneva
 from object_detection.schema import GENEVA_UDF_COLUMNS
-from object_detection.geneva_udfs import ALL_UDFS, CPU_PERSON_UDFS, GPU_PERSON_UDFS, METADATA_UDFS
+from object_detection.geneva_udfs import (
+    ALL_UDFS, CPU_PERSON_UDFS, GPU_PERSON_UDFS, GPU_EMBED_UDFS, METADATA_UDFS,
+    _IsDuplicateCPU,
+)
 
 # Default LanceDB path and table name (override via CLI)
 DEFAULT_DB = "data/bdd100k/lancedb"
@@ -55,6 +58,8 @@ _NULL_EXPR: dict[pa.DataType, str] = {
     pa.string():  "cast(null as string)",
     pa.float32(): "cast(null as float)",
     pa.bool_():   "cast(null as boolean)",
+    # Fixed-size list uses DataFusion's arrow_cast with the Arrow type string.
+    pa.list_(pa.float32(), 512): "arrow_cast(null, 'FixedSizeList(512, Float32)')",
 }
 
 
@@ -94,8 +99,15 @@ def backfill(
     overwrite: bool = False,
     gpu: bool = False,
 ) -> None:
-    # Merge the right person-detector variant into the lookup table.
-    udf_registry = {**ALL_UDFS, **(GPU_PERSON_UDFS if gpu else CPU_PERSON_UDFS)}
+    # is_duplicate UDF is instantiated here so it picks up the correct db_path.
+    dedup_udfs = {"is_duplicate": _IsDuplicateCPU(db_path=db_path)}
+
+    udf_registry = {
+        **ALL_UDFS,
+        **(GPU_PERSON_UDFS if gpu else CPU_PERSON_UDFS),
+        **(GPU_EMBED_UDFS if gpu else {}),   # embedding only available with --gpu
+        **dedup_udfs,
+    }
 
     conn = geneva.connect(db_path)
     tbl = conn.open_table(table_name)

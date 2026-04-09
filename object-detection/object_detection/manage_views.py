@@ -90,6 +90,17 @@ def _connect(db_path: str):
     return geneva.connect(db_path), lancedb.connect(db_path)
 
 
+def _dedup_clause(lconn) -> str:
+    """Return a SQL AND clause that excludes flagged duplicates, or '' if not applicable."""
+    try:
+        tbl = lconn.open_table(PARENT_TABLE)
+        if "is_duplicate" in tbl.schema.names:
+            return " AND (is_duplicate IS NULL OR is_duplicate = false)"
+    except Exception:
+        pass
+    return ""
+
+
 def _all_views(lconn) -> list[str]:
     """All tables in the DB that aren't the parent or a system table."""
     return [
@@ -114,10 +125,13 @@ def curate(db_path: str) -> None:
     gconn, lconn = _connect(db_path)
     existing = set(lconn.list_tables().tables)
     gtbl = gconn.open_table(PARENT_TABLE)
+    dedup = _dedup_clause(lconn)
 
     with gconn.local_ray_context():
         for name, sql_filter in BUILTIN_VIEWS.items():
-            _create_or_refresh(gconn, gtbl, name, sql_filter, existing)
+            # Dedup only on train splits — val must stay intact for fair comparison
+            d = dedup if name.endswith("_train") else ""
+            _create_or_refresh(gconn, gtbl, name, sql_filter + d, existing)
 
     print("All Tier 1 views ready.")
 
@@ -127,10 +141,12 @@ def curate_person(db_path: str) -> None:
     gconn, lconn = _connect(db_path)
     existing = set(lconn.list_tables().tables)
     gtbl = gconn.open_table(PARENT_TABLE)
+    dedup = _dedup_clause(lconn)
 
     with gconn.local_ray_context():
         for name, sql_filter in PERSON_VIEWS.items():
-            _create_or_refresh(gconn, gtbl, name, sql_filter, existing)
+            d = dedup if name.endswith("_train") else ""
+            _create_or_refresh(gconn, gtbl, name, sql_filter + d, existing)
 
     print("Close-range pedestrian views ready.")
 
@@ -140,9 +156,11 @@ def add(db_path: str, name: str, sql_filter: str) -> None:
     gconn, lconn = _connect(db_path)
     existing = set(lconn.list_tables().tables)
     gtbl = gconn.open_table(PARENT_TABLE)
+    dedup = _dedup_clause(lconn)
 
     with gconn.local_ray_context():
-        _create_or_refresh(gconn, gtbl, name, sql_filter, existing)
+        d = dedup if name.endswith("_train") else ""
+        _create_or_refresh(gconn, gtbl, name, sql_filter + d, existing)
 
 
 def drop(db_path: str) -> None:
