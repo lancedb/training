@@ -5,7 +5,7 @@ The full dedup pipeline follows the same Geneva backfill pattern as every
 other feature column:
 
   1. backfill_geneva --gpu --columns embedding
-        ResNet34 (512-d, L2-normalised) written to bdd100k.embedding
+        ResNet18 (512-d, L2-normalised) written to bdd100k.embedding
 
   2. dedup --action index
         IVF-PQ cosine index on bdd100k.embedding (required before step 3)

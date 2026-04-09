@@ -253,9 +253,9 @@ _DEDUP_THRESHOLD = 0.98
 @udf(data_type=pa.list_(pa.float32(), 512), input_columns=["image_bytes"],
      num_gpus=1, num_cpus=1, cuda=True)
 class _EmbeddingGPU:
-    """ResNet34 (512-d, L2-normalised) image embedding — GPU.
+    """ResNet18 (512-d, L2-normalised) image embedding — GPU.
 
-    ResNet34's ImageNet features capture edges, textures, and colour
+    ResNet18's ImageNet features capture edges, textures, and colour
     distributions — the low-level appearance signals that change between
     near-duplicate consecutive frames.  Better suited for pixel-level
     dedup than semantic models (CLIP, DINOv2) which cluster by scene
@@ -270,8 +270,8 @@ class _EmbeddingGPU:
         if self.model is not None:
             return
         import torch.nn as nn
-        from torchvision.models import resnet34, ResNet34_Weights
-        base = resnet34(weights=ResNet34_Weights.IMAGENET1K_V1).eval().half().cuda()
+        from torchvision.models import resnet18, ResNet18_Weights
+        base = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1).eval().half().cuda()
         # Strip the classification head — keep everything up to avgpool
         self.model = nn.Sequential(*list(base.children())[:-1])
         self.device = next(self.model.parameters()).device
@@ -344,7 +344,7 @@ GPU_PERSON_UDFS: dict[str, object] = {
     "person_bbox_area_pct": _PersonBboxAreaPctGPU(),
 }
 
-#: GPU embedding UDF — ResNet34 (512-d). Requires --gpu flag.
+#: GPU embedding UDF — ResNet18 (512-d). Requires --gpu flag.
 GPU_EMBED_UDFS: dict[str, object] = {
     "embedding": _EmbeddingGPU(),
 }
