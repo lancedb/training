@@ -166,8 +166,8 @@ python -m object_detection.dedup --action index
 # Backfill is_duplicate: True when nearest-neighbour similarity >= 0.85
 python -m object_detection.backfill_geneva --columns is_duplicate
 
-# Optional — preview duplicate rate
-python -m object_detection.dedup --action stats --threshold 0.85
+# Optional — show duplicate rate from the backfilled column
+python -m object_detection.dedup --action stats
 
 # Recreate views — is_duplicate filter is added automatically
 python -m object_detection.manage_views --action curate
