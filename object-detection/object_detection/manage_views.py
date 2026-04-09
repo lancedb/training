@@ -222,27 +222,15 @@ def status(db_path: str) -> None:
 
 def _create_or_refresh(gconn, gtbl, name: str, sql_filter: str, existing: set) -> None:
     if name in existing:
-        print(f"[{name}] already exists — refreshing …")
-        mv = gconn.open_table(name)
-        try:
-            mv.refresh()
-        except ValueError as e:
-            if "missing required columns" in str(e) or "no longer exist" in str(e):
-                # Source table schema changed (e.g. columns removed).
-                # Drop and recreate so the view reflects the current schema.
-                print(f"[{name}] schema mismatch — dropping and recreating …")
-                gconn.drop_table(name)
-                query = gtbl.search().where(sql_filter)
-                mv = gconn.create_materialized_view(name, query)
-                mv.refresh()
-            else:
-                raise
-    else:
-        print(f"[{name}] creating … (filter: {sql_filter})")
-        query = gtbl.search().where(sql_filter)
-        mv = gconn.create_materialized_view(name, query)
-        mv.refresh()
+        # Always drop and recreate — refresh() reuses the original filter and
+        # won't pick up changes to sql_filter (e.g. a newly added dedup clause).
+        print(f"[{name}] dropping and recreating with current filter …")
+        gconn.drop_table(name)
 
+    print(f"[{name}] creating … (filter: {sql_filter})")
+    query = gtbl.search().where(sql_filter)
+    mv = gconn.create_materialized_view(name, query)
+    mv.refresh()
     print(f"[{name}] ✓  {mv.count_rows()} rows  (version {mv.version})\n")
 
 
