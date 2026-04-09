@@ -56,8 +56,18 @@ def index(db_path: str) -> None:
     print("[index] Index built.")
 
 
+_DEDUP_CLAUSE = "(is_duplicate IS NULL OR is_duplicate = false)"
+
+# Train-split filters — mirrors manage_views.py BUILTIN_VIEWS + PERSON_VIEWS
+_TRAIN_SPLITS: dict[str, str] = {
+    "rider_train":            "has_rider = true AND split = 'train'",
+    "nighttime_person_train": "timeofday = 'night' AND has_person = true AND split = 'train'",
+    "distant_person_train":   "has_person = true AND person_bbox_area_pct < 30.0 AND split = 'train'",
+}
+
+
 def stats(db_path: str) -> None:
-    """Report duplicate rate from the backfilled is_duplicate column."""
+    """Report duplicate rate from the backfilled is_duplicate column, globally and per training split."""
     db = lancedb.connect(db_path)
     src_tbl = db.open_table(SOURCE_TABLE)
     if "is_duplicate" not in src_tbl.schema.names:
@@ -70,10 +80,23 @@ def stats(db_path: str) -> None:
     backfilled = src_tbl.count_rows(filter="is_duplicate IS NOT NULL")
     dup_count  = src_tbl.count_rows(filter="is_duplicate = true")
 
-    print(f"[stats] Total frames:       {total:>8}")
-    print(f"[stats] Backfilled:         {backfilled:>8}  ({backfilled / total * 100:.1f}%)")
-    print(f"[stats] Duplicates:         {dup_count:>8}  ({dup_count / total * 100:.1f}%)")
-    print(f"[stats] Training-eligible:  {total - dup_count:>8}  ({(total - dup_count) / total * 100:.1f}%)")
+    print(f"\n{'Global':}")
+    print(f"  total frames:       {total:>8}")
+    print(f"  backfilled:         {backfilled:>8}  ({backfilled / total * 100:.1f}%)")
+    print(f"  duplicates:         {dup_count:>8}  ({dup_count / total * 100:.1f}%)")
+    print(f"  training-eligible:  {total - dup_count:>8}  ({(total - dup_count) / total * 100:.1f}%)")
+
+    print(f"\n{'Training split impact':}")
+    print(f"  {'split':<30}  {'before':>8}  {'after':>8}  {'removed':>8}")
+    print(f"  {'-'*30}  {'-'*8}  {'-'*8}  {'-'*8}")
+    for name, filt in _TRAIN_SPLITS.items():
+        try:
+            before = src_tbl.count_rows(filter=filt)
+            after  = src_tbl.count_rows(filter=f"{filt} AND {_DEDUP_CLAUSE}")
+            removed = before - after
+            print(f"  {name:<30}  {before:>8}  {after:>8}  {removed:>8}  ({removed / before * 100:.1f}%)")
+        except Exception:
+            print(f"  {name:<30}  (column not yet backfilled — skip)")
 
 
 # ---------------------------------------------------------------------------
