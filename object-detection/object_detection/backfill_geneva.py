@@ -46,19 +46,7 @@ DEFAULT_DB = "data/bdd100k/lancedb"
 DEFAULT_TABLE = "bdd100k"
 
 
-def _ensure_columns(tbl, udf_registry: dict, columns: list[str], silent: bool = False) -> None:
-    """Register new columns on the table using their UDFs (type inferred from @udf decorator)."""
-    existing = set(tbl.schema.names)
-    to_add = {col: udf_registry[col] for col in columns if col not in existing and col in udf_registry}
-
-    if to_add:
-        if not silent:
-            print(f"  Adding {len(to_add)} new column(s): {list(to_add)}")
-        tbl.add_columns(to_add)
-
-
 def _drop_column(tbl, col: str) -> None:
-    """Drop a column so it gets re-added from scratch on the next backfill."""
     if col in tbl.schema.names:
         print(f"  [drop]     {col}")
         tbl.drop_columns([col])
@@ -71,7 +59,7 @@ def backfill(
     concurrency: int,
     overwrite: bool = False,
     gpu: bool = False,
-    dedup_threshold: float = 0.98,
+    dedup_threshold: float = 0.97,
 ) -> None:
     # is_duplicate UDF is instantiated here so it picks up the correct db_path + threshold.
     dedup_udfs = {"is_duplicate": _IsDuplicateCPU(db_path=db_path, threshold=dedup_threshold)}
@@ -92,11 +80,8 @@ def backfill(
         print("Mode: overwrite — dropping columns and recreating from scratch\n")
         for col in columns:
             _drop_column(tbl, col)
-        # Re-open to get a fresh schema after drops
+        # Re-open so backfill sees the updated schema
         tbl = conn.open_table(table_name)
-        _ensure_columns(tbl, udf_registry, columns, silent=True)
-    else:
-        _ensure_columns(tbl, udf_registry, columns)
 
     with conn.local_ray_context():
         for col in columns:
