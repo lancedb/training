@@ -41,15 +41,8 @@ from object_detection.geneva_udfs import (
     _IsDuplicateCPU,
 )
 
-# Default LanceDB path and table name (override via CLI)
-DEFAULT_DB = "data/bdd100k/lancedb"
+DEFAULT_DB    = "data/bdd100k/lancedb"
 DEFAULT_TABLE = "bdd100k"
-
-
-def _drop_column(tbl, col: str) -> None:
-    if col in tbl.schema.names:
-        print(f"  [drop]     {col}")
-        tbl.drop_columns([col])
 
 
 def backfill(
@@ -61,13 +54,12 @@ def backfill(
     gpu: bool = False,
     dedup_threshold: float = 0.97,
 ) -> None:
-    # is_duplicate UDF is instantiated here so it picks up the correct db_path + threshold.
     dedup_udfs = {"is_duplicate": _IsDuplicateCPU(db_path=db_path, threshold=dedup_threshold)}
 
     udf_registry = {
         **ALL_UDFS,
         **(GPU_PERSON_UDFS if gpu else CPU_PERSON_UDFS),
-        **(GPU_EMBED_UDFS if gpu else {}),   # embedding only available with --gpu
+        **(GPU_EMBED_UDFS if gpu else {}),
         **dedup_udfs,
     }
 
@@ -76,12 +68,23 @@ def backfill(
 
     print(f"Opened table '{table_name}' — {tbl.count_rows()} rows")
     print(f"Columns to backfill: {columns}")
+
     if overwrite:
         print("Mode: overwrite — dropping columns and recreating from scratch\n")
-        for col in columns:
-            _drop_column(tbl, col)
-        # Re-open so backfill sees the updated schema
-        tbl = conn.open_table(table_name)
+        existing = set(tbl.schema.names)
+        to_drop = [col for col in columns if col in existing]
+        if to_drop:
+            tbl.drop_columns(to_drop)
+            for col in to_drop:
+                print(f"  [drop]     {col}")
+            tbl = conn.open_table(table_name)
+
+    # Register any columns that don't exist yet
+    existing = set(tbl.schema.names)
+    to_add = {col: udf_registry[col] for col in columns if col not in existing and col in udf_registry}
+    if to_add:
+        print(f"  Adding {len(to_add)} new column(s): {list(to_add)}")
+        tbl.add_columns(to_add)
 
     with conn.local_ray_context():
         for col in columns:
