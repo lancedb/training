@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 
 import lancedb
+import pyarrow as pa
 
 SOURCE_TABLE = "bdd100k"
 DEFAULT_DB = "data/bdd100k/lancedb"
@@ -56,6 +57,88 @@ def index(db_path: str) -> None:
     print(f"[index] Building IVF L2 index on dhash ({n} rows) …")
     src_tbl.create_index(metric="l2", vector_column_name="dhash")
     print("[index] Index built.")
+
+
+def inject(db_path: str, n: int) -> None:
+    """
+    Append N exact-copy rows (new image_id prefixed 'syndup_') to bdd100k.
+
+    Injected rows have dhash=NULL and is_duplicate=NULL so the backfill pipeline
+    picks them up. After backfill, every injected row should have Hamming=0 with
+    its source — the strictest possible test of the dedup pipeline.
+
+    Remove injected rows afterwards with: dedup --action clean
+    """
+    db = lancedb.connect(db_path)
+    tbl = db.open_table(SOURCE_TABLE)
+
+    schema_names = set(tbl.schema.names)
+
+    # Select all base columns + dhash (copy hash directly — no backfill needed)
+    select_cols = ["image_id", "image_bytes", "width", "height",
+                   "weather", "scene", "timeofday", "timestamp",
+                   "ann_categories", "ann_bboxes", "ann_occluded",
+                   "ann_truncated", "ann_traffic_light_colors", "num_annotations",
+                   "split"]
+    if "dhash" in schema_names:
+        select_cols.append("dhash")
+
+    rows = (
+        tbl.search()
+        .where("split = 'train' AND dhash IS NOT NULL")
+        .select(select_cols)
+        .limit(n)
+        .to_arrow()
+    )
+
+    cols = {name: rows[name] for name in rows.schema.names}
+
+    # New image_ids so vector search `image_id != iid` filter works correctly
+    cols["image_id"] = pa.array([f"syndup_{iid}" for iid in rows["image_id"].to_pylist()])
+
+    # Copy metadata columns that exist; leave is_duplicate NULL for backfill
+    for col in ["has_person", "has_rider", "white_balance", "scene_description",
+                "scene_has_crossroad", "scene_has_mountain", "person_bbox_area_pct"]:
+        if col in schema_names:
+            cols[col] = rows[col] if col in rows.schema.names else pa.nulls(len(rows), type=tbl.schema.field(col).type)
+    if "is_duplicate" in schema_names:
+        cols["is_duplicate"] = pa.nulls(len(rows), type=tbl.schema.field("is_duplicate").type)
+
+    tbl.add(pa.table(cols))
+    print(f"[inject] Appended {len(rows)} synthetic duplicate rows (image_id prefix: 'syndup_')")
+    print(f"         dhash copied directly — no dhash backfill needed.")
+    print(f"         Now run: dedup --action index")
+    print(f"                  backfill_geneva --columns is_duplicate --overwrite")
+    print(f"                  dedup --action verify")
+
+
+def verify(db_path: str) -> None:
+    """Check that injected synthetic duplicates were correctly flagged."""
+    db = lancedb.connect(db_path)
+    tbl = db.open_table(SOURCE_TABLE)
+
+    total_injected  = tbl.count_rows(filter="starts_with(image_id, 'syndup_')")
+    flagged         = tbl.count_rows(filter="starts_with(image_id, 'syndup_') AND is_duplicate = true")
+    not_flagged     = total_injected - flagged
+
+    print(f"\nSynthetic duplicate verification")
+    print(f"  injected rows:   {total_injected}")
+    print(f"  flagged:         {flagged}  ({flagged / max(total_injected, 1) * 100:.1f}%)")
+    print(f"  missed:          {not_flagged}")
+    if not_flagged == 0:
+        print(f"  PASS — all synthetic duplicates caught")
+    else:
+        print(f"  FAIL — {not_flagged} synthetic duplicates missed (threshold too strict?)")
+
+
+def clean(db_path: str) -> None:
+    """Remove injected synthetic duplicate rows from bdd100k."""
+    db = lancedb.connect(db_path)
+    tbl = db.open_table(SOURCE_TABLE)
+    before = tbl.count_rows()
+    tbl.delete("starts_with(image_id, 'syndup_')")
+    after = tbl.count_rows()
+    print(f"[clean] Removed {before - after} synthetic rows ({before} → {after})")
 
 
 _DEDUP_CLAUSE = "(is_duplicate IS NULL OR is_duplicate = false)"
@@ -106,9 +189,11 @@ def stats(db_path: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _parse_args(argv=None):
-    p = argparse.ArgumentParser(description="BDD100K dedup helpers (index + stats).")
-    p.add_argument("--action", choices=["index", "stats"], required=True)
+    p = argparse.ArgumentParser(description="BDD100K dedup helpers.")
+    p.add_argument("--action", choices=["index", "stats", "inject", "verify", "clean"], required=True)
     p.add_argument("--db", default=DEFAULT_DB)
+    p.add_argument("--n", type=int, default=1000,
+                   help="Number of rows to inject (default: 1000). Only used with --action inject.")
     return p.parse_args(argv)
 
 
@@ -118,6 +203,12 @@ def main(argv=None):
         index(args.db)
     elif args.action == "stats":
         stats(args.db)
+    elif args.action == "inject":
+        inject(args.db, args.n)
+    elif args.action == "verify":
+        verify(args.db)
+    elif args.action == "clean":
+        clean(args.db)
 
 
 if __name__ == "__main__":
