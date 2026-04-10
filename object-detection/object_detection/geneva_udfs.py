@@ -281,32 +281,42 @@ class _DHashGPU:
     """
 
     def __init__(self) -> None:
+        # NOT initialised here — __init__ runs on the driver which has no GPU.
+        # State is allocated lazily in __call__ on the Ray worker and then
+        # reused for every subsequent batch that worker processes.
         self.device: Optional[torch.device] = None
+        self.luma: Optional[torch.Tensor] = None  # ITU-R BT.601 weights, shape (3,1,1)
 
     def _load(self) -> None:
         if self.device is not None:
             return
         self.device = torch.device("cuda")
+        # Allocate luma weights on GPU once — reused across all batches
+        self.luma = torch.tensor([0.299, 0.587, 0.114],
+                                 device=self.device).view(3, 1, 1)
 
     def __call__(self, image_bytes: pa.Array) -> pa.Array:
         import torchvision.io as tvio
         self._load()
-        results = []
+
+        # Decode all images in the batch on GPU via nvjpeg — no CPU copy
+        tensors = []
         for b in image_bytes:
             byte_t = torch.frombuffer(bytearray(b.as_py()), dtype=torch.uint8)
-            # Decode JPEG on GPU using nvjpeg — full resolution, no CPU copy
-            img_t = tvio.decode_jpeg(byte_t, device=self.device).float()  # (3, H, W)
-            # Grayscale: ITU-R BT.601 luma
-            gray = 0.299 * img_t[0] + 0.587 * img_t[1] + 0.114 * img_t[2]  # (H, W)
-            # Resize to 9×8 for 64-bit hash (9 cols → 8 left-right comparisons per row)
-            gray = gray.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
-            gray = torch.nn.functional.interpolate(gray, size=(8, 9), mode="bilinear", align_corners=False)
-            gray = gray.squeeze()  # (8, 9)
-            # dHash: 1 where left pixel is brighter than right neighbour
-            bits = (gray[:, :-1] > gray[:, 1:]).float()  # (8, 8)
-            results.append(bits.flatten().cpu().tolist())
+            tensors.append(tvio.decode_jpeg(byte_t, device=self.device).float())
+
+        # Single batched GPU pass — stack → grayscale → resize → compare
+        batch = torch.stack(tensors)                          # (B, 3, H, W)
+        gray  = (batch * self.luma).sum(dim=1, keepdim=True) # (B, 1, H, W)
+        gray  = torch.nn.functional.interpolate(
+            gray, size=(8, 9), mode="bilinear", align_corners=False
+        )                                                     # (B, 1, 8, 9)
+        gray  = gray.squeeze(1)                               # (B, 8, 9)
+        bits  = (gray[:, :, :-1] > gray[:, :, 1:]).float()   # (B, 8, 8)
+        bits  = bits.view(len(tensors), 64)                   # (B, 64)
+
         torch.cuda.empty_cache()
-        return pa.array(results, type=pa.list_(pa.float32(), 64))
+        return pa.array(bits.cpu().tolist(), type=pa.list_(pa.float32(), 64))
 
 
 @udf(data_type=pa.bool_(), input_columns=["image_id", "dhash"])
