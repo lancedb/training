@@ -278,17 +278,14 @@ class _EmbeddingGPU:
 
     def __call__(self, image_bytes: pa.Array) -> pa.Array:
         import torchvision.io as tvio
-        import torchvision.transforms.functional as TF
         self._load()
         tensors = []
         for b in image_bytes:
             byte_t = torch.frombuffer(bytearray(b.as_py()), dtype=torch.uint8)
-            img_t = tvio.decode_jpeg(byte_t, device=self.device).float() / 255.0
-            img_t = TF.normalize(img_t, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            img_t = TF.resize(img_t, [224, 224], antialias=True).half()
+            img_t = tvio.decode_jpeg(byte_t, device=self.device).half() / 255.0
             tensors.append(img_t)
         with torch.no_grad():
-            feats = self.model(torch.stack(tensors)).flatten(1)  # (B, 512)
+            feats = self.model(torch.stack(tensors)).squeeze(-1).squeeze(-1)  # (B, 512)
             feats = torch.nn.functional.normalize(feats, dim=1)
         torch.cuda.empty_cache()
         return pa.array(feats.cpu().float().tolist(), type=pa.list_(pa.float32(), 512))
