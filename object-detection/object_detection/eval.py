@@ -223,8 +223,8 @@ def _parse_args(argv=None):
     p = argparse.ArgumentParser(description="Evaluate a Faster R-CNN checkpoint on LanceDB data.")
     p.add_argument("--checkpoint", required=True, help="Path to saved model state dict (.pt)")
     p.add_argument("--db", default="data/bdd100k/lancedb")
-    p.add_argument("--table", default="bdd100k")
-    p.add_argument("--split", default=None, help="SQL filter on the 'split' column, e.g. 'val'")
+    p.add_argument("--table", default="bdd100k_nighttime_person_val",
+                   help="Lance table or materialized view to evaluate on")
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--score-thresh", type=float, default=0.3)
@@ -243,11 +243,9 @@ def main(argv=None):
     model.load_state_dict(state)
     print(f"Loaded checkpoint: {args.checkpoint}")
 
-    where = f"split = '{args.split}'" if args.split else None
     loader = make_detection_loader(
         uri=args.db,
         table_name=args.table,
-        where=where,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
     )

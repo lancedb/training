@@ -27,7 +27,7 @@ Stateful GPU UDF pattern (Geneva docs):
 from __future__ import annotations
 
 import io
-from typing import Callable, Optional
+from typing import Optional
 
 import numpy as np
 import pyarrow as pa
@@ -152,7 +152,7 @@ class _FRCNNBase:
 
 @udf(data_type=pa.float32(), input_columns=["image_bytes", "width", "height"],
      num_gpus=1, num_cpus=1, cuda=True)
-class _PersonBboxAreaPctGPU(_FRCNNBase, Callable):
+class _PersonBboxAreaPctGPU(_FRCNNBase):
     """
     Largest detected person bbox as % of frame area (Faster R-CNN — GPU).
 
@@ -247,7 +247,7 @@ def scene_description(weather: str, scene: str, timeofday: str) -> str:
 # ---------------------------------------------------------------------------
 
 _DEDUP_DB_PATH = "data/bdd100k/lancedb"
-_DEDUP_THRESHOLD = 0.98
+_DEDUP_THRESHOLD = 0.97
 
 
 @udf(data_type=pa.list_(pa.float32(), 512), input_columns=["image_bytes"],

@@ -42,7 +42,7 @@ n_val   = tbl.count_rows(filter="split = 'val'")
 print(f"Train      : {n_train:,}  Val: {n_val:,}")
 
 # Verify key Geneva UDF columns are present and populated
-required_cols = ["has_person", "has_rider", "vehicle_label",
+required_cols = ["has_person", "has_rider",
                  "white_balance", "scene_description"]
 missing = [c for c in required_cols if c not in tbl.schema.names]
 if missing:
@@ -107,7 +107,7 @@ print("STEP 5 — Training smoke (1 epoch, nighttime+person, 100 train / 50 val)
 print("="*60)
 
 from torch.utils.data import DataLoader, Subset
-from object_detection.dataloader import LanceArrowDetectionDataset, _detection_collate
+from object_detection.dataloader import LanceDetectionDataset, _detection_collate
 from object_detection.train_detector import build_model, train_one_epoch
 from object_detection.eval import evaluate
 from object_detection.schema import NUM_CLASSES
@@ -115,23 +115,19 @@ from object_detection.schema import NUM_CLASSES
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")
 
-train_ds = LanceArrowDetectionDataset(
-    DB_PATH, TABLE, where="split = 'train' AND timeofday = 'night' AND has_person = true"
-)
-val_ds = LanceArrowDetectionDataset(
-    DB_PATH, TABLE, where="split = 'val' AND timeofday = 'night' AND has_person = true"
-)
+# Requires manage_views --action curate to have been run first
+train_ds = LanceDetectionDataset(DB_PATH, "bdd100k_nighttime_person_train")
+val_ds   = LanceDetectionDataset(DB_PATH, "bdd100k_nighttime_person_val")
 print(f"Nighttime+person — train: {len(train_ds):,}  val: {len(val_ds):,}")
 
-train_loader = DataLoader(Subset(train_ds, range(100)), batch_size=2, collate_fn=_detection_collate)
-val_loader   = DataLoader(Subset(val_ds,   range(50)),  batch_size=2, collate_fn=_detection_collate)
+train_loader = DataLoader(Subset(train_ds, range(min(100, len(train_ds)))), batch_size=2, collate_fn=_detection_collate)
+val_loader   = DataLoader(Subset(val_ds,   range(min(50,  len(val_ds)))),  batch_size=2, collate_fn=_detection_collate)
 
-model = build_model(NUM_CLASSES, pretrained=True).to(device)
+model     = build_model(NUM_CLASSES, pretrained=True).to(device)
+optimizer = torch.optim.SGD([p for p in model.parameters() if p.requires_grad], lr=0.005, momentum=0.9)
 
 t0 = time.time()
-avg_loss = train_one_epoch(model, torch.optim.SGD(
-    [p for p in model.parameters() if p.requires_grad], lr=0.005, momentum=0.9
-), train_loader, device, epoch=1)
+avg_loss = train_one_epoch(model, optimizer, None, train_loader, device, 1)
 print(f"avg_loss={avg_loss:.4f}  ({time.time()-t0:.0f}s)")
 
 metrics = evaluate(model, val_loader, device)

@@ -154,8 +154,8 @@ def _parse_args(argv=None):
     p.add_argument(
         "--dedup-threshold", type=float, default=0.97,
         help=(
-            "Cosine similarity threshold for is_duplicate backfill (default: 0.98). "
-            "Only used when 'is_duplicate' is in --columns. "
+            "Cosine similarity threshold for is_duplicate backfill (default: 0.97). "
+            "Only used when 'is_duplicate' is in --columns."
         ),
     )
     return p.parse_args(argv)

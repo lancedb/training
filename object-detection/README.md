@@ -12,7 +12,7 @@ A COCO-pretrained Faster R-CNN degrades on three deployment-critical failure mod
 |---|---|---|
 | **Riders** | COCO separates `person` and `bicycle`; BDD combines them — the model never saw that silhouette | `has_rider = true` (annotation flag) |
 | **Nighttime pedestrians** | COCO training data is heavily daytime-biased | `timeofday = 'night' AND has_person = true` |
-| **Distant pedestrians** | Small far-away people are underrepresented; a miss at distance has the highest real-world consequence | `person_bbox_area_pct < 30%` (GPU inference) |
+| **Distant pedestrians** | Small far-away people are underrepresented; a miss at distance has the highest real-world consequence | `person_bbox_area_pct < 30%` (annotation-derived here; model inference in production) |
 
 The fix is targeted fine-tuning on curated slices. The harder question is *maintenance*: as fleet footage arrives continuously, how do you keep training splits current without manual work — and how do you ensure you're not wasting compute on near-duplicate frames?
 
@@ -106,6 +106,8 @@ python -m object_detection.backfill_geneva --columns has_person has_rider
 python -m object_detection.backfill_geneva --gpu --columns person_bbox_area_pct
 ```
 
+> **BDD100K vs production:** BDD100K ships with ground-truth bounding boxes, so `person_bbox_area_pct` could be computed directly from `ann_bboxes` without any model inference. The GPU UDF exists to model the **production scenario** — raw, unlabeled fleet footage where ground truth doesn't exist and a detector is the only way to measure pedestrian prominence. The pattern (UDF → backfill → SQL filter) is identical either way; only the UDF implementation changes.
+
 ### 3 · Explore
 
 With all signals stored as flat scalar columns, standard SQL and full-text search work directly on the table — no export, no joining with external manifests.
@@ -189,14 +191,13 @@ python -m object_detection.manage_views --action refresh
 
 Only new data will be incrementally backfilled:
 ```
-cess" 
-[bdd100k - has_rider (3 fragments)] Rows ready for commit: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 500/500 [00:01<00:00, 336.72it/s]
-[bdd100k - has_rider (3 fragments)] Rows committed (every 64 fragments): 100%|██████████████████████████████████████████████████████████████████████████████████████████| 500/500 [00:01<00:00, 336.71it/s]
-  [done]     has_rider  (job_id=cb793ece-3721-47e6-8b3d-b891de4b1eb1)s): 100%|██████████████████████████████████████████████████████████████████████████████████████████| 500/500 [00:01<00:00, 336.75it/s]
+[bdd100k - has_rider (3 fragments)] Rows ready for commit: 100%| 500/500 [00:01<00:00, 336.72it/s]
+[bdd100k - has_rider (3 fragments)] Rows committed (every 64 fragments): 100%| 500/500 [00:01<00:00, 336.71it/s]
+  [done]     has_rider  (job_id=cb793ece-3721-47e6-8b3d-b891de4b1eb1)
 
 All backfills complete.
 ```
-And refresh keep materialized views updat to date:
+And refresh keeps materialized views up to date:
 ```
 [bdd100k_rider_val]  515 → 630 rows  (+115)  version 7
 ```
@@ -221,6 +222,22 @@ GPU runs on full BDD100K (80k frames), 10 epochs, A100, batch size 64, AMP enabl
 | | Recall | 0.6794 | **0.8038** | **+0.1244** |
 
 Recall improvement dominates across all three failure modes — the model catches significantly more of the objects it was previously missing. Nighttime pedestrian shows the strongest lift (consistent with it being the largest distribution shift from COCO's daytime-heavy data). All improvements use the same COCO pretrained weights as starting point; no external data was added.
+
+### Visual examples
+
+Each image shows three panels: **green** = ground truth · **red** = pretrained COCO baseline · **blue** = fine-tuned model
+
+**Rider**
+
+![Rider detection — ground truth vs baseline vs fine-tuned](viz/rider_04.jpg)
+
+**Nighttime pedestrian**
+
+![Nighttime pedestrian detection — ground truth vs baseline vs fine-tuned](viz/nighttime_person_01.jpg)
+
+**Distant pedestrian**
+
+![Distant pedestrian detection — ground truth vs baseline vs fine-tuned](viz/distant_person_00.jpg)
 
 ---
 
