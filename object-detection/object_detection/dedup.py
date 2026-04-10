@@ -4,23 +4,25 @@ Deduplication helpers for BDD100K.
 The full dedup pipeline follows the same Geneva backfill pattern as every
 other feature column:
 
-  1. backfill_geneva --gpu --columns embedding
-        ResNet18 (512-d, L2-normalised) written to bdd100k.embedding
+  1. backfill_geneva --gpu --columns dhash
+        dHash (64-bit perceptual hash, binary float32 vector) written to bdd100k.dhash.
+        Computed on GPU: JPEG decode via nvjpeg, grayscale + 9×8 resize as tensor ops.
 
   2. dedup --action index
-        IVF-PQ cosine index on bdd100k.embedding (required before step 3)
+        IVF L2 index on bdd100k.dhash (required before step 3).
+        For binary vectors, L2² = Hamming distance — no conversion needed.
 
   3. backfill_geneva --columns is_duplicate
         Per-row: nearest non-self neighbour found via vector search.
-        is_duplicate = True when cosine similarity >= 0.98.
+        is_duplicate = True when Hamming distance ≤ 10 (L2² ≤ 10).
 
   4. manage_views --action curate / curate-person
         Views already filter is_duplicate = false on train splits.
 
 This module provides two supporting actions:
 
-  index   Build the IVF-PQ cosine index on bdd100k.embedding.
-          Must run between the embedding and is_duplicate backfills.
+  index   Build the IVF L2 index on bdd100k.dhash.
+          Must run between the dhash and is_duplicate backfills.
 
   stats   Report duplicate rate using the already-backfilled is_duplicate
           column. Requires is_duplicate to be present — errors otherwise.
@@ -42,17 +44,17 @@ DEFAULT_DB = "data/bdd100k/lancedb"
 
 
 def index(db_path: str) -> None:
-    """Build IVF-PQ cosine index on bdd100k.embedding."""
+    """Build IVF L2 index on bdd100k.dhash."""
     db = lancedb.connect(db_path)
     src_tbl = db.open_table(SOURCE_TABLE)
-    if "embedding" not in src_tbl.schema.names:
+    if "dhash" not in src_tbl.schema.names:
         raise RuntimeError(
-            "Column 'embedding' not found. "
-            "Run: python -m object_detection.backfill_geneva --gpu --columns embedding"
+            "Column 'dhash' not found. "
+            "Run: python -m object_detection.backfill_geneva --gpu --columns dhash"
         )
     n = src_tbl.count_rows()
-    print(f"[index] Building IVF-PQ cosine index on {n} rows …")
-    src_tbl.create_index(metric="cosine", vector_column_name="embedding")
+    print(f"[index] Building IVF L2 index on dhash ({n} rows) …")
+    src_tbl.create_index(metric="l2", vector_column_name="dhash")
     print("[index] Index built.")
 
 

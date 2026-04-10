@@ -65,14 +65,14 @@ def visualize_dedup(db_path: str, output_dir: Path, n: int, pool: int, threshold
 
     if "is_duplicate" not in tbl.schema.names:
         raise RuntimeError("is_duplicate column not found — run backfill_geneva --columns is_duplicate first")
-    if "embedding" not in tbl.schema.names:
-        raise RuntimeError("embedding column not found — run backfill_geneva --gpu --columns embedding first")
+    if "dhash" not in tbl.schema.names:
+        raise RuntimeError("dhash column not found — run backfill_geneva --gpu --columns dhash first")
 
     # Sample flagged frames
     rows = (
         tbl.search()
         .where("is_duplicate = true")
-        .select(["image_id", "image_bytes", "embedding"])
+        .select(["image_id", "image_bytes", "dhash"])
         .limit(pool)
         .to_arrow()
     )
@@ -92,12 +92,12 @@ def visualize_dedup(db_path: str, output_dir: Path, n: int, pool: int, threshold
 
         iid         = rows["image_id"][i].as_py()
         image_bytes = rows["image_bytes"][i].as_py()
-        emb         = rows["embedding"][i].as_py()
+        h           = rows["dhash"][i].as_py()
 
-        # Find nearest non-self neighbour
+        # Find nearest non-self neighbour via dHash L2 search
         result = (
-            tbl.search(emb, vector_column_name="embedding")
-            .metric("cosine")
+            tbl.search(h, vector_column_name="dhash")
+            .metric("l2")
             .where(f"image_id != '{iid}'")
             .select(["image_id", "image_bytes", "_distance"])
             .limit(1)
@@ -107,8 +107,8 @@ def visualize_dedup(db_path: str, output_dir: Path, n: int, pool: int, threshold
         if len(result) == 0:
             continue
 
-        dist        = result["_distance"][0].as_py()
-        similarity  = 1.0 - dist
+        # _distance is squared L2 = Hamming distance for binary vectors
+        hamming     = result["_distance"][0].as_py()
         neighbour_bytes = result["image_bytes"][0].as_py()
         neighbour_id    = result["image_id"][0].as_py()
 
@@ -117,20 +117,20 @@ def visualize_dedup(db_path: str, output_dir: Path, n: int, pool: int, threshold
 
         pair = _hstack(left, right)
 
-        # Add a thin similarity banner at the bottom
+        # Add a thin Hamming distance banner at the bottom
         banner = Image.new("RGB", (pair.width, 24), (30, 30, 30))
         ImageDraw.Draw(banner).text(
             (8, 4),
-            f"cosine similarity: {similarity:.4f}  (threshold: {threshold})",
+            f"hamming distance: {int(hamming)}  (threshold: {threshold})",
             fill=(200, 200, 200),
         )
         out = Image.new("RGB", (pair.width, pair.height + 24))
         out.paste(pair, (0, 0))
         out.paste(banner, (0, pair.height))
 
-        path = output_dir / f"pair_{saved:02d}_sim{similarity:.3f}.jpg"
+        path = output_dir / f"pair_{saved:02d}_hamming{int(hamming)}.jpg"
         out.save(path, quality=90)
-        print(f"  {path}  similarity={similarity:.4f}")
+        print(f"  {path}  hamming={int(hamming)}")
         saved += 1
 
     print(f"\nSaved {saved} pairs to {output_dir}")
@@ -148,8 +148,8 @@ def _parse_args(argv=None):
                    help="Number of pairs to save (default: 10)")
     p.add_argument("--pool",        type=int, default=100,
                    help="Number of flagged frames to sample from (default: 100)")
-    p.add_argument("--threshold",   type=float, default=0.97,
-                   help="Similarity threshold used during backfill (default: 0.97)")
+    p.add_argument("--threshold",   type=int, default=10,
+                   help="Hamming distance threshold used during backfill (default: 10)")
     return p.parse_args(argv)
 
 

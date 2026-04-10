@@ -35,9 +35,11 @@ from __future__ import annotations
 
 import argparse
 
+import pyarrow as pa
+
 import geneva
 from object_detection.geneva_udfs import (
-    ALL_UDFS, CPU_PERSON_UDFS, GPU_PERSON_UDFS, GPU_EMBED_UDFS, METADATA_UDFS,
+    ALL_UDFS, CPU_PERSON_UDFS, GPU_PERSON_UDFS, GPU_DHASH_UDFS, METADATA_UDFS,
     _IsDuplicateCPU,
 )
 
@@ -54,12 +56,12 @@ def backfill(
     gpu: bool = False,
     dedup_threshold: float = 0.97,
 ) -> None:
-    dedup_udfs = {"is_duplicate": _IsDuplicateCPU(db_path=db_path, threshold=dedup_threshold)}
+    dedup_udfs = {"is_duplicate": _IsDuplicateCPU(db_path=db_path, hamming_threshold=dedup_threshold)}
 
     udf_registry = {
         **ALL_UDFS,
         **(GPU_PERSON_UDFS if gpu else CPU_PERSON_UDFS),
-        **(GPU_EMBED_UDFS if gpu else {}),
+        **(GPU_DHASH_UDFS if gpu else {}),
         **dedup_udfs,
     }
 
@@ -79,7 +81,7 @@ def backfill(
                 print(f"  [drop]     {col}")
             tbl = conn.open_table(table_name)
 
-    # Register any columns that don't exist yet
+    # Register any missing columns via their UDF so Geneva knows the schema.
     existing = set(tbl.schema.names)
     to_add = {col: udf_registry[col] for col in columns if col not in existing and col in udf_registry}
     if to_add:
@@ -140,9 +142,10 @@ def _parse_args(argv=None):
         help="Drop and re-add columns before backfilling — use to restart a stuck job",
     )
     p.add_argument(
-        "--dedup-threshold", type=float, default=0.97,
+        "--dedup-threshold", type=int, default=10,
         help=(
-            "Cosine similarity threshold for is_duplicate backfill (default: 0.97). "
+            "Hamming distance threshold for is_duplicate backfill (default: 10). "
+            "Frames with dHash Hamming distance ≤ this value are flagged as duplicates. "
             "Only used when 'is_duplicate' is in --columns."
         ),
     )

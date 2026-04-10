@@ -1,7 +1,7 @@
 """
 Geneva UDFs for BDD100K feature engineering.
 
-Two tiers:
+Three tiers:
 
   Tier 1 — Annotation-derived (CPU, fast, no image decoding):
     has_person, has_rider, scene_description, scene_has_crossroad,
@@ -14,6 +14,18 @@ Two tiers:
 
     CPU fallback (SSDLite320) available for local dev — selected by default;
     pass --gpu to backfill_geneva.py to use Faster R-CNN on a GPU cluster.
+
+  Tier 3 — Dedup: dHash perceptual hash (GPU) + is_duplicate flag (CPU).
+
+    Two-step process:
+      1. backfill_geneva --gpu --columns dhash   → GPU dHash forward pass
+      2. dedup --action index                    → IVF L2 index on dhash
+      3. backfill_geneva --columns is_duplicate  → per-row vector search
+
+    dHash encodes each frame as a 64-bit binary vector (0.0/1.0 floats).
+    For binary vectors, L2² = Hamming distance, so Hamming ≤ 10 corresponds
+    to L2 distance ≤ ~3.16.  is_duplicate = True when the nearest non-self
+    neighbour has Hamming distance ≤ threshold (default 10).
 
 Stateful GPU UDF pattern (Geneva docs):
   - @udf decorator goes on the CLASS
@@ -234,94 +246,105 @@ def scene_description(weather: str, scene: str, timeofday: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tier 3 — Dedup: DINOv2 embeddings + is_duplicate flag
+# Tier 3 — Dedup: dHash perceptual hash (GPU) + is_duplicate flag (CPU)
 #
 # Two-step process:
-#   1. backfill_geneva --gpu --columns embedding   → GPU DINOv2 forward pass
-#   2. dedup --action index                        → IVF-PQ cosine index
-#   3. backfill_geneva --columns is_duplicate      → per-row vector search
+#   1. backfill_geneva --gpu --columns dhash   → GPU dHash forward pass
+#   2. dedup --action index                    → IVF L2 index on dhash
+#   3. backfill_geneva --columns is_duplicate  → per-row vector search
 #
-# is_duplicate = True when nearest non-self neighbour has cosine similarity
-# >= threshold (default 0.97). Both frames in a near-duplicate pair get
-# flagged; manage_views already filters them out automatically.
+# dHash encodes each frame as a 64-bit binary vector (0.0/1.0 floats).
+# For binary vectors, L2² = Hamming distance — so Hamming ≤ 10 corresponds
+# to L2 ≤ ~3.16.  is_duplicate = True when the nearest non-self neighbour
+# has Hamming distance ≤ threshold (default 10).
 # ---------------------------------------------------------------------------
 
 _DEDUP_DB_PATH = "data/bdd100k/lancedb"
-_DEDUP_THRESHOLD = 0.97
+_DEDUP_HAMMING_THRESHOLD = 10
 
 
-@udf(data_type=pa.list_(pa.float32(), 512), input_columns=["image_bytes"],
+@udf(data_type=pa.list_(pa.float32(), 64), input_columns=["image_bytes"],
      num_gpus=1, num_cpus=1, cuda=True)
-class _EmbeddingGPU:
-    """ResNet18 (512-d, L2-normalised) image embedding — GPU.
+class _DHashGPU:
+    """
+    Perceptual dHash (64-bit) computed on GPU — GPU UDF.
 
-    ResNet18's ImageNet features capture edges, textures, and colour
-    distributions — the low-level appearance signals that change between
-    near-duplicate consecutive frames.  Better suited for pixel-level
-    dedup than semantic models (CLIP, DINOv2) which cluster by scene
-    type rather than frame identity.
+    Pipeline per image:
+      1. Decode JPEG on GPU via nvjpeg (torchvision.io.decode_jpeg device='cuda')
+      2. Convert to grayscale using ITU-R BT.601 luma coefficients
+      3. Resize to 9×8 via bilinear interpolation on GPU
+      4. Compare each pixel to its right neighbour → 8×8 = 64 bits
+
+    Result stored as list<float32>[64] with values in {0.0, 1.0}.
+    For binary vectors, L2² = Hamming distance, making LanceDB L2 search
+    a direct proxy for Hamming distance without any extra conversion.
     """
 
     def __init__(self) -> None:
-        self.model: Optional[torch.nn.Module] = None
         self.device: Optional[torch.device] = None
 
     def _load(self) -> None:
-        if self.model is not None:
+        if self.device is not None:
             return
-        import torch.nn as nn
-        from torchvision.models import resnet18, ResNet18_Weights
-        base = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1).eval().half().cuda()
-        # Strip the classification head — keep everything up to avgpool
-        self.model = nn.Sequential(*list(base.children())[:-1])
-        self.device = next(self.model.parameters()).device
+        self.device = torch.device("cuda")
 
     def __call__(self, image_bytes: pa.Array) -> pa.Array:
         import torchvision.io as tvio
         self._load()
-        tensors = []
+        results = []
         for b in image_bytes:
             byte_t = torch.frombuffer(bytearray(b.as_py()), dtype=torch.uint8)
-            img_t = tvio.decode_jpeg(byte_t, device=self.device).half() / 255.0
-            tensors.append(img_t)
-        with torch.no_grad():
-            feats = self.model(torch.stack(tensors)).squeeze(-1).squeeze(-1)  # (B, 512)
-            feats = torch.nn.functional.normalize(feats, dim=1)
+            # Decode JPEG on GPU using nvjpeg — full resolution, no CPU copy
+            img_t = tvio.decode_jpeg(byte_t, device=self.device).float()  # (3, H, W)
+            # Grayscale: ITU-R BT.601 luma
+            gray = 0.299 * img_t[0] + 0.587 * img_t[1] + 0.114 * img_t[2]  # (H, W)
+            # Resize to 9×8 for 64-bit hash (9 cols → 8 left-right comparisons per row)
+            gray = gray.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+            gray = torch.nn.functional.interpolate(gray, size=(8, 9), mode="bilinear", align_corners=False)
+            gray = gray.squeeze()  # (8, 9)
+            # dHash: 1 where left pixel is brighter than right neighbour
+            bits = (gray[:, :-1] > gray[:, 1:]).float()  # (8, 8)
+            results.append(bits.flatten().cpu().tolist())
         torch.cuda.empty_cache()
-        return pa.array(feats.cpu().float().tolist(), type=pa.list_(pa.float32(), 512))
+        return pa.array(results, type=pa.list_(pa.float32(), 64))
 
 
-@udf(data_type=pa.bool_(), input_columns=["image_id", "embedding"])
+@udf(data_type=pa.bool_(), input_columns=["image_id", "dhash"])
 class _IsDuplicateCPU:
     """
-    Per-row duplicate flag: True when nearest non-self neighbour has cosine
-    similarity >= threshold.  Requires an IVF-PQ index on bdd100k.embedding
+    Per-row duplicate flag — CPU UDF.
+
+    True when the nearest non-self neighbour has Hamming distance ≤ threshold.
+    For binary vectors (0/1), L2² = Hamming distance, so we use LanceDB's L2
+    metric and compare _distance (squared L2) directly against the threshold.
+
+    Requires an L2 vector index on bdd100k.dhash
     (run ``dedup --action index`` before backfilling this column).
     """
 
-    def __init__(self, db_path: str = _DEDUP_DB_PATH, threshold: float = _DEDUP_THRESHOLD) -> None:
+    def __init__(self, db_path: str = _DEDUP_DB_PATH, hamming_threshold: int = _DEDUP_HAMMING_THRESHOLD) -> None:
         self.db_path = db_path
-        self.threshold = threshold
+        self.hamming_threshold = hamming_threshold
         self._tbl = None
 
-    def __call__(self, image_id: pa.Array, embedding: pa.Array) -> pa.Array:
+    def __call__(self, image_id: pa.Array, dhash: pa.Array) -> pa.Array:
         if self._tbl is None:
             import lancedb as _ldb
             self._tbl = _ldb.connect(self.db_path).open_table("bdd100k")
-        distance_threshold = 1.0 - self.threshold
         results = []
-        for iid, emb in zip(image_id.to_pylist(), embedding.to_pylist()):
-            if emb is None:
+        for iid, h in zip(image_id.to_pylist(), dhash.to_pylist()):
+            if h is None:
                 results.append(None)
                 continue
             result = (
-                self._tbl.search(emb, vector_column_name="embedding")
-                .metric("cosine")
+                self._tbl.search(h, vector_column_name="dhash")
+                .metric("l2")
                 .where(f"image_id != '{iid}'")
                 .limit(1)
                 .to_arrow()
             )
-            is_dup = len(result) > 0 and result["_distance"][0].as_py() <= distance_threshold
+            # _distance for L2 metric is squared L2, which equals Hamming for binary vectors
+            is_dup = len(result) > 0 and result["_distance"][0].as_py() <= self.hamming_threshold
             results.append(is_dup)
         return pa.array(results, type=pa.bool_())
 
@@ -341,9 +364,9 @@ GPU_PERSON_UDFS: dict[str, object] = {
     "person_bbox_area_pct": _PersonBboxAreaPctGPU(),
 }
 
-#: GPU embedding UDF — ResNet18 (512-d). Requires --gpu flag.
-GPU_EMBED_UDFS: dict[str, object] = {
-    "embedding": _EmbeddingGPU(),
+#: GPU dHash UDF — 64-bit perceptual hash. Requires --gpu flag.
+GPU_DHASH_UDFS: dict[str, object] = {
+    "dhash": _DHashGPU(),
 }
 
 #: Tier 1 — annotation-derived and image statistics, no detector.
