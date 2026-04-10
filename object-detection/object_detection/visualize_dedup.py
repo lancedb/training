@@ -108,7 +108,9 @@ def visualize_dedup(db_path: str, output_dir: Path, n: int, pool: int, threshold
             continue
 
         # _distance is squared L2 = Hamming distance for binary vectors
-        hamming     = result["_distance"][0].as_py()
+        hamming = result["_distance"][0].as_py()
+        if hamming > threshold:
+            continue
         neighbour_bytes = result["image_bytes"][0].as_py()
         neighbour_id    = result["image_id"][0].as_py()
 
