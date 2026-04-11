@@ -13,8 +13,10 @@
 set -euo pipefail
 
 SKIP_INGEST=false
+TRAIN=false
 for arg in "$@"; do
   [[ "$arg" == "--skip-ingest" ]] && SKIP_INGEST=true
+  [[ "$arg" == "--train" ]]       && TRAIN=true
 done
 
 log() { echo; echo "=== $* ==="; echo; }
@@ -97,27 +99,30 @@ python -m object_detection.manage_views --action curate
 python -m object_detection.manage_views --action curate-person
 
 # ---------------------------------------------------------------------------
-# 11. Training  (commented out — runs separately, takes hours on full dataset)
+# 11. Training  (pass --train to enable)
 # ---------------------------------------------------------------------------
-log "Step 11 · Training — skipped (uncomment below to run)"
+if [[ "$TRAIN" == true ]]; then
+  log "Step 11 · Training"
+  python -m object_detection.train_detector \
+      --train-table bdd100k_rider_train \
+      --val-table   bdd100k_rider_val \
+      --epochs 10 --batch-size 64 --lr 0.04 --num-workers 14 \
+      --output-dir  checkpoints/rider
 
-# python -m object_detection.train_detector \
-#     --train-table bdd100k_rider_train \
-#     --val-table   bdd100k_rider_val \
-#     --epochs 10 --batch-size 64 --lr 0.04 --num-workers 14 \
-#     --output-dir  checkpoints/rider
-#
-# python -m object_detection.train_detector \
-#     --train-table bdd100k_nighttime_person_train \
-#     --val-table   bdd100k_nighttime_person_val \
-#     --epochs 10 --batch-size 64 --lr 0.04 --num-workers 14 \
-#     --output-dir  checkpoints/nighttime_person
-#
-# python -m object_detection.train_detector \
-#     --train-table bdd100k_distant_person_train \
-#     --val-table   bdd100k_distant_person_val \
-#     --epochs 10 --batch-size 64 --lr 0.04 --num-workers 14 \
-#     --output-dir  checkpoints/distant_person
+  python -m object_detection.train_detector \
+      --train-table bdd100k_nighttime_person_train \
+      --val-table   bdd100k_nighttime_person_val \
+      --epochs 10 --batch-size 64 --lr 0.04 --num-workers 14 \
+      --output-dir  checkpoints/nighttime_person
+
+  python -m object_detection.train_detector \
+      --train-table bdd100k_distant_person_train \
+      --val-table   bdd100k_distant_person_val \
+      --epochs 10 --batch-size 64 --lr 0.04 --num-workers 14 \
+      --output-dir  checkpoints/distant_person
+else
+  log "Step 11 · Training — skipped (pass --train to run)"
+fi
 
 # ---------------------------------------------------------------------------
 # 12. Simulate new footage arriving — incremental refresh
@@ -132,5 +137,11 @@ python -m object_detection.backfill_geneva --gpu --columns dhash
 python -m object_detection.dedup --action index
 python -m object_detection.backfill_geneva --columns is_duplicate
 python -m object_detection.manage_views --action refresh
+
+# ---------------------------------------------------------------------------
+# 13. Verification summary
+# ---------------------------------------------------------------------------
+log "Step 13 · Verification summary"
+python -m object_detection.verify_pipeline
 
 log "Pipeline complete."
