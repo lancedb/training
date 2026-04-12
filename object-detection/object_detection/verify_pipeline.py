@@ -138,7 +138,7 @@ def _check_models(db: lancedb.DBConnection, db_path: str) -> list[tuple]:
 
         def _make_loader():
             return make_detection_loader(
-                uri=db_path, table_name=val_view, batch_size=8, num_workers=4,
+                uri=db_path, table_name=val_view, batch_size=8, num_workers=0,
             )
 
         # Baseline — fresh loader each time (Permutation can't be iterated twice)
