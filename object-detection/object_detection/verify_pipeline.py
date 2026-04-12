@@ -40,9 +40,9 @@ _EXPECTED_VIEWS = [
 
 # Checkpoints produced by train_detector.py, keyed by failure mode
 _CHECKPOINTS: dict[str, tuple[str, str]] = {
-    "Rider":              ("checkpoints/rider/best.pt",            "bdd100k_rider_val"),
-    "Nighttime person":   ("checkpoints/nighttime_person/best.pt", "bdd100k_nighttime_person_val"),
-    "Distant person":     ("checkpoints/distant_person/best.pt",   "bdd100k_distant_person_val"),
+    "Rider":              ("checkpoints/rider/fasterrcnn_bdd_finetuned.pt",            "bdd100k_rider_val"),
+    "Nighttime person":   ("checkpoints/nighttime_person/fasterrcnn_bdd_finetuned.pt", "bdd100k_nighttime_person_val"),
+    "Distant person":     ("checkpoints/distant_person/fasterrcnn_bdd_finetuned.pt",   "bdd100k_distant_person_val"),
 }
 
 PASS = "PASS"
