@@ -103,13 +103,12 @@ def _check_dedup(db: lancedb.DBConnection) -> list[tuple]:
 
 def _check_views(db: lancedb.DBConnection) -> list[tuple]:
     rows = []
-    existing = set(str(t) for t in db.list_tables())
     for view in _EXPECTED_VIEWS:
-        if view not in existing:
+        try:
+            n = db.open_table(view).count_rows()
+            rows.append((PASS, f"view: {view}", f"{n:,} rows"))
+        except Exception:
             rows.append((FAIL, f"view: {view}", "missing — run manage_views"))
-            continue
-        n = db.open_table(view).count_rows()
-        rows.append((PASS, f"view: {view}", f"{n:,} rows"))
     return rows
 
 
@@ -130,9 +129,10 @@ def _check_models(db: lancedb.DBConnection, db_path: str) -> list[tuple]:
     # Baseline: pretrained COCO weights (no fine-tuning)
     baseline_model = build_model(NUM_CLASSES, pretrained=True).to(device)
 
-    existing_tables = set(str(t) for t in db.list_tables())
     for mode, (ckpt_path, val_view) in _CHECKPOINTS.items():
-        if val_view not in existing_tables:
+        try:
+            db.open_table(val_view)
+        except Exception:
             rows.append((SKIP, f"eval: {mode}", f"val view '{val_view}' missing"))
             continue
 
