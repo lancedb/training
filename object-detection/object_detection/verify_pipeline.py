@@ -103,7 +103,7 @@ def _check_dedup(db: lancedb.DBConnection) -> list[tuple]:
 
 def _check_views(db: lancedb.DBConnection) -> list[tuple]:
     rows = []
-    existing = set(db.table_names())
+    existing = set(db.list_tables())
     for view in _EXPECTED_VIEWS:
         if view not in existing:
             rows.append((FAIL, f"view: {view}", "missing — run manage_views"))
@@ -130,17 +130,19 @@ def _check_models(db: lancedb.DBConnection, db_path: str) -> list[tuple]:
     # Baseline: pretrained COCO weights (no fine-tuning)
     baseline_model = build_model(NUM_CLASSES, pretrained=True).to(device)
 
+    existing_tables = set(db.list_tables())
     for mode, (ckpt_path, val_view) in _CHECKPOINTS.items():
-        if val_view not in set(db.table_names()):
+        if val_view not in existing_tables:
             rows.append((SKIP, f"eval: {mode}", f"val view '{val_view}' missing"))
             continue
 
-        loader = make_detection_loader(
-            uri=db_path, table_name=val_view, batch_size=8, num_workers=4,
-        )
+        def _make_loader():
+            return make_detection_loader(
+                uri=db_path, table_name=val_view, batch_size=8, num_workers=4,
+            )
 
-        # Baseline
-        base = evaluate(baseline_model, loader, device)
+        # Baseline — fresh loader each time (Permutation can't be iterated twice)
+        base = evaluate(baseline_model, _make_loader(), device)
 
         # Fine-tuned
         if not Path(ckpt_path).exists():
@@ -151,7 +153,7 @@ def _check_models(db: lancedb.DBConnection, db_path: str) -> list[tuple]:
 
         ft_model = build_model(NUM_CLASSES, pretrained=False).to(device)
         ft_model.load_state_dict(torch.load(ckpt_path, map_location=device))
-        ft = evaluate(ft_model, loader, device)
+        ft = evaluate(ft_model, _make_loader(), device)
 
         delta = ft["map_50"] - base["map_50"]
         status = PASS if delta > 0 else FAIL
