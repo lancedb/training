@@ -130,7 +130,7 @@ def _check_models(db: lancedb.DBConnection, db_path: str) -> list[tuple]:
     # Baseline: pretrained COCO weights (no fine-tuning)
     baseline_model = build_model(NUM_CLASSES, pretrained=True).to(device)
 
-    existing_tables = set(db.list_tables())
+    existing_tables = set(str(t) for t in db.list_tables())
     for mode, (ckpt_path, val_view) in _CHECKPOINTS.items():
         if val_view not in existing_tables:
             rows.append((SKIP, f"eval: {mode}", f"val view '{val_view}' missing"))
