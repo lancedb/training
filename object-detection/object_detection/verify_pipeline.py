@@ -103,7 +103,7 @@ def _check_dedup(db: lancedb.DBConnection) -> list[tuple]:
 
 def _check_views(db: lancedb.DBConnection) -> list[tuple]:
     rows = []
-    existing = set(db.list_tables())
+    existing = set(str(t) for t in db.list_tables())
     for view in _EXPECTED_VIEWS:
         if view not in existing:
             rows.append((FAIL, f"view: {view}", "missing — run manage_views"))
