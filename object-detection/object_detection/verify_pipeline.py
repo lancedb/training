@@ -112,23 +112,37 @@ def _check_views(db: lancedb.DBConnection) -> list[tuple]:
     return rows
 
 
+def _run_eval_subprocess(db_path: str, checkpoint: str, table: str) -> dict | None:
+    """
+    Run eval.py in a fresh subprocess — avoids Lance handle conflicts with the
+    open connections already held by verify_pipeline in the parent process.
+    """
+    import json
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-m", "object_detection.eval",
+         "--checkpoint", checkpoint,
+         "--db", db_path,
+         "--table", table,
+         "--batch-size", "8",
+         "--output-json"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    # JSON is the last line of stdout
+    for line in reversed(result.stdout.strip().splitlines()):
+        try:
+            return json.loads(line)
+        except Exception:
+            continue
+    return None
+
+
 def _check_models(db: lancedb.DBConnection, db_path: str) -> list[tuple]:
     rows = []
-    try:
-        import torch
-        from object_detection.train_detector import build_model
-        from object_detection.dataloader import make_detection_loader
-        from object_detection.eval import evaluate
-        from object_detection.schema import NUM_CLASSES
-    except ImportError as e:
-        rows.append((SKIP, "model eval", f"import error: {e}"))
-        return rows
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Baseline: pretrained COCO weights (no fine-tuning)
-    baseline_model = build_model(NUM_CLASSES, pretrained=True).to(device)
-
     for mode, (ckpt_path, val_view) in _CHECKPOINTS.items():
         try:
             db.open_table(val_view)
@@ -136,24 +150,18 @@ def _check_models(db: lancedb.DBConnection, db_path: str) -> list[tuple]:
             rows.append((SKIP, f"eval: {mode}", f"val view '{val_view}' missing"))
             continue
 
-        def _make_loader():
-            return make_detection_loader(
-                uri=db_path, table_name=val_view, batch_size=8, num_workers=0,
-            )
-
-        # Baseline — fresh loader each time (Permutation can't be iterated twice)
-        base = evaluate(baseline_model, _make_loader(), device)
-
-        # Fine-tuned
         if not Path(ckpt_path).exists():
-            rows.append((SKIP, f"eval: {mode}",
-                         f"checkpoint not found: {ckpt_path}  "
-                         f"(baseline mAP={base['map_50']:.4f})"))
+            rows.append((SKIP, f"eval: {mode}", f"checkpoint not found: {ckpt_path}"))
             continue
 
-        ft_model = build_model(NUM_CLASSES, pretrained=False).to(device)
-        ft_model.load_state_dict(torch.load(ckpt_path, map_location=device))
-        ft = evaluate(ft_model, _make_loader(), device)
+        print(f"  evaluating {mode} baseline …")
+        base = _run_eval_subprocess(db_path, "pretrained", val_view)
+        print(f"  evaluating {mode} fine-tuned …")
+        ft   = _run_eval_subprocess(db_path, ckpt_path, val_view)
+
+        if base is None or ft is None:
+            rows.append(("WARN", f"eval: {mode}", "eval subprocess failed — run eval.py manually"))
+            continue
 
         delta = ft["map_50"] - base["map_50"]
         status = PASS if delta > 0 else FAIL

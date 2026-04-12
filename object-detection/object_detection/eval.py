@@ -228,20 +228,25 @@ def _parse_args(argv=None):
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--score-thresh", type=float, default=0.3)
+    p.add_argument("--output-json", action="store_true",
+                   help="Print metrics as a JSON line on stdout (for verify_pipeline.py)")
     return p.parse_args(argv)
 
 
 def main(argv=None):
+    import json as _json
     from object_detection.train_detector import build_model
 
     args = _parse_args(argv)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = build_model(NUM_CLASSES, pretrained=False).to(device)
-    state = torch.load(args.checkpoint, map_location=device)
-    model.load_state_dict(state)
-    print(f"Loaded checkpoint: {args.checkpoint}")
+    pretrained = (args.checkpoint == "pretrained")
+    model = build_model(NUM_CLASSES, pretrained=pretrained).to(device)
+    if not pretrained:
+        state = torch.load(args.checkpoint, map_location=device)
+        model.load_state_dict(state)
+        print(f"Loaded checkpoint: {args.checkpoint}")
 
     loader = make_detection_loader(
         uri=args.db,
@@ -252,9 +257,13 @@ def main(argv=None):
     print(f"Evaluating on {len(loader.dataset)} samples …")
 
     metrics = evaluate(model, loader, device, score_thresh=args.score_thresh)
-    print(f"\nmAP@0.5  : {metrics['map_50']:.4f}")
-    print(f"Precision: {metrics['precision']:.4f}")
-    print(f"Recall   : {metrics['recall']:.4f}")
+
+    if args.output_json:
+        print(_json.dumps(metrics))
+    else:
+        print(f"\nmAP@0.5  : {metrics['map_50']:.4f}")
+        print(f"Precision: {metrics['precision']:.4f}")
+        print(f"Recall   : {metrics['recall']:.4f}")
 
 
 if __name__ == "__main__":
