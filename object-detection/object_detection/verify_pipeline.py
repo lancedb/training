@@ -131,6 +131,7 @@ def _run_eval_subprocess(db_path: str, checkpoint: str, table: str) -> dict | No
         capture_output=True, text=True,
     )
     if result.returncode != 0:
+        print(f"    [eval stderr] {result.stderr.strip()[-500:]}")
         return None
     # JSON is the last line of stdout
     for line in reversed(result.stdout.strip().splitlines()):
