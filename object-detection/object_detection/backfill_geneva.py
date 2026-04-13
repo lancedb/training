@@ -39,8 +39,8 @@ import pyarrow as pa
 
 import geneva
 from object_detection.geneva_udfs import (
-    ALL_UDFS, CPU_PERSON_UDFS, GPU_PERSON_UDFS, GPU_DHASH_UDFS, METADATA_UDFS,
-    _IsDuplicateCPU,
+    ALL_UDFS, CPU_PERSON_UDFS, GPU_PERSON_UDFS, GPU_DHASH_UDFS, GPU_CLIP_UDFS,
+    METADATA_UDFS, _IsDuplicateCPU,
 )
 
 DEFAULT_DB    = "data/bdd100k/lancedb"
@@ -62,6 +62,7 @@ def backfill(
         **ALL_UDFS,
         **(GPU_PERSON_UDFS if gpu else CPU_PERSON_UDFS),
         **(GPU_DHASH_UDFS if gpu else {}),
+        **(GPU_CLIP_UDFS if gpu else {}),
         **dedup_udfs,
     }
 

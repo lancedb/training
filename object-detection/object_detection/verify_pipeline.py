@@ -127,6 +127,7 @@ def _run_eval_subprocess(db_path: str, checkpoint: str, table: str) -> dict | No
          "--db", db_path,
          "--table", table,
          "--batch-size", "8",
+         "--num-workers", "4",
          "--output-json"],
         capture_output=True, text=True,
     )

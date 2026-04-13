@@ -7,13 +7,17 @@ Three tiers:
     has_person, has_rider, scene_description, scene_has_crossroad,
     scene_has_mountain, white_balance.
 
-  Tier 2 — GPU inference (Faster R-CNN ResNet50 FPN v2):
+  Tier 2 — GPU inference:
     person_bbox_area_pct — area of the largest detected person as a percentage
     of the total frame area.  Use this to find frames where pedestrians are
     prominent (close to camera, large in frame) vs. distant background figures.
 
     CPU fallback (SSDLite320) available for local dev — selected by default;
     pass --gpu to backfill_geneva.py to use Faster R-CNN on a GPU cluster.
+
+    clip_embedding — 512-d L2-normalised CLIP ViT-B/32 image embedding (GPU only).
+    Stored as list<float32>[512] with a cosine IVF-PQ index for text-to-image
+    and image-to-image vector search during EDA.
 
   Tier 3 — Dedup: dHash perceptual hash (GPU) + is_duplicate flag (CPU).
 
@@ -246,6 +250,62 @@ def scene_description(weather: str, scene: str, timeofday: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tier 2b — CLIP ViT-B/32 image embeddings (GPU)
+#
+# Encodes each frame as a 512-d L2-normalised float using OpenAI's ViT-B/32.
+# Stored as list<float32>[512] — build a cosine IVF-PQ index after backfill.
+# Enables text-to-image and image-to-image search directly on the bdd100k table
+# for EDA, without exporting to a separate vector database.
+#
+# Requires: pip install open-clip-torch
+# ---------------------------------------------------------------------------
+
+@udf(data_type=pa.list_(pa.float32(), 512), input_columns=["image_bytes"],
+     num_gpus=1, num_cpus=1, cuda=True)
+class _CLIPEmbeddingGPU:
+    """
+    CLIP ViT-B/32 image embedding — GPU UDF.
+
+    Produces a 512-d L2-normalised float32 vector per frame using OpenAI's
+    pretrained ViT-B/32 weights.  The text encoder shares the same embedding
+    space, so ``tbl.search(text_vec).metric("cosine")`` runs text-to-image
+    retrieval with no extra infrastructure.
+
+    __init__ runs on the driver — model is NOT loaded here.
+    _load()  runs lazily on first __call__ in each Ray worker and is reused
+             for every subsequent batch that worker processes.
+    """
+
+    def __init__(self) -> None:
+        self.model = None
+        self.preprocess = None
+        self.device: Optional[torch.device] = None
+
+    def _load(self) -> None:
+        if self.model is not None:
+            return
+        import open_clip
+        self.device = torch.device("cuda")
+        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+            "ViT-B-32", pretrained="openai", device=self.device
+        )
+        self.model.eval()
+
+    def __call__(self, image_bytes: pa.Array) -> pa.Array:
+        self._load()
+        imgs = []
+        for b in image_bytes:
+            img = Image.open(io.BytesIO(b.as_py())).convert("RGB")
+            imgs.append(self.preprocess(img))
+        batch = torch.stack(imgs).to(self.device)
+        with torch.no_grad():
+            emb = self.model.encode_image(batch)
+            emb = emb / emb.norm(dim=-1, keepdim=True)
+        torch.cuda.empty_cache()
+        return pa.array(emb.cpu().float().tolist(), type=pa.list_(pa.float32(), 512))
+
+
+# ---------------------------------------------------------------------------
 # Tier 3 — Dedup: dHash perceptual hash (GPU) + is_duplicate flag (CPU)
 #
 # Two-step process:
@@ -377,6 +437,12 @@ GPU_PERSON_UDFS: dict[str, object] = {
 #: GPU dHash UDF — 64-bit perceptual hash. Requires --gpu flag.
 GPU_DHASH_UDFS: dict[str, object] = {
     "dhash": _DHashGPU(),
+}
+
+#: GPU CLIP UDF — 512-d ViT-B/32 image embeddings. Requires --gpu flag.
+#: Build a cosine IVF-PQ index after backfill (see eda_bdd100k.ipynb).
+GPU_CLIP_UDFS: dict[str, object] = {
+    "clip_embedding": _CLIPEmbeddingGPU(),
 }
 
 #: Tier 1 — annotation-derived and image statistics, no detector.

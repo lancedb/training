@@ -59,6 +59,12 @@ GENEVA_UDF_COLUMNS = [
     # <30% → pedestrian is distant/small; use to curate hard cases for fine-tuning.
     pa.field("person_bbox_area_pct", pa.float32()),
 
+    # Tier 2: CLIP ViT-B/32 image embedding (GPU backfill).
+    # 512-d L2-normalised float32 vector. Build a cosine IVF-PQ index after
+    # backfill, then use for text-to-image and image-to-image search during EDA.
+    # Requires: pip install open-clip-torch
+    pa.field("clip_embedding", pa.list_(pa.float32(), 512)),
+
     # white balance
     pa.field("white_balance", pa.float32()),
 
