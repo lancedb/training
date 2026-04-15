@@ -26,6 +26,7 @@ python -m object_detection.train_detector \\
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from pathlib import Path
 
@@ -183,6 +184,16 @@ def run(args) -> None:
         out.mkdir(parents=True, exist_ok=True)
         torch.save(model.state_dict(), out / "fasterrcnn_bdd_finetuned.pt")
         print(f"\nCheckpoint saved to {out}/fasterrcnn_bdd_finetuned.pt")
+        metrics = {
+            "train_table":  args.train_table,
+            "val_table":    args.val_table,
+            "epochs":       args.epochs,
+            "baseline":     baseline_metrics,
+            "finetuned":    finetuned_metrics,
+        }
+        with open(out / "metrics.json", "w") as f:
+            json.dump(metrics, f, indent=2)
+        print(f"Metrics saved to {out}/metrics.json")
 
 
 def _parse_args(argv=None):

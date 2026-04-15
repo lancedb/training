@@ -16,6 +16,7 @@ python -m object_detection.verify_pipeline --db data/bdd100k/lancedb
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import lancedb
@@ -37,13 +38,6 @@ _EXPECTED_VIEWS = [
     "bdd100k_nighttime_person_train", "bdd100k_nighttime_person_val",
     "bdd100k_distant_person_train",   "bdd100k_distant_person_val",
 ]
-
-# Checkpoints produced by train_detector.py, keyed by failure mode
-_CHECKPOINTS: dict[str, tuple[str, str]] = {
-    "Rider":              ("checkpoints/rider/fasterrcnn_bdd_finetuned.pt",            "bdd100k_rider_val"),
-    "Nighttime person":   ("checkpoints/nighttime_person/fasterrcnn_bdd_finetuned.pt", "bdd100k_nighttime_person_val"),
-    "Distant person":     ("checkpoints/distant_person/fasterrcnn_bdd_finetuned.pt",   "bdd100k_distant_person_val"),
-}
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -101,6 +95,38 @@ def _check_dedup(db: lancedb.DBConnection) -> list[tuple]:
     return rows
 
 
+_CHECKPOINT_DIRS: dict[str, str] = {
+    "Rider":            "checkpoints/rider",
+    "Nighttime person": "checkpoints/nighttime_person",
+    "Distant person":   "checkpoints/distant_person",
+}
+
+
+def _check_models() -> list[tuple]:
+    rows = []
+    for mode, ckpt_dir in _CHECKPOINT_DIRS.items():
+        metrics_path = Path(ckpt_dir) / "metrics.json"
+        ckpt_path    = Path(ckpt_dir) / "fasterrcnn_bdd_finetuned.pt"
+        if not ckpt_path.exists():
+            rows.append((SKIP, f"train: {mode}", f"checkpoint not found — run train_detector.py"))
+            continue
+        if not metrics_path.exists():
+            rows.append(("WARN", f"train: {mode}", "checkpoint found but metrics.json missing"))
+            continue
+        with open(metrics_path) as f:
+            m = json.load(f)
+        b  = m["baseline"]
+        ft = m["finetuned"]
+        delta_map    = ft["map_50"]   - b["map_50"]
+        delta_recall = ft["recall"]   - b["recall"]
+        status = PASS if delta_map > 0 else FAIL
+        rows.append((status, f"train: {mode}",
+                     f"mAP  {b['map_50']:.4f} → {ft['map_50']:.4f}  ({delta_map:+.4f})  |  "
+                     f"recall  {b['recall']:.4f} → {ft['recall']:.4f}  ({delta_recall:+.4f})  "
+                     f"[{m['epochs']} epochs, val={m['val_table']}]"))
+    return rows
+
+
 def _check_views(db: lancedb.DBConnection) -> list[tuple]:
     rows = []
     for view in _EXPECTED_VIEWS:
@@ -109,68 +135,6 @@ def _check_views(db: lancedb.DBConnection) -> list[tuple]:
             rows.append((PASS, f"view: {view}", f"{n:,} rows"))
         except Exception:
             rows.append((FAIL, f"view: {view}", "missing — run manage_views"))
-    return rows
-
-
-def _run_eval_subprocess(db_path: str, checkpoint: str, table: str) -> dict | None:
-    """
-    Run eval.py in a fresh subprocess — avoids Lance handle conflicts with the
-    open connections already held by verify_pipeline in the parent process.
-    """
-    import json
-    import subprocess
-    import sys
-
-    result = subprocess.run(
-        [sys.executable, "-m", "object_detection.eval",
-         "--checkpoint", checkpoint,
-         "--db", db_path,
-         "--table", table,
-         "--batch-size", "8",
-         "--num-workers", "4",
-         "--output-json"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print(f"    [eval stderr] {result.stderr.strip()[-500:]}")
-        return None
-    # JSON is the last line of stdout
-    for line in reversed(result.stdout.strip().splitlines()):
-        try:
-            return json.loads(line)
-        except Exception:
-            continue
-    return None
-
-
-def _check_models(db: lancedb.DBConnection, db_path: str) -> list[tuple]:
-    rows = []
-    for mode, (ckpt_path, val_view) in _CHECKPOINTS.items():
-        try:
-            db.open_table(val_view)
-        except Exception:
-            rows.append((SKIP, f"eval: {mode}", f"val view '{val_view}' missing"))
-            continue
-
-        if not Path(ckpt_path).exists():
-            rows.append((SKIP, f"eval: {mode}", f"checkpoint not found: {ckpt_path}"))
-            continue
-
-        print(f"  evaluating {mode} baseline …")
-        base = _run_eval_subprocess(db_path, "pretrained", val_view)
-        print(f"  evaluating {mode} fine-tuned …")
-        ft   = _run_eval_subprocess(db_path, ckpt_path, val_view)
-
-        if base is None or ft is None:
-            rows.append(("WARN", f"eval: {mode}", "eval subprocess failed — run eval.py manually"))
-            continue
-
-        delta = ft["map_50"] - base["map_50"]
-        status = PASS if delta > 0 else FAIL
-        rows.append((status, f"eval: {mode}",
-                     f"mAP  baseline={base['map_50']:.4f}  fine-tuned={ft['map_50']:.4f}  "
-                     f"Δ={delta:+.4f}  |  "
-                     f"recall  {base['recall']:.4f} → {ft['recall']:.4f}"))
     return rows
 
 
@@ -210,7 +174,7 @@ def verify(db_path: str) -> None:
     rows += _check_source_table(db)
     rows += _check_dedup(db)
     rows += _check_views(db)
-    rows += _check_models(db, db_path)
+    rows += _check_models()
     _print_summary(rows)
 
 

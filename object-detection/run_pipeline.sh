@@ -40,11 +40,27 @@ python -m object_detection.backfill_geneva \
             scene_has_crossroad scene_has_mountain --concurrency 10
 
 # ---------------------------------------------------------------------------
-# 3. Backfill Tier 2 — GPU, Faster R-CNN person detector
+# 3. Backfill Tier 2 — GPU, Faster R-CNN person detector + CLIP embeddings
 # ---------------------------------------------------------------------------
 log "Step 3 · Backfill Tier 2 (GPU): person_bbox_area_pct"
 python -m object_detection.backfill_geneva --gpu \
   --columns person_bbox_area_pct
+
+log "Step 3b · Backfill Tier 2 (GPU): CLIP ViT-B/32 embeddings"
+python -m object_detection.backfill_geneva --gpu \
+  --columns clip_embedding
+
+# ---------------------------------------------------------------------------
+# 3c. Build cosine IVF-PQ index on clip_embedding (needed for vector search)
+# ---------------------------------------------------------------------------
+log "Step 3c · Build cosine vector index on clip_embedding"
+python -c "
+import lancedb
+db = lancedb.connect('data/bdd100k/lancedb')
+tbl = db.open_table('bdd100k')
+tbl.create_index('clip_embedding', index_type='IVF_PQ', metric='cosine', replace=True)
+print('clip_embedding IVF-PQ cosine index built')
+"
 
 # ---------------------------------------------------------------------------
 # 4. Backfill Tier 3 — GPU dHash

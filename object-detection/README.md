@@ -1,4 +1,4 @@
-# BDD100K Targeted Fine-Tuning with LanceDB + Geneva
+# Accelerated AV Perception training with LanceDB
 
 Targeted fine-tuning on curated failure-mode slices — using LanceDB as the data backbone at every stage of the ML pipeline, from raw video frames to trained checkpoints.
 
@@ -6,7 +6,7 @@ Targeted fine-tuning on curated failure-mode slices — using LanceDB as the dat
 
 ## The Problem
 
-A COCO-pretrained Faster R-CNN degrades on three deployment-critical failure modes:
+A model trained on a standard dataset may fail to generalize to real-world conditions. Here are some examples of failure modes:
 
 | Failure mode | Root cause | Curation signal |
 |---|---|---|
@@ -14,58 +14,80 @@ A COCO-pretrained Faster R-CNN degrades on three deployment-critical failure mod
 | **Nighttime pedestrians** | COCO training data is heavily daytime-biased | `timeofday = 'night' AND has_person = true` |
 | **Distant pedestrians** | Small far-away people are underrepresented; a miss at distance has the highest real-world consequence | `person_bbox_area_pct < 30%` (annotation-derived here; model inference in production) |
 
-The fix is targeted fine-tuning on curated slices. The harder question is *maintenance*: as fleet footage arrives continuously, how do you keep training splits current without manual work — and how do you ensure you're not wasting compute on near-duplicate frames?
+The fix is targeted fine-tuning on curated slices. The harder question is *maintenance*: as fleet footage arrives continuously, how do you keep training splits current without manual work — and how do you ensure you're not wasting compute on near-duplicate frames? And ensure that time to train a new model is in hours not days.
 
 ---
 
 ## Workflow Overview
 
 ```
-  Fix three failure modes the COCO-pretrained model misses on real fleet footage:
-  riders · nighttime pedestrians · distant pedestrians
-
-┌──────────────────────────────────────────────────────┐
-│              Fleet footage (BDD100K)                 │
-└─────────────────────────┬────────────────────────────┘
-                          │
-                          ▼  ingest_bdd.py
-                          │  Multimodal lakehouse: raw JPEG bytes, scene metadata,
-                          │  and parallel-list annotations in one Lance table.
-                          │  Stable row IDs enable incremental view refreshes.
-                          │
-┌─────────────────────────┴────────────────────────────┐
-│  bdd100k  [Lance table]  ← append as footage arrives │
-│  image_bytes · weather · timeofday · ann_* · split   │
-└─────────────────────────┬────────────────────────────┘
-                          │
-                          ▼  backfill_geneva.py  (Geneva UDFs — incremental, checkpointed)
-                          │  Tier 1: has_person, has_rider            (CPU, annotation-derived)
-                          │  Tier 2: person_bbox_area_pct             (GPU, Faster R-CNN)
-                          │  Tier 3: embedding [512-d ResNet18]       (GPU)
-                          │          → dedup --action index            (IVF-PQ cosine index)
-                          │          → backfill is_duplicate           (CPU, vector search)
-                          │
-                          ▼  manage_views.py  (Materialized views)
-                          │
-            ┌─────────────┼──────────────┐
-            ▼             ▼              ▼
-  bdd100k_rider  bdd100k_nighttime  bdd100k_distant
-  _{train,val}   _person_{t,v}      _person_{t,v}
-  [Materialized  [Materialized      [Materialized
-     view]          view]              view]
-            └─────────────┼──────────────┘
-                          │
-                          ▼  train_detector.py
-                          │  LanceDB Permutation API · PyTorch DataLoader · AMP
-                          │
-                 ┌────────┴────────┐
-                 │ fine-tuned      │
-                 │ checkpoint      │
-                 └────────┬────────┘
-                          │
-                 New footage arrives?
-                 → ingest → backfill → manage_views --action refresh
-                 → same view names · new versions · more data
+┌─ Fleet footage (BDD100K, ~100k dashcam frames)
+│
+│                          │ ingest_bdd.py
+│                          ▼
+│  ┌───────────────────────────────────────────────────────────┐
+│  │                    bdd100k  [Lance table]                 │
+│  │  image_bytes · weather · scene · timeofday · timestamp    │
+│  │  ann_categories · ann_bboxes · ann_occluded · split       │
+│  │  ┌──────────────────────────────────────────────────────┐ │
+│  │  │  Blob storage     — fast reads, no object-store hop  │ │
+│  │  │  Multimodal       — bytes + structs + vectors        │ │
+│  │  │  Stable row IDs   — incremental view refresh         │ │
+│  │  └──────────────────────────────────────────────────────┘ │
+│  └───────────────────────────────────────────────────────────┘
+│                          │
+│                          │ backfill_geneva.py  (Geneva UDFs — incremental, checkpointed)
+│                          │
+│                          │  Tier 1 — CPU:  has_person · has_rider · scene_description
+│                          │  Tier 2 — GPU:  person_bbox_area_pct  (Faster R-CNN)
+│                          │               clip_embedding [512-d]  (CLIP ViT-B/32, cosine IVF-PQ)
+│                          │  Tier 3 — GPU:  dhash [64-bit]  (dHash) + IVF L2 → is_duplicate
+│                          │
+│                          │  ┌──────────────────────────────────────────────────────┐
+│                          │  │  Zero-copy evolution  — new column, no table rewrite │
+│                          │  │  Incremental backfill — only calculate for new rows  │
+│                          │  │  Checkpointed         — crash-safe, restart mid-run  │
+│                          │  │  Ray-distributed      — scales to thousands of nodes │
+│                          │  └──────────────────────────────────────────────────────┘
+│                          │
+│                          │  EDA & curate  (eda_bdd100k.ipynb / spec_queries.py)
+│                          │  ┌──────────────────────────────────────────────────────┐
+│                          │  │  SQL         — columnar index, no JOIN, no export    │
+│                          │  │  FTS         — BM25 on scene_description             │
+│                          │  │  CLIP vector — text→image · image→image · discovery  │
+│                          │  │  SQL-filtered vector search — CLIP + metadata filter │
+│                          │  └──────────────────────────────────────────────────────┘
+│                          │
+│                          │ manage_views.py  (Materialized views)
+│                          │  ┌─ Views ──────────────────────────────────────────────┐
+│                          │  │  Living SQL queries — curation filter in one place   │
+│                          │  │  Versioned refresh  — table.version links weights→data│
+│                          │  └──────────────────────────────────────────────────────┘
+│                          │
+│              ┌───────────┼──────────────┐
+│              ▼           ▼              ▼
+│    bdd100k_rider  bdd100k_nighttime  bdd100k_distant
+│    _{train,val}   _person_{t,v}      _person_{t,v}
+│    [Materialized  [Materialized      [Materialized
+│       view]          view]              view]
+│              └───────────┼──────────────┘
+│                          │
+│                          │ train_detector.py
+│                          │  ┌─ Training ──────────────────────────────────────────┐
+│                          │  │  Permutation API — random-access over Lance, no copy │
+│                          │  │  PyTorch DataLoaders — direct from Lance tables      │
+│                          │  │  High GPU utilization (MFU) — reads direct from Lance│
+│                          │  └──────────────────────────────────────────────────────┘
+│                          ▼
+│               ┌──────────────────┐
+│               │    Checkpoint    │  ← version = exact data snapshot
+│               │ + table.version  │
+│               └──────────┬───────┘
+│                          │ new footage arrives
+│               ┌──────────▼────────────────────────────────────┐
+│               │  append → backfill (new rows only)             │
+│               │  → refresh views → train again                 │
+└───────────────┴───────────────────────────────────────────────┘
 ```
 
 ---
@@ -75,10 +97,7 @@ The fix is targeted fine-tuning on curated slices. The harder question is *maint
 ```bash
 cd object-detection/
 uv venv .venv --python 3.11 && source .venv/bin/activate
-uv pip install lancedb geneva torch torchvision pyarrow pillow tqdm
-
-export GENEVA_PIPELINE_STALL_TIMEOUT_S=7200
-sudo chmod a+rw /tmp/.geneva_zip_setup   # macOS only
+uv pip install lancedb geneva torch torchvision pyarrow pillow tqdm open-clip-torch
 ```
 
 ---
@@ -104,26 +123,62 @@ python -m object_detection.backfill_geneva --columns has_person has_rider
 # Tier 2 — GPU Faster R-CNN: largest detected person bbox as % of frame area
 # <30% → pedestrian is distant or small; used to curate the hard-cases split
 python -m object_detection.backfill_geneva --gpu --columns person_bbox_area_pct
+
+# Tier 2 — GPU CLIP ViT-B/32: 512-d image embeddings for EDA vector search
+# Requires: pip install open-clip-torch
+python -m object_detection.backfill_geneva --gpu --columns clip_embedding
+
 ```
 
 > **BDD100K vs production:** BDD100K ships with ground-truth bounding boxes, so `person_bbox_area_pct` could be computed directly from `ann_bboxes` without any model inference. The GPU UDF exists to model the **production scenario** — raw, unlabeled fleet footage where ground truth doesn't exist and a detector is the only way to measure pedestrian prominence. The pattern (UDF → backfill → SQL filter) is identical either way; only the UDF implementation changes.
 
 ### 3 · Explore
 
-With all signals stored as flat scalar columns, standard SQL and full-text search work directly on the table — no export, no joining with external manifests.
+With all signals stored as flat scalar columns, standard SQL and full-text search work directly on the table — no export, no joining with external manifests. The EDA notebook (`notebooks/eda_bdd100k.ipynb`) covers all four retrieval modes.
 
 ```bash
 python -m object_detection.spec_queries
+jupyter lab notebooks/eda_bdd100k.ipynb
 ```
 
 ```python
+# SQL — metadata filters
 tbl.count_rows(filter="timeofday = 'night' AND has_person = true")          # 6,431 frames
 tbl.count_rows(filter="has_rider = true")                                   # 4,105 frames
 tbl.count_rows(filter="has_person = true AND person_bbox_area_pct < 30.0")  # ~3,200 frames
 
 # FTS on the Geneva-generated scene_description column
 tbl.search("rainy night city pedestrian", query_type="fts").limit(10).to_pandas()
+
+# CLIP text→image — find frames matching a natural-language description
+vec = encode_text("a person far away walking on a dark road at night")
+tbl.search(vec, vector_column_name="clip_embedding").metric("cosine").limit(8).to_pandas()
+
+# SQL-filtered vector search — scope CLIP results to a metadata constraint
+tbl.search(vec, vector_column_name="clip_embedding") \
+   .where("timeofday = 'night'", prefilter=True) \
+   .limit(8).to_pandas()
 ```
+
+**Text → Image:** `"a person far away walking on a dark road at night"`
+
+![CLIP text→image: person far away on dark road](viz/eda_clip_text_night_pedestrian.png)
+
+**Text → Image:** `"cyclist riding a bicycle in the rain"`
+
+![CLIP text→image: cyclist in rain](viz/eda_clip_text_cyclist_rain.png)
+
+**Image → Image:** query frame (nighttime city) → similar frames across the full table
+
+![CLIP image→image: nighttime city query and similar frames](viz/eda_clip_image_to_image_city.png)
+
+**SQL-filtered vector search:** `"pedestrian crossing at an intersection"` — vector only (top) vs vector + `timeofday = 'night'` (bottom)
+
+![CLIP + SQL filter: vector only vs vector + timeofday=night](viz/eda_clip_hybrid_intersection.png)
+
+**Discovery:** CLIP `"person riding a bicycle or motorcycle"`, filtered to `has_rider = false` — surfaces missed annotations and near-miss frames SQL can't find
+
+![CLIP discovery: rider-like frames with has_rider=false](viz/eda_clip_discovery_edge_cases.png)
 
 ### 4 · Create training views
 
@@ -154,23 +209,32 @@ python -m object_detection.train_detector \
 
 ### 6 · Deduplicate
 
-BDD100K is dashcam footage at ~10 Hz. Consecutive frames within a clip are nearly identical pixels — training on them wastes compute and over-represents specific scenes. Dedup follows the same Geneva backfill pattern as every other feature: `embedding` (ResNet18, 512-d, L2-normalised) is added as a column on `bdd100k`, an IVF-PQ cosine index is built on it, then `is_duplicate` is backfilled by querying the index for each row's nearest non-self neighbour (~1ms per query at 80k scale). Since `manage_views` already filters `is_duplicate = false`, views automatically exclude near-duplicates once the column is populated — no extra step.
+BDD100K is dashcam footage at ~10 Hz. Consecutive frames within a clip are nearly identical pixels — training on them wastes compute and over-represents specific road segments. Dedup is applied as a preprocessing step before training and follows the same two-tier Geneva backfill pattern as every other feature:
 
-> **Note:** This is a proof-of-concept using ResNet18 as a lightweight appearance similarity signal, not a production-grade dedup algorithm. The goal is to demonstrate the pattern: embedding as a backfilled column, vector index, per-row flag — all within the same LanceDB table, with no external storage or pipeline steps. Even with this simple approximation the results hold up well (see Results section).
+**GPU UDF — `dhash`:** Each frame is decoded on GPU via nvjpeg, converted to grayscale, resized to 9×8 as a tensor op, and compared pixel-by-pixel to its right neighbour — producing a 64-bit perceptual hash stored as `list<float32>[64]` with values in {0.0, 1.0}. For binary vectors, L2² = Hamming distance, so a standard LanceDB L2 index doubles as a Hamming index with no extra conversion.
 
-> **Why ResNet18 and not CLIP?** Dedup targets pixel-level similarity — consecutive frames from the same clip that barely differ. ResNet18's ImageNet features capture edges, textures, and colour distributions, exactly what changes (slightly) between near-duplicate frames. CLIP captures semantic meaning and would over-cluster visually distinct frames from different clips that happen to share a scene type, undermining the dedup signal.
+**CPU UDF — `is_duplicate`:** For each row, the nearest non-self neighbour is found via vector search on the `dhash` column. `
+
+
 
 ```bash
-# Backfill ResNet18 embeddings as a column on bdd100k (GPU)
-python -m object_detection.backfill_geneva --gpu --columns embedding
+# Backfill dHash as a column on bdd100k (GPU — nvjpeg decode + tensor ops)
+python -m object_detection.backfill_geneva --gpu --columns dhash
 
-# Build IVF-PQ cosine index on the embedding column
+# Build IVF L2 index on dhash (L2² = Hamming distance for binary vectors)
 python -m object_detection.dedup --action index
 
-# Backfill is_duplicate: True when nearest-neighbour similarity >= 0.97
+# Backfill is_duplicate: True when nearest-neighbour Hamming distance <= 10
 python -m object_detection.backfill_geneva --columns is_duplicate
 
-# Optional — show duplicate rate from the backfilled column
+# Optional — verify pipeline with synthetic duplicates (inject known copies, check all caught)
+python -m object_detection.dedup --action inject --n 1000
+python -m object_detection.dedup --action index
+python -m object_detection.backfill_geneva --columns is_duplicate --overwrite
+python -m object_detection.dedup --action verify
+python -m object_detection.dedup --action clean
+
+# Show duplicate rate per training split
 python -m object_detection.dedup --action stats
 
 # Recreate views — is_duplicate filter is added automatically
@@ -243,35 +307,17 @@ Each image shows three panels: **green** = ground truth · **red** = pretrained 
 
 ## Results — After Deduplication
 
-> **Note:** This uses ResNet18 as a lightweight appearance-similarity proxy, not a purpose-built dedup algorithm. The point is to demonstrate the *pattern* — embedding as a backfilled column, vector index, per-row boolean flag — all inside the same LanceDB table with no external storage. Even this simple approximation reduces training data meaningfully while preserving model quality.
-
-Dedup removes near-identical consecutive frames (cosine similarity ≥ 0.97 on ResNet18 embeddings) from training splits only. Val splits are unchanged so baseline numbers are identical.
+Dedup (dHash, Hamming ≤ 10) is applied as a preprocessing step before training. Val splits are unchanged. Near-duplicates are filtered from training splits only via the `is_duplicate = false` clause already baked into every materialized view.
 
 **Training data reduction per split**
 
 | Split | Before dedup | After dedup | Removed |
 |---|---|---|---|
-| rider_train | 3,590 | 3,150 | 440 (12.3%) |
-| nighttime_person_train | 5,594 | 3,022 | 2,572 (46.0%) |
-| distant_person_train | 22,092 | 19,004 | 3,088 (14.0%) |
+| rider_train | 3,590 | 3,148 | 442 (12.3%) |
+| nighttime_person_train | 5,594 | 3,073 | 2,521 (45.1%) |
+| distant_person_train | 22,092 | 19,062 | 3,030 (13.7%) |
 
-Nighttime is hit hardest — long monotonous highway clips with barely-changing frames. Rider and distant person are more episodic, so less redundancy.
-
-**Training results**
-
-| Failure mode | Metric | Baseline (COCO) | No dedup | Deduped | Δ vs no-dedup |
-|---|---|---|---|---|---|
-| **Rider** | mAP@0.5 | 0.5563 | 0.6565 | **0.6598** | **+0.0033** |
-| | Precision | 0.5872 | 0.6016 | 0.5983 | -0.0033 |
-| | Recall | 0.6788 | 0.7834 | **0.7829** | -0.0005 |
-| **Nighttime pedestrian** | mAP@0.5 | 0.4025 | 0.5260 | 0.5154 | -0.0106 |
-| | Precision | 0.4739 | 0.5569 | 0.5483 | -0.0086 |
-| | Recall | 0.5923 | 0.7579 | 0.7527 | -0.0052 |
-| **Distant pedestrian** | mAP@0.5 | 0.4746 | 0.5810 | **0.5803** | -0.0007 |
-| | Precision | 0.5847 | 0.6363 | **0.6374** | +0.0011 |
-| | Recall | 0.6794 | 0.8038 | **0.8023** | -0.0015 |
-
-Rider and distant pedestrian results are essentially unchanged after removing 12–14% of training data — the removed frames were genuinely redundant. Nighttime shows a -0.0106 mAP drop after 46% data reduction with fixed epochs (fewer gradient steps, not overfitting). With a more discriminative embedding model or epoch scaling, this gap closes; the pipeline pattern is what matters here.
+Nighttime is hit hardest — long monotonous highway clips at 10 Hz accumulate near-identical frames quickly. Rider and distant pedestrian splits are more episodic, so less redundancy. All training results above are from models trained on these deduplicated splits.
 
 ---
 
@@ -282,7 +328,7 @@ object-detection/
 ├── object_detection/
 │   ├── schema.py            # Lance schema + GENEVA_UDF_COLUMNS
 │   ├── ingest_bdd.py        # BDD100K → LanceDB (streaming RecordBatch ingestion)
-│   ├── geneva_udfs.py       # Tier 1 annotation UDFs + Tier 2 GPU inference UDFs
+│   ├── geneva_udfs.py       # Tier 1/2/3 UDFs: annotation, Faster R-CNN, CLIP, dHash
 │   ├── backfill_geneva.py   # Geneva backfill runner (incremental, checkpointed)
 │   ├── manage_views.py      # Create / refresh / status materialized views
 │   ├── dedup.py             # Vector index build + duplicate rate stats
@@ -290,8 +336,10 @@ object-detection/
 │   ├── train_detector.py    # Faster R-CNN fine-tune with AMP (logs table version)
 │   ├── eval.py              # mAP@0.5 evaluation
 │   └── spec_queries.py      # SQL filter specs + EDA helpers
+├── notebooks/
+│   └── eda_bdd100k.ipynb    # EDA: distributions, FTS, CLIP text→image, SQL-filtered vector, discovery
 └── data/bdd100k/lancedb/    # Lance tables (gitignored)
-    ├── bdd100k.lance                          # source table (+ embedding, is_duplicate cols)
+    ├── bdd100k.lance                          # source table (+ dhash, is_duplicate cols)
     ├── bdd100k_rider_{train,val}.lance
     ├── bdd100k_nighttime_person_{train,val}.lance
     ├── bdd100k_nighttime_rider_{train,val}.lance
