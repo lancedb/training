@@ -58,7 +58,7 @@ python -c "
 import lancedb
 db = lancedb.connect('data/bdd100k/lancedb')
 tbl = db.open_table('bdd100k')
-tbl.create_index('clip_embedding', index_type='IVF_PQ', metric='cosine', replace=True)
+tbl.create_index(metric='cosine', vector_column_name='clip_embedding', index_type='IVF_PQ', replace=True)
 print('clip_embedding IVF-PQ cosine index built')
 "
 
