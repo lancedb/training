@@ -1,5 +1,5 @@
 """
-Download BDD100K images and labels from the Berkeley servers.
+Download BDD100K images and labels.
 
 Called automatically by ingest_bdd.py on first run — no manual steps needed.
 """
@@ -10,8 +10,8 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-_IMAGES_URL = "http://128.32.162.150/bdd100k/bdd100k_images_100k.zip"
-_LABELS_URL = "http://128.32.162.150/bdd100k/bdd100k_labels.zip"
+_IMAGES_URL = "https://archive.org/download/bdd100k/bdd100k_images.zip"
+_LABELS_URL = "https://archive.org/download/bdd100k/bdd100k_labels.zip"
 
 
 def _download(url: str, dest: Path) -> None:
