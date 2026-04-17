@@ -106,7 +106,7 @@ uv pip install lancedb geneva torch torchvision pyarrow pillow tqdm open-clip-to
 
 ### 1 · Ingest
 
-Raw JPEG bytes, structured metadata (weather, scene, time of day), and parallel-list annotations (one element per bounding box) land in a single Lance table with an enforced schema — no separate preprocessing step. `stable_row_ids` ensures materialized views can be refreshed incrementally after footage is appended.
+Raw JPEG bytes, structured metadata (weather, scene, time of day), and parallel-list annotations (one element per bounding box) land in a single Lance table with an enforced schema — no separate preprocessing step.
 
 ```bash
 python -m object_detection.ingest_bdd --splits train val --overwrite
@@ -114,7 +114,7 @@ python -m object_detection.ingest_bdd --splits train val --overwrite
 
 ### 2 · Backfill feature columns
 
-Instead of writing frames to disk and running a separate preprocessing job, Geneva UDFs run directly against the Lance table and write results back as queryable columns. Backfill is incremental (`WHERE col IS NULL`), stateful (class-based UDFs with lazy model loading), and checkpointed — safe to re-run as new footage arrives.
+Instead of writing frames to disk and running a separate preprocessing job, Geneva UDFs run directly against the Lance table and write results back as queryable columns. Backfill is incremental, stateful and checkpointed and its safe to re-run as new footage arrives.
 
 ```bash
 # Tier 1 — CPU, annotation-derived (minutes on full dataset)
@@ -191,7 +191,7 @@ python -m object_detection.manage_views --action curate-person  # Tier 2 distant
 
 ### 5 · Train
 
-LanceDB's Permutation API provides random-access indexing over Lance tables. Workers open their own connections lazily and read directly from the materialized view — no copy to local storage, no intermediate file format. Combined with `pin_memory`, `persistent_workers`, and AMP, this keeps A100 utilisation above 85% on 1280×720 driving footage.
+LanceDB's Permutation API provides random-access indexing over Lance tables. Workers open their own connections lazily and read directly from the materialized view, no copy to local storage, no intermediate file format, allowing you to hit close to the theoretical peak GPU utilization (MFU) of your workload.
 
 ```bash
 python -m object_detection.train_detector \
@@ -211,11 +211,9 @@ python -m object_detection.train_detector \
 
 BDD100K is dashcam footage at ~10 Hz. Consecutive frames within a clip are nearly identical pixels — training on them wastes compute and over-represents specific road segments. Dedup is applied as a preprocessing step before training and follows the same two-tier Geneva backfill pattern as every other feature:
 
-**GPU UDF — `dhash`:** Each frame is decoded on GPU via nvjpeg, converted to grayscale, resized to 9×8 as a tensor op, and compared pixel-by-pixel to its right neighbour — producing a 64-bit perceptual hash stored as `list<float32>[64]` with values in {0.0, 1.0}. For binary vectors, L2² = Hamming distance, so a standard LanceDB L2 index doubles as a Hamming index with no extra conversion.
+**GPU UDF — `dhash`:** Each frame is decoded on GPU via nvjpeg, converted to grayscale, resized to 9×8 as a tensor op, and compared pixel-by-pixel to its right neighbour — producing a 64-bit perceptual hash stored as `list<float32>[64]` with values in {0.0, 1.0}. 
 
-**CPU UDF — `is_duplicate`:** For each row, the nearest non-self neighbour is found via vector search on the `dhash` column. `
-
-
+**CPU UDF — `is_duplicate`:** For each row, the nearest non-self neighbour is found via vector search on the `dhash` column. If Hamming distance ≤ 10 the frame is flagged; `is_duplicate = false` is baked into every materialized view so duplicates are silently excluded from all training splits. On BDD100K: 13,467 / 80,500 frames flagged (16.7%).
 
 ```bash
 # Backfill dHash as a column on bdd100k (GPU — nvjpeg decode + tensor ops)
@@ -275,17 +273,14 @@ GPU runs on full BDD100K (80k frames), 10 epochs, A100, batch size 64, AMP enabl
 
 | Failure mode | Metric | Baseline (COCO) | Fine-tuned | Δ |
 |---|---|---|---|---|
-| **Nighttime pedestrian** | mAP@0.5 | 0.4025 | **0.5260** | **+0.1235** |
-| | Precision | 0.4739 | **0.5569** | **+0.0830** |
-| | Recall | 0.5923 | **0.7579** | **+0.1656** |
-| **Rider** | mAP@0.5 | 0.5563 | **0.6565** | **+0.1002** |
-| | Precision | 0.5872 | **0.6016** | **+0.0145** |
-| | Recall | 0.6788 | **0.7834** | **+0.1046** |
-| **Distant pedestrian** | mAP@0.5 | 0.4746 | **0.5810** | **+0.1064** |
-| | Precision | 0.5847 | **0.6363** | **+0.0517** |
-| | Recall | 0.6794 | **0.8038** | **+0.1244** |
+| **Nighttime pedestrian** | mAP@0.5 | 0.4025 | **0.5192** | **+0.1167** |
+| | Recall | 0.5923 | **0.7570** | **+0.1647** |
+| **Rider** | mAP@0.5 | 0.5563 | **0.6676** | **+0.1113** |
+| | Recall | 0.6788 | **0.7847** | **+0.1059** |
+| **Distant pedestrian** | mAP@0.5 | 0.4746 | **0.5788** | **+0.1042** |
+| | Recall | 0.6794 | **0.8024** | **+0.1230** |
 
-Recall improvement dominates across all three failure modes — the model catches significantly more of the objects it was previously missing. Nighttime pedestrian shows the strongest lift (consistent with it being the largest distribution shift from COCO's daytime-heavy data). All improvements use the same COCO pretrained weights as starting point; no external data was added.
+Recall improvement dominates across all three failure modes — the model catches significantly more of the objects it was previously missing. Nighttime pedestrian shows the strongest lift, consistent with it being the largest distribution shift from COCO's daytime-heavy training data. All runs start from the same COCO pretrained weights; no external data was added. Training splits have near-duplicate frames filtered out via `is_duplicate = false` baked into every materialized view.
 
 ### Visual examples
 
@@ -302,22 +297,6 @@ Each image shows three panels: **green** = ground truth · **red** = pretrained 
 **Distant pedestrian**
 
 ![Distant pedestrian detection — ground truth vs baseline vs fine-tuned](viz/distant_person_00.jpg)
-
----
-
-## Results — After Deduplication
-
-Dedup (dHash, Hamming ≤ 10) is applied as a preprocessing step before training. Val splits are unchanged. Near-duplicates are filtered from training splits only via the `is_duplicate = false` clause already baked into every materialized view.
-
-**Training data reduction per split**
-
-| Split | Before dedup | After dedup | Removed |
-|---|---|---|---|
-| rider_train | 3,590 | 3,148 | 442 (12.3%) |
-| nighttime_person_train | 5,594 | 3,073 | 2,521 (45.1%) |
-| distant_person_train | 22,092 | 19,062 | 3,030 (13.7%) |
-
-Nighttime is hit hardest — long monotonous highway clips at 10 Hz accumulate near-identical frames quickly. Rider and distant pedestrian splits are more episodic, so less redundancy. All training results above are from models trained on these deduplicated splits.
 
 ---
 
