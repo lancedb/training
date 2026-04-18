@@ -271,14 +271,14 @@ And refresh keeps materialized views up to date:
 
 GPU runs on full BDD100K (80k frames), 10 epochs, A100, batch size 64, AMP enabled. Baseline is the pretrained COCO checkpoint evaluated on each curated val split.
 
-| Failure mode | Metric | Baseline (COCO) | Fine-tuned | Δ |
+| Failure mode | Metric | Baseline (COCO) | Fine-tuned | Δ% |
 |---|---|---|---|---|
-| **Nighttime pedestrian** | mAP@0.5 | 0.4025 | **0.5192** | **+0.1167** |
-| | Recall | 0.5923 | **0.7570** | **+0.1647** |
-| **Rider** | mAP@0.5 | 0.5563 | **0.6676** | **+0.1113** |
-| | Recall | 0.6788 | **0.7847** | **+0.1059** |
-| **Distant pedestrian** | mAP@0.5 | 0.4746 | **0.5788** | **+0.1042** |
-| | Recall | 0.6794 | **0.8024** | **+0.1230** |
+| **Nighttime pedestrian** | mAP@0.5 | 0.4025 | **0.5192** | **+29.0%** |
+| | Recall | 0.5923 | **0.7570** | **+27.8%** |
+| **Rider** | mAP@0.5 | 0.5563 | **0.6676** | **+20.0%** |
+| | Recall | 0.6788 | **0.7847** | **+15.6%** |
+| **Distant pedestrian** | mAP@0.5 | 0.4746 | **0.5788** | **+22.0%** |
+| | Recall | 0.6794 | **0.8024** | **+18.1%** |
 
 Recall improvement dominates across all three failure modes — the model catches significantly more of the objects it was previously missing. Nighttime pedestrian shows the strongest lift, consistent with it being the largest distribution shift from COCO's daytime-heavy training data. All runs start from the same COCO pretrained weights; no external data was added. Training splits have near-duplicate frames filtered out via `is_duplicate = false` baked into every materialized view.
 
