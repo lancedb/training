@@ -300,6 +300,50 @@ Each image shows three panels: **green** = ground truth · **red** = pretrained 
 
 ---
 
+## End-to-end Verification
+
+After running the full pipeline, `verify_pipeline` prints a single status table covering every stage — source table health, backfill coverage, materialized view row counts, and training metrics read from each checkpoint's `metrics.json`:
+
+```bash
+python -m object_detection.verify_pipeline
+```
+
+```
+  STATUS  CHECK                                 DETAIL
+  ----------------------------------------------------
+
+  ✓ PASS  source table                          80,500 rows
+
+  ✓ PASS  column: has_person                    80,500 / 80,500 filled (100%)
+  ✓ PASS  column: has_rider                     80,500 / 80,500 filled (100%)
+  ✓ PASS  column: white_balance                 80,500 / 80,500 filled (100%)
+  ✓ PASS  column: scene_description             80,500 / 80,500 filled (100%)
+  ✓ PASS  column: scene_has_crossroad           80,500 / 80,500 filled (100%)
+  ✓ PASS  column: scene_has_mountain            80,500 / 80,500 filled (100%)
+  ✓ PASS  column: person_bbox_area_pct          80,500 / 80,500 filled (100%)
+  ✓ PASS  column: dhash                         80,500 / 80,500 filled (100%)
+  ✓ PASS  column: is_duplicate                  80,500 / 80,500 filled (100%)
+
+  ✓ PASS  dedup: duplicate rate                 13,467 flagged (16.7%) — 67,033 training-eligible
+
+  ✓ PASS  view: bdd100k_rider_train             3,166 rows
+  ✓ PASS  view: bdd100k_rider_val               639 rows
+  ✓ PASS  view: bdd100k_nighttime_person_train  4,762 rows
+  ✓ PASS  view: bdd100k_nighttime_person_val    869 rows
+  ✓ PASS  view: bdd100k_distant_person_train    19,632 rows
+  ✓ PASS  view: bdd100k_distant_person_val      3,340 rows
+
+  ✓ PASS  train: Rider                          mAP  0.5563 → 0.6676  (+0.1113)  |  recall  0.6788 → 0.7847  (+0.1059)  [10 epochs, val=bdd100k_rider_val]
+  ✓ PASS  train: Nighttime person               mAP  0.4025 → 0.5192  (+0.1167)  |  recall  0.5923 → 0.7570  (+0.1647)  [10 epochs, val=bdd100k_nighttime_person_val]
+  ✓ PASS  train: Distant person                 mAP  0.4746 → 0.5788  (+0.1042)  |  recall  0.6794 → 0.8024  (+0.1230)  [10 epochs, val=bdd100k_distant_person_val]
+
+  20 passed  0 warnings  0 failed
+```
+
+Training metrics are read from `checkpoints/*/metrics.json` saved by `train_detector.py` — no model inference is run during verification.
+
+---
+
 ## Project Structure
 
 ```
