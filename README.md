@@ -9,9 +9,9 @@ A collection of training and benchmarking examples built on [LanceDB](https://la
 | Object Detection (AV perception) | [object-detection/](./object-detection/) &nbsp; [![Blog](https://img.shields.io/badge/blog-read-blue)](https://www.lancedb.com/blog/unifying-the-av-ml-stack-lancedb) |
 | ViT (MFU benchmark across backends) | [examples/ViT/](./examples/ViT/) |
 | VLA (Vision-Language-Action) | [examples/lerobot_ray_lance/](./examples/lerobot_ray_lance/) |
-| World Model / Video Generation | [examples/leWorldModel/](./examples/leWorldModel/) 🚧 |
-| VLM | 🚧 coming soon |
-| LLM | 🚧 coming soon |
+| World Model / Video Generation |  🚧 |
+| VLM | 🚧  |
+| LLM | 🚧  |
 
 ## Repository layout
 
