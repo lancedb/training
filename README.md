@@ -4,11 +4,11 @@ A collection of training and benchmarking examples built on [LanceDB](https://la
 
 ## Available examples
 
-| Model type | Example | Blog |
-|---|---|---|
-| Object Detection (AV perception) | [object-detection/](./object-detection/) | [📝 Read](https://www.lancedb.com/blog/unifying-the-av-ml-stack-lancedb) |
-| ViT (MFU benchmark across backends) | [examples/ViT/](./examples/ViT/) | — |
-| VLA (Vision-Language-Action) | [examples/lerobot_ray_lance/](./examples/lerobot_ray_lance/) | — |
+| Model type | Example |
+|---|---|
+| Object Detection (AV perception) | [object-detection/](./object-detection/) &nbsp; [![Blog](https://img.shields.io/badge/blog-read-blue)](https://www.lancedb.com/blog/unifying-the-av-ml-stack-lancedb) |
+| ViT (MFU benchmark across backends) | [examples/ViT/](./examples/ViT/) |
+| VLA (Vision-Language-Action) | [examples/lerobot_ray_lance/](./examples/lerobot_ray_lance/) |
 
 ## Coming soon
 
