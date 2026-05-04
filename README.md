@@ -1,18 +1,17 @@
 # lancedb-training
 
-A collection of training and benchmarking examples built on [LanceDB](https://lancedb.com) multimodal data lakehouse. The goal is to demonstrate how LanceDB performs as the data layer across different model types, and training regimes along with benchmarks and best practices for training with LanceDB.
+A collection of training and benchmarking examples built on [LanceDB](https://lancedb.com) multimodal data lakehouse to demonstrate how LanceDB performs as the data layer across different model types, and training regimes along with benchmarks and best practices for training with LanceDB.
 
-## Available examples
+## Examples
 
 | Model type | Example |
 |---|---|
 | Object Detection (AV perception) | [object-detection/](./object-detection/) &nbsp; [![Blog](https://img.shields.io/badge/blog-read-blue)](https://www.lancedb.com/blog/unifying-the-av-ml-stack-lancedb) |
 | ViT (MFU benchmark across backends) | [examples/ViT/](./examples/ViT/) |
 | VLA (Vision-Language-Action) | [examples/lerobot_ray_lance/](./examples/lerobot_ray_lance/) |
-
-## Coming soon
-
-World Model / Video Generation · VLM · LLM
+| World Model / Video Generation | [examples/leWorldModel/](./examples/leWorldModel/) 🚧 |
+| VLM | 🚧 coming soon |
+| LLM | 🚧 coming soon |
 
 ## Repository layout
 
