@@ -165,6 +165,10 @@ def curate_2(db_path: str) -> None:
             f"run `backfill_geneva --tier 2` first."
         )
     _curate(db_path, _tier2_views())
+    # Build the standard indices so the curated view is immediately useful
+    # for vector retrieval + FTS without a separate manual step.
+    print("\nBuilding curation indices …")
+    build_indices(db_path)
 
 
 def refresh(db_path: str) -> None:

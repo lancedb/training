@@ -293,7 +293,26 @@ python -m videogen.eval_vbench \
 ```
 
 Both eval scripts also work on the base model (omit `--checkpoint`) so
-you can compute the before/after delta yourself.
+you can compute the before/after delta yourself.  Or use the combined
+runner:
+
+```bash
+# Side-by-side baseline vs fine-tuned, single command
+python -m videogen.eval_compare \
+    --checkpoint checkpoints/wan22_lora/step-002000 \
+    --n-prompts 8 --steps 20 --output compare.json
+```
+
+prints a delta table:
+
+```
+  metric                     baseline    fine-tuned          Δ
+  ────────────────────────────────────────────────────────────
+  mtscore_proxy                0.4012        0.5187    +0.1175
+  dynamic_degree               2.3110        4.1882    +1.8772
+  subject_consistency          0.8744        0.8612    -0.0132
+  temporal_smoothness          0.9994        0.9990    -0.0004
+```
 
 ## What's not done yet
 
