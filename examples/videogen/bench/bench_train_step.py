@@ -88,7 +88,6 @@ def time_cached_train(model, optimizer, loader, *, device, dtype,
     for _ in range(warmup):
         _step(next(it))
     torch.cuda.synchronize()
-    torch.cuda.reset_peak_memory_stats()
 
     t0 = time.perf_counter()
     samples = 0
@@ -98,8 +97,7 @@ def time_cached_train(model, optimizer, loader, *, device, dtype,
         samples += batch["vae_latent"].shape[0]
     torch.cuda.synchronize()
     dt = time.perf_counter() - t0
-    peak_gb = torch.cuda.max_memory_allocated() / 1e9
-    return _report("cached", samples, dt, peak_gb)
+    return _report("cached", samples, dt)
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +197,6 @@ def time_raw_train(model, optimizer, vae, tok, enc, loader,
     for _ in range(warmup):
         _step(next(it))
     torch.cuda.synchronize()
-    torch.cuda.reset_peak_memory_stats()
 
     t0 = time.perf_counter()
     samples = 0
@@ -209,28 +206,25 @@ def time_raw_train(model, optimizer, vae, tok, enc, loader,
         samples += len(batch["captions"])
     torch.cuda.synchronize()
     dt = time.perf_counter() - t0
-    peak_gb = torch.cuda.max_memory_allocated() / 1e9
-    return _report("raw", samples, dt, peak_gb)
+    return _report("raw", samples, dt)
 
 
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
-def _report(label: str, samples: int, dt: float, peak_gb: float) -> dict:
+def _report(label: str, samples: int, dt: float) -> dict:
     sps = samples / dt
     flops = sps * _flops_per_sample_train()
     mfu = flops / PEAK_FLOPS * 100
     print(
         f"  {label:>6s}  samples={samples:<5d}  wall={dt:.2f}s  "
         f"train-throughput={sps:.2f} samples/s  "
-        f"train≈{flops / 1e12:5.0f} TFLOPS  MFU≈{mfu:5.2f}%  "
-        f"VRAM peak={peak_gb:.1f} GB"
+        f"train≈{flops / 1e12:5.0f} TFLOPS  MFU≈{mfu:5.2f}%"
     )
     return {"label": label, "samples": samples, "wall_s": dt,
             "samples_per_s": sps,
-            "tflops": flops / 1e12, "mfu_pct": mfu,
-            "vram_peak_gb": peak_gb}
+            "tflops": flops / 1e12, "mfu_pct": mfu}
 
 
 # ---------------------------------------------------------------------------
@@ -310,8 +304,7 @@ def main(argv=None) -> int:
         print()
         print(f"  {a['label']:>6s}/{b['label']:<6s}  "
               f"throughput × {a['samples_per_s'] / b['samples_per_s']:.2f}   "
-              f"MFU lift +{a['mfu_pct'] - b['mfu_pct']:.2f} pts   "
-              f"VRAM saved {b['vram_peak_gb'] - a['vram_peak_gb']:.1f} GB")
+              f"MFU lift +{a['mfu_pct'] - b['mfu_pct']:.2f} pts")
     return 0
 
 
