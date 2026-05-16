@@ -1,0 +1,158 @@
+{
+  "model_id": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+  "checkpoint": "checkpoints/overnight/step-004000",
+  "summary": {
+    "mtscore_proxy": {
+      "baseline": 0.051538437604904175,
+      "fine_tuned": 0.0703592449426651,
+      "delta": 0.018820807337760925
+    },
+    "dynamic_degree": {
+      "baseline": 0.00871001067571342,
+      "fine_tuned": 0.002251298566989135,
+      "delta": -0.006458712108724285
+    },
+    "subject_consistency": {
+      "baseline": 0.9915799200534821,
+      "fine_tuned": 0.9946335479617119,
+      "delta": 0.003053627908229828
+    },
+    "temporal_smoothness": {
+      "baseline": 0.9998776602958799,
+      "fine_tuned": 0.9999686976783089,
+      "delta": 9.10373824289934e-05
+    }
+  },
+  "baseline": [
+    {
+      "wall_clock_s": 8.605617755034473,
+      "mtscore_proxy": 0.020724892616271973,
+      "dynamic_degree": 0.0030275173485279083,
+      "subject_consistency": 0.9972252249717712,
+      "temporal_smoothness": 0.9999950966389406,
+      "prompt": "An ice cube slowly melting into water on a warm sunny day."
+    },
+    {
+      "wall_clock_s": 7.25409345299704,
+      "mtscore_proxy": 0.0958908200263977,
+      "dynamic_degree": 0.006283828988671303,
+      "subject_consistency": 0.9856783151626587,
+      "temporal_smoothness": 0.9996206545620225,
+      "prompt": "Butter melting in a hot pan, golden bubbles forming as it browns."
+    },
+    {
+      "wall_clock_s": 7.262706456996966,
+      "mtscore_proxy": 0.10560387372970581,
+      "dynamic_degree": 0.01565185748040676,
+      "subject_consistency": 0.980083167552948,
+      "temporal_smoothness": 0.9996816250495613,
+      "prompt": "Hot wax dripping down the side of a candle, pooling at the base."
+    },
+    {
+      "wall_clock_s": 7.264407066977583,
+      "mtscore_proxy": 0.017971396446228027,
+      "dynamic_degree": 0.010140649043023586,
+      "subject_consistency": 0.9909833669662476,
+      "temporal_smoothness": 0.9999532062611252,
+      "prompt": "Sugar dissolving in steaming hot tea, swirls of brown leaving the cube."
+    },
+    {
+      "wall_clock_s": 7.263305075990502,
+      "mtscore_proxy": 0.02898991107940674,
+      "dynamic_degree": 0.008339408785104752,
+      "subject_consistency": 0.9975483417510986,
+      "temporal_smoothness": 0.9999972986868215,
+      "prompt": "Snow on a black rooftop melting away as the morning sun rises."
+    },
+    {
+      "wall_clock_s": 7.259944408957381,
+      "mtscore_proxy": 0.023792266845703125,
+      "dynamic_degree": 0.018244290724396706,
+      "subject_consistency": 0.995830237865448,
+      "temporal_smoothness": 0.9999897247089393,
+      "prompt": "A puddle of water slowly evaporating from a sun-warmed stone path."
+    },
+    {
+      "wall_clock_s": 7.266675939026754,
+      "mtscore_proxy": 0.032770514488220215,
+      "dynamic_degree": 0.004060494713485241,
+      "subject_consistency": 0.9952012896537781,
+      "temporal_smoothness": 0.9999883166819927,
+      "prompt": "Honey dripping slowly from a wooden spoon, pooling on toast below."
+    },
+    {
+      "wall_clock_s": 7.260738586017396,
+      "mtscore_proxy": 0.0865638256072998,
+      "dynamic_degree": 0.003932038322091103,
+      "subject_consistency": 0.9900894165039062,
+      "temporal_smoothness": 0.9997953597776359,
+      "prompt": "A chocolate truffle gently melting under warm studio lighting."
+    }
+  ],
+  "fine_tuned": [
+    {
+      "wall_clock_s": 7.94510374602396,
+      "mtscore_proxy": 0.06782197952270508,
+      "dynamic_degree": 0.0017355523305013776,
+      "subject_consistency": 0.9912747144699097,
+      "temporal_smoothness": 0.9999588790051348,
+      "prompt": "An ice cube slowly melting into water on a warm sunny day."
+    },
+    {
+      "wall_clock_s": 7.928295854013413,
+      "mtscore_proxy": 0.10967761278152466,
+      "dynamic_degree": 0.0034824376925826073,
+      "subject_consistency": 0.9885155558586121,
+      "temporal_smoothness": 0.9999148288043216,
+      "prompt": "Butter melting in a hot pan, golden bubbles forming as it browns."
+    },
+    {
+      "wall_clock_s": 7.924961181997787,
+      "mtscore_proxy": 0.0287359356880188,
+      "dynamic_degree": 0.003141730558127165,
+      "subject_consistency": 0.9954013824462891,
+      "temporal_smoothness": 0.9999674521241104,
+      "prompt": "Hot wax dripping down the side of a candle, pooling at the base."
+    },
+    {
+      "wall_clock_s": 7.9286132989800535,
+      "mtscore_proxy": 0.1125180721282959,
+      "dynamic_degree": 0.001277910778298974,
+      "subject_consistency": 0.9942883253097534,
+      "temporal_smoothness": 0.9999455851502717,
+      "prompt": "Sugar dissolving in steaming hot tea, swirls of brown leaving the cube."
+    },
+    {
+      "wall_clock_s": 7.935722077963874,
+      "mtscore_proxy": 0.007618904113769531,
+      "dynamic_degree": 0.0009399025584571064,
+      "subject_consistency": 0.9994211196899414,
+      "temporal_smoothness": 0.9999997049254432,
+      "prompt": "Snow on a black rooftop melting away as the morning sun rises."
+    },
+    {
+      "wall_clock_s": 7.926278461003676,
+      "mtscore_proxy": 0.024172544479370117,
+      "dynamic_degree": 0.0019133511232212186,
+      "subject_consistency": 0.9972571134567261,
+      "temporal_smoothness": 0.9999964859930515,
+      "prompt": "A puddle of water slowly evaporating from a sun-warmed stone path."
+    },
+    {
+      "wall_clock_s": 7.947132375964429,
+      "mtscore_proxy": 0.15358376502990723,
+      "dynamic_degree": 0.003643202129751444,
+      "subject_consistency": 0.994941234588623,
+      "temporal_smoothness": 0.9999774548741698,
+      "prompt": "Honey dripping slowly from a wooden spoon, pooling on toast below."
+    },
+    {
+      "wall_clock_s": 7.93161962996237,
+      "mtscore_proxy": 0.05874514579772949,
+      "dynamic_degree": 0.0018763013649731874,
+      "subject_consistency": 0.9959689378738403,
+      "temporal_smoothness": 0.999989190549968,
+      "prompt": "A chocolate truffle gently melting under warm studio lighting."
+    }
+  ]
+}

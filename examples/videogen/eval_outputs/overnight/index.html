@@ -1,0 +1,138 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>videogen eval — baseline vs fine-tuned</title>
+<style>
+ body { font-family: -apple-system, system-ui, sans-serif; max-width: 900px; margin: 2em auto; }
+ section { border-top: 1px solid #ddd; padding: 1em 0; }
+ video { width: 100%; max-width: 800px; }
+ h1 { font-size: 1.4em; } h3 { font-size: 1.05em; margin: 0.5em 0; }
+</style></head>
+<body>
+<h1>videogen eval — baseline (left) vs fine-tuned (right)</h1>
+
+<section>
+  <h3>An ice cube slowly melting into water on a warm sunny day.</h3>
+  <video controls width="800" preload="metadata">
+    <source src="an_ice_cube_slowly_melting_into_water_on/compare.mp4" type="video/mp4">
+  </video>
+  <p>Δ mtscore <b>+0.0471</b>
+   · Δ motion <b>-0.0013</b>
+   · Δ consistency <b>-0.0060</b>
+   · Δ smoothness <b>-0.000036</b></p>
+  <p>
+    <a href="an_ice_cube_slowly_melting_into_water_on/baseline.mp4">baseline.mp4</a> ·
+    <a href="an_ice_cube_slowly_melting_into_water_on/fine_tuned.mp4">fine_tuned.mp4</a> ·
+    <a href="an_ice_cube_slowly_melting_into_water_on/compare.mp4">compare.mp4</a>
+  </p>
+</section>
+
+<section>
+  <h3>Butter melting in a hot pan, golden bubbles forming as it browns.</h3>
+  <video controls width="800" preload="metadata">
+    <source src="butter_melting_in_a_hot_pan_golden_bubbl/compare.mp4" type="video/mp4">
+  </video>
+  <p>Δ mtscore <b>+0.0138</b>
+   · Δ motion <b>-0.0028</b>
+   · Δ consistency <b>+0.0028</b>
+   · Δ smoothness <b>+0.000294</b></p>
+  <p>
+    <a href="butter_melting_in_a_hot_pan_golden_bubbl/baseline.mp4">baseline.mp4</a> ·
+    <a href="butter_melting_in_a_hot_pan_golden_bubbl/fine_tuned.mp4">fine_tuned.mp4</a> ·
+    <a href="butter_melting_in_a_hot_pan_golden_bubbl/compare.mp4">compare.mp4</a>
+  </p>
+</section>
+
+<section>
+  <h3>Hot wax dripping down the side of a candle, pooling at the base.</h3>
+  <video controls width="800" preload="metadata">
+    <source src="hot_wax_dripping_down_the_side_of_a_cand/compare.mp4" type="video/mp4">
+  </video>
+  <p>Δ mtscore <b>-0.0769</b>
+   · Δ motion <b>-0.0125</b>
+   · Δ consistency <b>+0.0153</b>
+   · Δ smoothness <b>+0.000286</b></p>
+  <p>
+    <a href="hot_wax_dripping_down_the_side_of_a_cand/baseline.mp4">baseline.mp4</a> ·
+    <a href="hot_wax_dripping_down_the_side_of_a_cand/fine_tuned.mp4">fine_tuned.mp4</a> ·
+    <a href="hot_wax_dripping_down_the_side_of_a_cand/compare.mp4">compare.mp4</a>
+  </p>
+</section>
+
+<section>
+  <h3>Sugar dissolving in steaming hot tea, swirls of brown leaving the cube.</h3>
+  <video controls width="800" preload="metadata">
+    <source src="sugar_dissolving_in_steaming_hot_tea_swi/compare.mp4" type="video/mp4">
+  </video>
+  <p>Δ mtscore <b>+0.0945</b>
+   · Δ motion <b>-0.0089</b>
+   · Δ consistency <b>+0.0033</b>
+   · Δ smoothness <b>-0.000008</b></p>
+  <p>
+    <a href="sugar_dissolving_in_steaming_hot_tea_swi/baseline.mp4">baseline.mp4</a> ·
+    <a href="sugar_dissolving_in_steaming_hot_tea_swi/fine_tuned.mp4">fine_tuned.mp4</a> ·
+    <a href="sugar_dissolving_in_steaming_hot_tea_swi/compare.mp4">compare.mp4</a>
+  </p>
+</section>
+
+<section>
+  <h3>Snow on a black rooftop melting away as the morning sun rises.</h3>
+  <video controls width="800" preload="metadata">
+    <source src="snow_on_a_black_rooftop_melting_away_as_/compare.mp4" type="video/mp4">
+  </video>
+  <p>Δ mtscore <b>-0.0214</b>
+   · Δ motion <b>-0.0074</b>
+   · Δ consistency <b>+0.0019</b>
+   · Δ smoothness <b>+0.000002</b></p>
+  <p>
+    <a href="snow_on_a_black_rooftop_melting_away_as_/baseline.mp4">baseline.mp4</a> ·
+    <a href="snow_on_a_black_rooftop_melting_away_as_/fine_tuned.mp4">fine_tuned.mp4</a> ·
+    <a href="snow_on_a_black_rooftop_melting_away_as_/compare.mp4">compare.mp4</a>
+  </p>
+</section>
+
+<section>
+  <h3>A puddle of water slowly evaporating from a sun-warmed stone path.</h3>
+  <video controls width="800" preload="metadata">
+    <source src="a_puddle_of_water_slowly_evaporating_fro/compare.mp4" type="video/mp4">
+  </video>
+  <p>Δ mtscore <b>+0.0004</b>
+   · Δ motion <b>-0.0163</b>
+   · Δ consistency <b>+0.0014</b>
+   · Δ smoothness <b>+0.000007</b></p>
+  <p>
+    <a href="a_puddle_of_water_slowly_evaporating_fro/baseline.mp4">baseline.mp4</a> ·
+    <a href="a_puddle_of_water_slowly_evaporating_fro/fine_tuned.mp4">fine_tuned.mp4</a> ·
+    <a href="a_puddle_of_water_slowly_evaporating_fro/compare.mp4">compare.mp4</a>
+  </p>
+</section>
+
+<section>
+  <h3>Honey dripping slowly from a wooden spoon, pooling on toast below.</h3>
+  <video controls width="800" preload="metadata">
+    <source src="honey_dripping_slowly_from_a_wooden_spoo/compare.mp4" type="video/mp4">
+  </video>
+  <p>Δ mtscore <b>+0.1208</b>
+   · Δ motion <b>-0.0004</b>
+   · Δ consistency <b>-0.0003</b>
+   · Δ smoothness <b>-0.000011</b></p>
+  <p>
+    <a href="honey_dripping_slowly_from_a_wooden_spoo/baseline.mp4">baseline.mp4</a> ·
+    <a href="honey_dripping_slowly_from_a_wooden_spoo/fine_tuned.mp4">fine_tuned.mp4</a> ·
+    <a href="honey_dripping_slowly_from_a_wooden_spoo/compare.mp4">compare.mp4</a>
+  </p>
+</section>
+
+<section>
+  <h3>A chocolate truffle gently melting under warm studio lighting.</h3>
+  <video controls width="800" preload="metadata">
+    <source src="a_chocolate_truffle_gently_melting_under/compare.mp4" type="video/mp4">
+  </video>
+  <p>Δ mtscore <b>-0.0278</b>
+   · Δ motion <b>-0.0021</b>
+   · Δ consistency <b>+0.0059</b>
+   · Δ smoothness <b>+0.000194</b></p>
+  <p>
+    <a href="a_chocolate_truffle_gently_melting_under/baseline.mp4">baseline.mp4</a> ·
+    <a href="a_chocolate_truffle_gently_melting_under/fine_tuned.mp4">fine_tuned.mp4</a> ·
+    <a href="a_chocolate_truffle_gently_melting_under/compare.mp4">compare.mp4</a>
+  </p>
+</section></body></html>
