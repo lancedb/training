@@ -143,40 +143,60 @@ def _decode_evenly_spaced_frames(video_bytes: bytes, n: int) -> list:
     Returns a list of PIL Images (one per sampled frame).  ``n`` includes
     both endpoints — for example ``n=8`` returns frames 0, 1/7, 2/7, …, 1.
 
-    If decoding fails we return an empty list; callers must handle that.
+    Robust to malformed clips — any exception during open / iteration /
+    frame-to-image returns ``[]``.  The ChronoMagic train zip ships ~10
+    clips that pyav rejects with ``[Errno 95] Operation not supported``
+    mid-stream; we treat them as "no frames" and let the caller decide
+    (UDFs above pad with a zero-vector or skip).
     """
     import io
     import av
-    from PIL import Image
 
+    container = None
     try:
         container = av.open(io.BytesIO(video_bytes))
     except Exception:
         return []
-    stream = container.streams.video[0]
-    total = stream.frames or 0
-    # Some containers (e.g. fragmented MP4) report 0 frames; fall back to
-    # an unbounded decode and pick frames opportunistically.
-    if total <= 0:
-        frames = [f.to_image() for f in container.decode(video=0)]
-        container.close()
-        if not frames:
-            return []
-        if len(frames) <= n:
-            return frames
-        idx = [round(i * (len(frames) - 1) / (n - 1)) for i in range(n)]
-        return [frames[i] for i in idx]
+    try:
+        stream = container.streams.video[0]
+        total = stream.frames or 0
+        # Some containers (e.g. fragmented MP4) report 0 frames; fall
+        # back to an unbounded decode and pick frames opportunistically.
+        if total <= 0:
+            frames = []
+            for f in container.decode(video=0):
+                try:
+                    frames.append(f.to_image())
+                except Exception:
+                    return []
+            if not frames:
+                return []
+            if len(frames) <= n:
+                return frames
+            idx = [round(i * (len(frames) - 1) / (n - 1)) for i in range(n)]
+            return [frames[i] for i in idx]
 
-    targets = sorted({round(i * (total - 1) / max(n - 1, 1)) for i in range(n)})
-    out = []
-    target_set = set(targets)
-    for j, frame in enumerate(container.decode(video=0)):
-        if j in target_set:
-            out.append(frame.to_image())
-            if len(out) >= n:
-                break
-    container.close()
-    return out
+        targets = sorted({round(i * (total - 1) / max(n - 1, 1))
+                          for i in range(n)})
+        target_set = set(targets)
+        out = []
+        for j, frame in enumerate(container.decode(video=0)):
+            if j in target_set:
+                try:
+                    out.append(frame.to_image())
+                except Exception:
+                    return []
+                if len(out) >= n:
+                    break
+        return out
+    except Exception:
+        return []
+    finally:
+        try:
+            if container is not None:
+                container.close()
+        except Exception:
+            pass
 
 
 class _ClipBase:
