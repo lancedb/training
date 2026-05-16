@@ -188,6 +188,63 @@ def refresh(db_path: str) -> None:
     print("\nRefresh complete.")
 
 
+def build_indices(db_path: str) -> None:
+    """Build the standard indices used by curation queries.
+
+    Idempotent: each index is wrapped in try/except so re-running is fine.
+
+      * FTS index on ``caption`` — powers ``spec_queries.fts`` and the
+        EDA notebook's text search.
+      * Cosine IVF on ``clip_emb_text`` — text→video retrieval.
+      * Cosine IVF on ``clip_emb_video`` — image→video retrieval.
+      * L2 IVF on ``dhash_first_last`` — Tier-4 dedup NN lookup.
+
+    Each vector index is sized for the current row count
+    (``num_partitions ≈ rows / 256``, floor 2).
+    """
+    _, lconn = _connect(db_path)
+    if PARENT_TABLE not in set(lconn.list_tables().tables):
+        raise SystemExit(f"Parent table '{PARENT_TABLE}' missing.")
+    tbl = lconn.open_table(PARENT_TABLE)
+    schema_cols = set(tbl.schema.names)
+    n_rows = tbl.count_rows()
+    parts = max(2, n_rows // 256)
+
+    def _index_msg(label: str, e: Exception | None) -> str:
+        if e is None:
+            return f"  {label}: built"
+        msg = str(e)
+        if "already exists" in msg:
+            return f"  {label}: already present"
+        if "0 vectors" in msg or "cannot train" in msg:
+            return f"  {label}: skipping — column not yet backfilled"
+        return f"  {label}: {msg.splitlines()[0]}"
+
+    if "caption" in schema_cols:
+        try:
+            tbl.create_fts_index("caption", replace=False)
+            print(_index_msg("FTS caption", None))
+        except Exception as e:
+            print(_index_msg("FTS caption", e))
+
+    for col, metric in [("clip_emb_text", "cosine"),
+                        ("clip_emb_video", "cosine"),
+                        ("dhash_first_last", "l2")]:
+        if col not in schema_cols:
+            print(f"  vector {col}: skipping — column missing")
+            continue
+        try:
+            tbl.create_index(metric=metric,
+                             vector_column_name=col,
+                             index_type="IVF_FLAT",
+                             num_partitions=parts)
+            print(_index_msg(f"vector {col} ({metric})  parts={parts}", None))
+        except Exception as e:
+            print(_index_msg(f"vector {col} ({metric})", e))
+
+    print("\nIndices complete.")
+
+
 def drop(db_path: str) -> None:
     gconn, lconn = _connect(db_path)
     views = _all_views(lconn)
@@ -213,7 +270,8 @@ def _parse_args(argv=None):
     )
     p.add_argument("--db", default=DEFAULT_DB)
     p.add_argument("--action",
-                   choices=["status", "curate", "curate-2", "refresh", "drop"],
+                   choices=["status", "curate", "curate-2", "refresh", "drop",
+                            "build-indices"],
                    default="status")
     return p.parse_args(argv)
 
@@ -221,11 +279,12 @@ def _parse_args(argv=None):
 def main(argv=None) -> int:
     args = _parse_args(argv)
     {
-        "status":   status,
-        "curate":   curate,
-        "curate-2": curate_2,
-        "refresh":  refresh,
-        "drop":     drop,
+        "status":         status,
+        "curate":         curate,
+        "curate-2":       curate_2,
+        "refresh":        refresh,
+        "drop":           drop,
+        "build-indices":  build_indices,
     }[args.action](args.db)
     return 0
 
