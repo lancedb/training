@@ -13,7 +13,7 @@ worse storage/IO for very large videos but no API change.
 After running:
 
 ```
-python -m videogen.ingest_chronomagic --synthetic 500 --overwrite
+python -m videogen.ingest_chronomagic --manifest data/chronomagic_proh.parquet --video-dir data/clips --overwrite
 python -m videogen.backfill_geneva --tier 1
 python -m videogen.manage_views --action curate
 ```
@@ -58,7 +58,7 @@ fresh process with the blob flag on:
 - 11 cols matching the videogen schema × 4 rows
 - 3 cols × {4, 16, 64, 256, 500} rows, captions up to 200 chars
 
-The full videogen pipeline (`ingest_chronomagic --synthetic 500` →
+The full videogen pipeline (`ingest_chronomagic --manifest …` →
 `backfill_geneva --tier 1` → `manage_views --action curate`) reliably
 triggers the panic, but stripping just the schema and creating an MV in
 one process does not. Suspect interaction with one of:

@@ -59,7 +59,7 @@ BLOB_META: dict[bytes, bytes] = {}
 BASE_FIELDS = [
     # Identity ---------------------------------------------------------------
     pa.field("clip_id",    pa.string()),       # source-stable id (e.g. youtube id + start)
-    pa.field("source",     pa.string()),       # "chronomagic-pro" | "chronomagic-proh" | "synthetic"
+    pa.field("source",     pa.string()),       # "chronomagic-pro" | "chronomagic-proh"
     pa.field("split",      pa.string()),       # "train" | "val"
 
     # Media -----------------------------------------------------------------

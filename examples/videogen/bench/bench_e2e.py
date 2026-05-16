@@ -1,14 +1,12 @@
 """
 B10 — End-to-end wall-clock for the full videogen pipeline.
 
-Times every stage and prints a single summary table.  Designed to run
-on synthetic data so the numbers are reproducible without a 2 TB
-download; you can point it at a real Lance database too with ``--n 0``
-(skips ingest, expects the table to already exist).
+Times every stage and prints a single summary table.  Operates on an
+existing Lance DB that's already had ChronoMagic-Pro / -ProH ingested
+(via ``videogen.ingest_chronomagic --manifest … --video-dir …``).
 
 Stages timed:
 
-  ingest          synthetic mp4 generation + write to Lance
   tier1           caption keyword UDFs (CPU)
   tier2           CLIP text/video, motion, MTScore (GPU)
   tier3 t5        UMT5-XXL last hidden state
@@ -20,22 +18,19 @@ Stages timed:
   train           N LoRA training steps with the cached dataloader
 
 Each stage is its own subprocess so a crash in one (say, GPU OOM on
-Tier-3 with too-large a clip) doesn't kill the rest of the run.
+Tier-3) doesn't kill the rest of the run.
 
 Usage
 -----
-python -m bench.bench_e2e --db /tmp/videogen_e2e_bench \\
-    --n 32 --train-steps 10
+python -m bench.bench_e2e --db data/videos/lancedb --train-steps 10
 """
 
 from __future__ import annotations
 
 import argparse
-import shutil
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 
 def _run(label: str, cmd: list[str], *, env_extra: dict | None = None,
@@ -64,28 +59,12 @@ def _py(*args: str) -> list[str]:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--db",          default="/tmp/videogen_e2e_bench")
-    p.add_argument("--n",           type=int, default=16,
-                   help="Synthetic rows to ingest.  0 = skip ingest "
-                        "(expects --db to already exist).")
+    p.add_argument("--db",          default="data/videos/lancedb")
     p.add_argument("--train-steps", type=int, default=10)
     p.add_argument("--train-view",  default="videos_raw")
     args = p.parse_args(argv)
 
-    if args.n > 0 and Path(args.db).exists():
-        shutil.rmtree(args.db)
-
     timings: dict[str, float] = {}
-
-    # ---- 1) ingest ---------------------------------------------------------
-    if args.n > 0:
-        timings["ingest"] = _run(
-            "ingest",
-            _py("videogen.ingest_chronomagic",
-                "--synthetic", str(args.n),
-                "--overwrite",
-                "--db", args.db),
-        )
 
     # ---- 2) Tier 1 ---------------------------------------------------------
     timings["tier1"] = _run(

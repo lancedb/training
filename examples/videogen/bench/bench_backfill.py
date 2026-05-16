@@ -2,41 +2,36 @@
 B3 / B4 — Geneva backfill throughput.
 
   B3  raw cost     : time the first backfill of a given column over N rows.
-  B4  incremental  : append M more rows, time the second backfill.  Only
-                     the new M rows should re-run; the original N is
-                     skipped via Geneva's default ``<col> IS NULL`` filter.
-
-The script ingests a fresh synthetic Lance table inside ``--db`` to keep
-the numbers reproducible, then runs the requested columns through
-backfill once, appends 25% more rows, and runs them again.
+  B4  incremental  : append M more rows via a second manifest slice; time the
+                     second backfill.  Only the new M rows should re-run; the
+                     original N is skipped via Geneva's default
+                     ``<col> IS NULL`` filter.
 
 Usage
 -----
-python -m bench.bench_backfill --db /tmp/videogen_bench/backfill \\
-    --n 200 --extra 50 --columns keyword_melting motion_strength
+# B3 only — assumes the table already has the rows ingested.
+python -m bench.bench_backfill --db data/videos/lancedb \\
+    --columns keyword_melting any_phase_keyword
+
+# B3 + B4 — appends 25 more manifest rows for the second pass.
+python -m bench.bench_backfill --db data/videos/lancedb \\
+    --columns keyword_melting any_phase_keyword \\
+    --append-from data/chronomagic_proh.parquet --append-n 25
 """
 
 from __future__ import annotations
 
 import argparse
-import shutil
 import sys
 import time
 from pathlib import Path
 
 from videogen.backfill_geneva import backfill
-from videogen.ingest_chronomagic import ingest, synthetic_rows
+from videogen.ingest_chronomagic import ingest, manifest_rows
 
 
-def _ingest(db: str, table: str, n: int, *, overwrite: bool, seed: int) -> float:
-    t0 = time.perf_counter()
-    ingest(db_path=db, table_name=table,
-           rows=synthetic_rows(n, seed=seed),
-           overwrite=overwrite, batch_size=64)
-    return time.perf_counter() - t0
-
-
-def _backfill(db: str, table: str, columns: list[str], *, dedup_threshold: int = 12) -> float:
+def _backfill(db: str, table: str, columns: list[str],
+              *, dedup_threshold: int = 12) -> float:
     t0 = time.perf_counter()
     backfill(db_path=db, table_name=table, columns=columns,
              concurrency=1, overwrite=False, force_stub=False,
@@ -46,44 +41,57 @@ def _backfill(db: str, table: str, columns: list[str], *, dedup_threshold: int =
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--db", default="/tmp/videogen_bench/backfill")
-    p.add_argument("--table", default="videos_raw")
-    p.add_argument("--n",       type=int, default=100,
-                   help="Initial row count.")
-    p.add_argument("--extra",   type=int, default=25,
-                   help="Rows appended for the incremental backfill.")
-    p.add_argument("--columns", nargs="+", required=True,
+    p.add_argument("--db",        default="data/videos/lancedb")
+    p.add_argument("--table",     default="videos_raw")
+    p.add_argument("--columns",   nargs="+", required=True,
                    help="One or more Geneva column names to time.")
-    p.add_argument("--seed",    type=int, default=0)
+    p.add_argument("--append-from", type=Path, default=None,
+                   help="Optional parquet manifest to append from (for B4).")
+    p.add_argument("--append-n",  type=int, default=25,
+                   help="How many manifest rows to append for B4.")
+    p.add_argument("--video-dir", type=Path, default=None,
+                   help="If set, pull clip bytes from this dir during append.")
     args = p.parse_args(argv)
 
-    db_path = Path(args.db)
-    if db_path.exists():
-        shutil.rmtree(db_path)
-
-    print(f"\n[B3]  initial ingest: {args.n:,} rows")
-    t_ing = _ingest(args.db, args.table, args.n, overwrite=True, seed=args.seed)
-    print(f"       ingest done in {t_ing:.2f}s  ({args.n / t_ing:.1f} rows/sec)\n")
-
-    print(f"[B3]  backfill {args.columns}  on {args.n:,} rows")
+    import lancedb
+    tbl = lancedb.connect(args.db).open_table(args.table)
+    n_before = tbl.count_rows()
+    print(f"\n[B3]  backfill {args.columns}  on {n_before:,} rows")
     t_b3 = _backfill(args.db, args.table, args.columns)
-    rps_b3 = args.n / t_b3
-    print(f"       backfill done in {t_b3:.2f}s  ({rps_b3:.2f} rows/sec)\n")
+    rps_b3 = n_before / max(t_b3, 1e-6)
+    print(f"       backfill done in {t_b3:.2f}s  ({rps_b3:.2f} rows/s)\n")
 
-    print(f"[B4]  append +{args.extra:,} rows")
-    t_app = _ingest(args.db, args.table, args.extra, overwrite=False, seed=args.seed + 1)
+    if args.append_from is None:
+        print("(no --append-from given — skipping B4)")
+        return 0
+
+    print(f"[B4]  append +{args.append_n:,} rows from {args.append_from}")
+    # Skip ids already in the table to avoid duplicates.
+    have_ids = set(
+        tbl.search().select(["clip_id"]).to_arrow().column("clip_id").to_pylist()
+    )
+    fresh = []
+    for r in manifest_rows(args.append_from, args.video_dir, limit=None):
+        if r["clip_id"] in have_ids:
+            continue
+        fresh.append(r)
+        if len(fresh) >= args.append_n:
+            break
+
+    t0 = time.perf_counter()
+    ingest(db_path=args.db, table_name=args.table,
+           rows=iter(fresh), overwrite=False, batch_size=64)
+    t_app = time.perf_counter() - t0
     print(f"       append done in {t_app:.2f}s\n")
 
-    print(f"[B4]  incremental backfill {args.columns}  (expects only +{args.extra:,} rows re-run)")
+    print(f"[B4]  incremental backfill {args.columns} "
+          f"(expects only +{len(fresh):,} rows re-run)")
     t_b4 = _backfill(args.db, args.table, args.columns)
-    rps_b4 = args.extra / t_b4
-    print(f"       backfill done in {t_b4:.2f}s  ({rps_b4:.2f} new-rows/sec)\n")
+    rps_b4 = len(fresh) / max(t_b4, 1e-6)
+    print(f"       backfill done in {t_b4:.2f}s  ({rps_b4:.2f} new-rows/s)\n")
 
     # Geneva has a fixed Ray actor-spinup cost per backfill (~5-10s on this box).
-    # For cheap per-row UDFs that dominates the wall-clock and B3/B4 ratios
-    # look ugly.  Subtract out a rough fixed cost to show the actual per-row
-    # advantage; for heavy UDFs (Tier 2/3) the fixed cost is in the noise.
-    fixed_floor = 5.0  # rough Ray startup floor in seconds
+    fixed_floor = 5.0
     var_b3 = max(t_b3 - fixed_floor, 1e-6)
     var_b4 = max(t_b4 - fixed_floor, 1e-6)
     print("─" * 64)

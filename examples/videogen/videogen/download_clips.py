@@ -37,12 +37,12 @@ import pyarrow.parquet as pq
 from tqdm import tqdm
 
 
-def _yt_dlp_command(url: str, dest: Path, quality: int, max_duration: int) -> list[str]:
+def _yt_dlp_command(yt_dlp: str, url: str, dest: Path,
+                    quality: int, max_duration: int) -> list[str]:
     """yt-dlp invocation tuned for short curated clips."""
-    # `-f` constrains to a height ceiling so we don't pull 4K mp4s.
     fmt = f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/mp4"
     return [
-        "yt-dlp",
+        yt_dlp,
         "--quiet", "--no-warnings",
         "--match-filter", f"duration <= {max_duration}",
         "-f", fmt,
@@ -74,8 +74,15 @@ def main(argv=None) -> int:
                         "case-insensitive.")
     args = p.parse_args(argv)
 
-    if shutil.which("yt-dlp") is None:
-        raise SystemExit("yt-dlp not found on PATH — `uv pip install yt-dlp` first")
+    # Resolve yt-dlp executable — try PATH first, fall back to sibling of
+    # the running interpreter (handles uv-managed venvs that don't activate).
+    yt_dlp = shutil.which("yt-dlp")
+    if yt_dlp is None:
+        candidate = Path(sys.executable).parent / "yt-dlp"
+        if candidate.exists():
+            yt_dlp = str(candidate)
+    if yt_dlp is None:
+        raise SystemExit("yt-dlp not found — `uv pip install yt-dlp` first")
 
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -114,7 +121,7 @@ def main(argv=None) -> int:
         url = f"https://www.youtube.com/watch?v={vid}"
         try:
             subprocess.run(
-                _yt_dlp_command(url, target, args.quality, args.max_duration),
+                _yt_dlp_command(yt_dlp, url, target, args.quality, args.max_duration),
                 check=True, capture_output=True, timeout=120,
             )
             if target.exists() and target.stat().st_size > 1024:

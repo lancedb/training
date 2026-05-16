@@ -159,7 +159,7 @@ Created with `storage_options={"new_table_enable_stable_row_ids": "true"}` and `
 
 **Per-row cost after Tier 3:** ~5 MB raw video + ~6 MB cached latents/embeddings = ~11 MB. 25K rows ≈ 275 GB. Comfortably fits a single 1-TB NVMe; trivial in object storage.
 
-(Smoke-test measurement on 20 synthetic clips: 11.2 MB/row including
+(Smoke-test measurement on 20 small real clips: ~11 MB/row including
 Geneva checkpoint overhead.  Both `t5_hidden_states` and `vae_latent`
 round-trip cleanly to `(B, 512, 4096)` fp16 and `(B, 48, 13, 30, 44)`
 fp16 via the Permutation API.)
@@ -368,8 +368,8 @@ The training script logs `view.version` with every checkpoint — exact data sna
 Each row a separate measurement. Baseline ≈ "what the PDF does" (per-row mp4 decode + VAE + T5 in the dataloader). Lance-cached ≈ "this proposal".
 
 Numbers in *italics* are measured on this branch on 1×H100 against
-synthetic data (smoke-test sized).  Full-corpus numbers replace these
-once we run on a 25K-clip ChronoMagic-Pro subset.
+a small real-clip subset (smoke-test sized).  Full-corpus numbers
+replace these once we run on a 25K-clip ChronoMagic-Pro subset.
 
 | # | Stage | Metric | Baseline | Lance + Geneva | Smoke-test result |
 |---|---|---|---|---|---|
@@ -384,7 +384,7 @@ once we run on a 25K-clip ChronoMagic-Pro subset.
 | **B9** | Recipe-change cost | wall-clock for new VAE | re-derive whole cache by hand | Geneva backfill on the one changed column | *see `bench/bench_recipe_change.py` — re-derives one column via `--overwrite`, leaving the rest untouched* |
 | **B10** | End-to-end wall-clock | curate → cache → train → eval | PDF baseline | this pipeline | ***240 s on 8 clips, 1×H100*** (see breakdown below) |
 
-**B10 stage breakdown (8 synthetic clips, 1×H100, 4 train steps):**
+**B10 stage breakdown (8-clip smoke run, 1×H100, 4 train steps):**
 
 | Stage | Wall-clock | % |
 |---|---:|---:|

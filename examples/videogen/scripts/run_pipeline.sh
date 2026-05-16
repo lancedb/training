@@ -2,7 +2,7 @@
 # Run the full videogen pipeline from ingest to training in one shot.
 #
 # Stops at the stage selected by the first positional argument:
-#   ingest        synthetic-only ingest
+#   ingest        manifest + clip ingest
 #   tier1         + Tier-1 keyword backfill
 #   tier2         + Tier-2 light-GPU backfill (CLIP / motion / MTScore)
 #   tier3         + Tier-3 heavy-GPU backfill (UMT5 + Wan-VAE)  ← cache-ready
@@ -11,26 +11,38 @@
 #   train         + a short Wan2.2 LoRA training run on the cached path  (default)
 #
 # Examples:
-#   bash scripts/run_pipeline.sh                          # full pipeline → train
-#   bash scripts/run_pipeline.sh tier1                    # stop after Tier 1
-#   N=500 bash scripts/run_pipeline.sh tier3              # 500-clip cache-ready DB
-#   DB=/tmp/foo bash scripts/run_pipeline.sh curate       # different db path
+#   bash scripts/run_pipeline.sh                        # full pipeline → train
+#   bash scripts/run_pipeline.sh tier1                  # stop after Tier 1
+#   DB=/tmp/foo bash scripts/run_pipeline.sh curate     # different db path
 #
 # Env vars:
 #   DB           Lance database path  (default: data/videos/lancedb)
-#   N            Synthetic clip count (default: 200)
+#   MANIFEST     Parquet manifest path  (default: data/chronomagic_proh.parquet)
+#   CLIPS        Directory of downloaded mp4s  (default: data/clips)
+#   LIMIT        Manifest row cap (default: all)
 #   TRAIN_STEPS  Training steps       (default: 20)
 #   PYTHON       Python executable    (default: .venv/bin/python or python)
 set -euo pipefail
 
 STAGE="${1:-train}"
 DB="${DB:-data/videos/lancedb}"
-N="${N:-200}"
+MANIFEST="${MANIFEST:-data/chronomagic_proh.parquet}"
+CLIPS="${CLIPS:-data/clips}"
+LIMIT_FLAG=""
+[ -n "${LIMIT:-}" ] && LIMIT_FLAG="--limit $LIMIT"
 TRAIN_STEPS="${TRAIN_STEPS:-20}"
 PYTHON="${PYTHON:-.venv/bin/python}"
 [ -x "$PYTHON" ] || PYTHON="$(command -v python)"
 
 cd "$(dirname "$0")/.."
+
+# Make sure the manifest exists.
+[ -f "$MANIFEST" ] || {
+    echo "ERROR: manifest not found at $MANIFEST"
+    echo "       run: python -m videogen.download_manifest --variant proh \\"
+    echo "            --out $MANIFEST"
+    exit 1
+}
 
 run() {
     echo
@@ -39,8 +51,12 @@ run() {
     "$@"
 }
 
-run "ingest synthetic ($N rows)" \
-    "$PYTHON" -m videogen.ingest_chronomagic --synthetic "$N" --overwrite --db "$DB"
+# Restrict the table to rows whose clips actually exist on disk —
+# downstream Tier-2/3 backfills need the mp4 bytes.
+run "ingest manifest + clips" \
+    "$PYTHON" -m videogen.ingest_chronomagic \
+        --manifest "$MANIFEST" --video-dir "$CLIPS" \
+        --require-clips --overwrite $LIMIT_FLAG --db "$DB"
 [ "$STAGE" = "ingest" ] && exit 0
 
 run "Tier 1 — caption flags" \

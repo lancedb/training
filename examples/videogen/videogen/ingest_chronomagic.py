@@ -1,20 +1,18 @@
 """
-Ingest ChronoMagic-Pro (or a synthetic stand-in) into ``videos_raw.lance``.
+Ingest ChronoMagic-Pro / ChronoMagic-ProH into ``videos_raw.lance``.
 
-Three modes:
+Two modes:
 
-  1. ``--synthetic N``
-       Generate N short fake clips (single-colour MP4s, fake captions).
-       No network, no GPU.  Used to smoke-test the pipeline end-to-end.
+  1. ``--manifest PATH``
+       Captions only — read a parquet manifest of (videoid, caption) pairs
+       and write empty ``video_bytes``.  Useful before clips are downloaded
+       (Tier-1 keyword + FTS curation runs over captions alone).
 
-  2. ``--manifest PATH``
-       Read a parquet manifest of (videoid, caption) pairs.  For ChronoMagic-Pro
-       this is just the parquet that HuggingFace auto-generates from the dataset
-       CSV.  Each row is consumed lazily; ``--limit N`` caps how many.
-
-  3. ``--video-dir PATH --manifest PATH``
-       Same as (2), but the actual mp4 bytes are read from ``PATH/<videoid>.mp4``
-       on disk.  Use this once you've actually downloaded a subset.
+  2. ``--manifest PATH --video-dir PATH``
+       Captions + clip bytes — for every row whose mp4 exists at
+       ``<video-dir>/<videoid>.mp4`` the raw bytes are read in.  Captions
+       whose clip is missing get an empty ``video_bytes`` cell and remain
+       Tier-1 / curation-eligible.
 
 Schema-wise: the table is created with ``data_storage_version="2.2"`` and
 ``new_table_enable_stable_row_ids=true`` so blob v2 takes effect and Geneva
@@ -22,32 +20,25 @@ materialised views refresh incrementally.
 
 Usage
 -----
-# Synthetic smoke test (no network):
-python -m videogen.ingest_chronomagic --synthetic 200 --overwrite
-
-# Real subset (manifest only — captions but no clip bytes yet, for keyword EDA):
+# Captions-only ingest, useful for keyword EDA before any clip download:
 python -m videogen.ingest_chronomagic \\
-    --manifest data/chronomagic_pro.parquet --limit 5000 --overwrite
+    --manifest data/chronomagic_proh.parquet --limit 5000 --overwrite
 
-# Real subset with locally-downloaded mp4s:
+# Once you've downloaded clips with `videogen.download_clips`:
 python -m videogen.ingest_chronomagic \\
-    --manifest data/chronomagic_pro.parquet \\
-    --video-dir data/videos/raw \\
-    --limit 1000 --overwrite
+    --manifest data/chronomagic_proh.parquet \\
+    --video-dir data/clips \\
+    --overwrite
 """
 
 from __future__ import annotations
 
 import argparse
-import io
-import random
-import struct
 import sys
 from pathlib import Path
 from typing import Iterable, Iterator
 
 import lancedb
-import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -57,91 +48,6 @@ from videogen.schema import BASE_SCHEMA
 DEFAULT_DB    = "data/videos/lancedb"
 DEFAULT_TABLE = "videos_raw"
 DEFAULT_BATCH = 64
-
-
-# ---------------------------------------------------------------------------
-# Synthetic generator — no network, no GPU.  Produces actual playable MP4
-# bytes (tiny, single-colour) so blob-column read paths exercise real codec
-# decoding when Tier 2 GPU UDFs run.
-# ---------------------------------------------------------------------------
-
-_SYNTHETIC_PHRASES = [
-    "An ice cube slowly {kw} into water on a bright kitchen counter.",
-    "Time-lapse of butter {kw} in a hot pan, steam rising.",
-    "Honey slowly {kw} from a wooden spoon, forming a viscous pool.",
-    "Sugar crystals {kw} into hot tea, a swirl forming in the cup.",
-    "A wax candle {kw} down its sides under a steady flame.",
-    "A chocolate truffle {kw} under heat, glossy surface flowing.",
-    "Rain droplets {kw} from the surface of a leaf at dawn.",
-    "Snow on a black roof {kw} as the morning sun rises.",
-    "A pile of dry ice {kw}, releasing a thick white fog.",
-    "Boiling water on the stove, bubbles {kw} into vapour.",
-]
-
-_KW_FOR_TRANSITION = {
-    "melting":     ["melts", "is melting", "melting away"],
-    "freezing":    ["freezes", "is freezing", "starts to freeze"],
-    "dissolving":  ["dissolves", "is dissolving", "is dissolving slowly"],
-    "boiling":     ["boils", "is boiling", "comes to a boil"],
-    "evaporating": ["evaporates", "is evaporating", "starts to evaporate"],
-}
-
-
-def _synthetic_caption(rng: random.Random) -> str:
-    transition = rng.choice(list(_KW_FOR_TRANSITION))
-    kw = rng.choice(_KW_FOR_TRANSITION[transition])
-    return rng.choice(_SYNTHETIC_PHRASES).format(kw=kw)
-
-
-def _synthetic_mp4(width: int, height: int, n_frames: int, fps: int,
-                   rng: random.Random) -> bytes:
-    """Encode a tiny solid-colour MP4 in memory using imageio[ffmpeg]."""
-    import imageio.v3 as iio
-
-    rgb = (rng.randint(20, 240), rng.randint(20, 240), rng.randint(20, 240))
-    frame = np.zeros((height, width, 3), dtype=np.uint8)
-    frame[:, :] = rgb
-    # Add a small moving square so motion-strength UDFs don't see exactly 0.
-    frames = np.stack([frame.copy() for _ in range(n_frames)])
-    sq = 16
-    for i in range(n_frames):
-        x = (i * 4) % (width - sq)
-        y = (i * 3) % (height - sq)
-        frames[i, y:y + sq, x:x + sq] = 255 - np.array(rgb, dtype=np.uint8)
-
-    buf = io.BytesIO()
-    iio.imwrite(buf, frames, extension=".mp4", fps=fps, codec="libx264",
-                output_params=["-pix_fmt", "yuv420p", "-crf", "30",
-                               "-preset", "ultrafast", "-loglevel", "error"])
-    return buf.getvalue()
-
-
-def synthetic_rows(n: int, *, seed: int = 0) -> Iterator[dict]:
-    """Yield ``n`` synthetic rows matching ``BASE_SCHEMA``."""
-    rng = random.Random(seed)
-    for i in range(n):
-        w, h = 320, 192
-        fps = 8
-        n_frames = rng.randint(33, 49)
-        try:
-            mp4 = _synthetic_mp4(w, h, n_frames, fps, rng)
-        except Exception:
-            # If ffmpeg isn't available we still want the pipeline to ingest;
-            # fall back to a 4-byte sentinel so Tier 1 (CPU) UDFs still work.
-            mp4 = struct.pack(">I", i)
-        yield {
-            "clip_id":    f"synthetic_{i:07d}",
-            "source":     "synthetic",
-            "split":      "val" if i % 10 == 0 else "train",
-            "video_bytes": mp4,
-            "width":      w,
-            "height":     h,
-            "fps":        float(fps),
-            "n_frames":   n_frames,
-            "duration_s": n_frames / float(fps),
-            "caption":    _synthetic_caption(rng),
-            "source_url": "",
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -171,13 +77,17 @@ def manifest_rows(
     video_dir: Path | None,
     limit: int | None,
     val_every: int = 50,
+    require_clips: bool = False,
 ) -> Iterator[dict]:
     """Stream rows from a ChronoMagic-Pro-style parquet manifest.
 
-    The manifest only needs columns ``videoid`` and one of ``name`` / ``caption``.
-    If ``video_dir`` is set we look for ``video_dir/<videoid>.mp4`` and read its
-    bytes; otherwise the ``video_bytes`` column is empty (manifest-only ingest,
-    useful for Tier-1 caption-driven curation before any clips are downloaded).
+    The manifest only needs columns ``videoid`` and one of ``name`` /
+    ``caption``.  If ``video_dir`` is set we look for
+    ``video_dir/<videoid>.mp4`` and read its bytes; otherwise the
+    ``video_bytes`` column is empty.
+
+    When ``require_clips=True`` we drop rows that don't have a matching mp4
+    — useful for restricting a training table to rows whose clips exist.
     """
     table = pq.read_table(manifest_path)
     cols = {c.lower(): c for c in table.column_names}
@@ -192,8 +102,9 @@ def manifest_rows(
     ids      = table.column(id_col).to_pylist()
     captions = table.column(cap_col).to_pylist()
 
+    yielded = 0
     for i, (clip_id, caption) in enumerate(zip(ids, captions)):
-        if limit is not None and i >= limit:
+        if limit is not None and yielded >= limit:
             return
         video_bytes = b""
         w = h = n_frames = 0
@@ -203,10 +114,12 @@ def manifest_rows(
             if candidate.exists():
                 video_bytes = candidate.read_bytes()
                 w, h, fps, n_frames, duration = _probe_mp4(candidate)
+        if require_clips and not video_bytes:
+            continue
         yield {
             "clip_id":    str(clip_id),
             "source":     "chronomagic-pro",
-            "split":      "val" if i % val_every == 0 else "train",
+            "split":      "val" if yielded % val_every == 0 else "train",
             "video_bytes": video_bytes,
             "width":      w,
             "height":     h,
@@ -216,6 +129,7 @@ def manifest_rows(
             "caption":    str(caption) if caption is not None else "",
             "source_url": f"https://www.youtube.com/watch?v={clip_id}",
         }
+        yielded += 1
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +200,7 @@ def ingest(
 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Ingest video-text pairs into a Lance table for the videogen pipeline."
+        description="Ingest ChronoMagic-Pro / -ProH manifest (+ optional clips) into Lance."
     )
     p.add_argument("--db",         default=DEFAULT_DB,    help="LanceDB database path")
     p.add_argument("--table",      default=DEFAULT_TABLE, help="Lance table name")
@@ -294,35 +208,28 @@ def _parse_args(argv=None):
                    help="RecordBatch size for the streaming write")
     p.add_argument("--overwrite",  action="store_true",
                    help="Drop the table first if it exists")
-
-    src = p.add_mutually_exclusive_group(required=True)
-    src.add_argument("--synthetic", type=int, metavar="N",
-                     help="Generate N synthetic clips (no network, no GPU).")
-    src.add_argument("--manifest",  type=Path,
-                     help="Path to a parquet manifest with (videoid, name|caption) columns.")
-
+    p.add_argument("--manifest",   type=Path, required=True,
+                   help="Path to the parquet manifest "
+                        "(videoid + caption columns).")
     p.add_argument("--video-dir",  type=Path, default=None,
-                   help="Directory of downloaded mp4s (used only with --manifest).")
+                   help="Directory of downloaded mp4s (one per videoid).")
     p.add_argument("--limit",      type=int,  default=None,
-                   help="Cap the number of rows ingested from --manifest.")
-    p.add_argument("--seed",       type=int,  default=0,
-                   help="Seed for the synthetic generator.")
+                   help="Cap the number of rows ingested from the manifest.")
+    p.add_argument("--require-clips", action="store_true",
+                   help="Skip rows whose mp4 isn't present in --video-dir. "
+                        "Useful for building a training-only table.")
     return p.parse_args(argv)
 
 
 def main(argv=None) -> int:
     args = _parse_args(argv)
-    if args.synthetic is not None:
-        rows: Iterable[dict] = synthetic_rows(args.synthetic, seed=args.seed)
-    else:
-        rows = manifest_rows(args.manifest, args.video_dir, args.limit)
-
+    rows = manifest_rows(
+        args.manifest, args.video_dir, args.limit,
+        require_clips=args.require_clips,
+    )
     ingest(
-        db_path=args.db,
-        table_name=args.table,
-        rows=rows,
-        overwrite=args.overwrite,
-        batch_size=args.batch_size,
+        db_path=args.db, table_name=args.table,
+        rows=rows, overwrite=args.overwrite, batch_size=args.batch_size,
     )
     return 0
 

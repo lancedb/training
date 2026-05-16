@@ -12,28 +12,22 @@ directory.
 With Lance + Geneva: only the **changed column**.  Every other column
 (raw video bytes, T5 hidden states, motion strength, dedup hash, …)
 stays put.  This bench measures the wall-clock for "re-derive one
-column" vs "re-derive everything".
-
-It's a synthetic comparison — we don't actually have a second VAE to
-swap to — but the cost ratio is what matters for the story.
+column" vs "re-derive everything" on an existing Lance table.
 
 Usage
 -----
-python -m bench.bench_recipe_change \\
-    --db /tmp/videogen_b9 --n 16 \\
+# Run after `videogen.ingest_chronomagic` has populated the DB.
+python -m bench.bench_recipe_change --db data/videos/lancedb \\
     --recipe-column motion_strength
 """
 
 from __future__ import annotations
 
 import argparse
-import shutil
 import sys
 import time
-from pathlib import Path
 
 from videogen.backfill_geneva import backfill
-from videogen.ingest_chronomagic import ingest, synthetic_rows
 
 
 # Columns that any "Tier-1 + Tier-2" pipeline would derive.  We exclude
@@ -51,24 +45,14 @@ PIPELINE_COLUMNS = [
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--db",      default="/tmp/videogen_b9")
+    p.add_argument("--db",      default="data/videos/lancedb")
     p.add_argument("--table",   default="videos_raw")
-    p.add_argument("--n",       type=int, default=16)
     p.add_argument("--recipe-column", default="motion_strength",
                    help="Column whose recipe we simulate changing.")
     args = p.parse_args(argv)
 
     if args.recipe_column not in PIPELINE_COLUMNS:
         raise SystemExit(f"--recipe-column must be in {PIPELINE_COLUMNS}")
-
-    if Path(args.db).exists():
-        shutil.rmtree(args.db)
-
-    # --- Stage 1: bring up a full Tier 1+2 pipeline -------------------------
-    print(f"[stage 0] ingest {args.n} synthetic rows")
-    ingest(db_path=args.db, table_name=args.table,
-           rows=synthetic_rows(args.n, seed=0),
-           overwrite=True, batch_size=64)
 
     print(f"[stage A] backfill ALL pipeline columns ({len(PIPELINE_COLUMNS)})")
     t0 = time.perf_counter()
