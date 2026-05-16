@@ -63,14 +63,27 @@ def _load_pipeline(model_id: str, lora_dir: Path, dtype: str = "bfloat16"):
     return pipe
 
 
+def _to_pil(img):
+    """WanPipeline returns frames as numpy arrays (H, W, 3) uint8;
+    open_clip's preprocess expects PIL.Image.  Coerce here."""
+    import numpy as np
+    from PIL import Image
+    if isinstance(img, Image.Image):
+        return img
+    arr = np.asarray(img)
+    if arr.dtype != np.uint8:
+        arr = (arr * 255).clip(0, 255).astype(np.uint8)
+    return Image.fromarray(arr)
+
+
 def _mtscore_proxy(frames) -> float:
-    """1 − cos(CLIP(first), CLIP(last)) on a list of PIL Images."""
+    """1 − cos(CLIP(first), CLIP(last)).  Accepts PIL or numpy frames."""
     import torch
     import open_clip
     model, _, preprocess = open_clip.create_model_and_transforms(
         "ViT-B-32", pretrained="openai", device="cuda")
     model.eval()
-    first, last = frames[0], frames[-1]
+    first, last = _to_pil(frames[0]), _to_pil(frames[-1])
     with torch.no_grad():
         feats = model.encode_image(
             torch.stack([preprocess(first), preprocess(last)]).cuda()

@@ -57,12 +57,24 @@ def _load_pipeline(model_id: str, lora_dir: Path, dtype: str):
     return pipe
 
 
+def _to_pil(img):
+    import numpy as np
+    from PIL import Image
+    if isinstance(img, Image.Image):
+        return img
+    arr = np.asarray(img)
+    if arr.dtype != np.uint8:
+        arr = (arr * 255).clip(0, 255).astype(np.uint8)
+    return Image.fromarray(arr)
+
+
 def _clip_embed_frames(frames):
     import open_clip, torch
     model, _, preprocess = open_clip.create_model_and_transforms(
         "ViT-B-32", pretrained="openai", device="cuda")
     model.eval()
-    tensors = torch.stack([preprocess(f) for f in frames]).cuda()
+    pil = [_to_pil(f) for f in frames]
+    tensors = torch.stack([preprocess(f) for f in pil]).cuda()
     with torch.no_grad():
         emb = model.encode_image(tensors)
         emb = emb / emb.norm(dim=-1, keepdim=True).clamp_min(1e-12)
