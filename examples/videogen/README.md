@@ -54,7 +54,26 @@ uv pip install -e .
 > (torch, diffusers, transformers, etc).  For CPU-only work you can drop
 > them: `uv pip install lancedb pylance geneva pyarrow pandas imageio[ffmpeg]`.
 
-## Quickstart — CPU only, ~30 seconds
+## Quickstart — one command
+
+```bash
+# Ingest 200 synthetic clips → all 4 tiers → curate views → 20 LoRA steps
+bash scripts/run_pipeline.sh
+
+# Or stop at any stage:
+bash scripts/run_pipeline.sh ingest   # synthetic ingest only
+bash scripts/run_pipeline.sh tier1    # + Tier 1 keyword UDFs (CPU)
+bash scripts/run_pipeline.sh tier2    # + Tier 2 GPU UDFs
+bash scripts/run_pipeline.sh tier3    # + Tier 3 cached features (headline)
+bash scripts/run_pipeline.sh curate   # + materialised views + indices
+bash scripts/run_pipeline.sh tier4    # + dedup
+bash scripts/run_pipeline.sh train    # + a short training run (default)
+
+# Knobs (env vars):
+DB=/tmp/videogen_demo N=500 TRAIN_STEPS=50 bash scripts/run_pipeline.sh
+```
+
+## Quickstart — CPU only, ~30 seconds (manual)
 
 Runs the full CPU pipeline on 500 synthetic clips.  No GPU.
 
