@@ -36,8 +36,16 @@ from geneva.transformer import udf
 from videogen.schema import (
     DHASH_BITS,
     PHASE_TRANSITIONS,
+    T5_HIDDEN,
     T5_SEQ_LEN,
     T5_TOTAL,
+    VAE_INPUT_FRAMES,
+    VAE_INPUT_H,
+    VAE_INPUT_W,
+    VAE_LATENT_C,
+    VAE_LATENT_H,
+    VAE_LATENT_T,
+    VAE_LATENT_W,
     VAE_TOTAL,
 )
 
@@ -374,52 +382,146 @@ class _LazyGpuUdf:
 
 
 # ---------------------------------------------------------------------------
-# Tier 3 — heavy GPU (T5 tokeniser + encoder, Wan-VAE encoder).  Stubs.
+# Tier 3 — heavy GPU.  The **headline trick**: pre-tokenised UMT5-XXL
+# hidden states + pre-encoded Wan-VAE latents stored as Lance columns.
+# The training loop reads only these two columns and never loads the VAE
+# or the text encoder.
 # ---------------------------------------------------------------------------
 
-@udf(
-    data_type=pa.list_(pa.int32(), T5_SEQ_LEN),
-    input_columns=["caption"],
-    num_gpus=0, num_cpus=1, cuda=False,
-)
-class _T5InputIds(_LazyGpuUdf):
-    """T5-XXL tokeniser (CPU is fine — tokenisation is fast)."""
-
-    def __call__(self, caption: pa.Array) -> pa.Array:
-        self._load()
-        raise NotImplementedError("T5 tokeniser not yet wired up")
+WAN_MODEL_ID = "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
 
 
 @udf(
     data_type=pa.list_(pa.float16(), T5_TOTAL),
-    input_columns=["t5_input_ids"],
+    input_columns=["caption"],
     num_gpus=1, num_cpus=1, cuda=True,
 )
-class _T5HiddenStates(_LazyGpuUdf):
-    """T5-XXL last hidden states.  Reads from t5_input_ids (Tier 3a) so the
-    tokeniser doesn't run twice."""
+class _T5HiddenStates:
+    """UMT5-XXL last hidden states for the caption.
 
-    def __call__(self, t5_input_ids: pa.Array) -> pa.Array:
+    Tokeniser + encoder live in the same UDF so we don't pay two model
+    loads (UMT5 alone is ~5.7B params at fp16, ~11 GB VRAM).  Output is a
+    flat fp16 list of length ``T5_SEQ_LEN * T5_HIDDEN`` per row;
+    ``dataloader.collate`` reshapes back to ``(B, 512, 4096)``.
+    """
+
+    def __init__(self) -> None:
+        self.tokenizer = None
+        self.encoder = None
+        self.device = None
+
+    def _load(self) -> None:
+        if self.encoder is not None:
+            return
+        import torch
+        from transformers import T5TokenizerFast, UMT5EncoderModel
+        self.device = torch.device("cuda")
+        self.tokenizer = T5TokenizerFast.from_pretrained(
+            WAN_MODEL_ID, subfolder="tokenizer",
+        )
+        self.encoder = UMT5EncoderModel.from_pretrained(
+            WAN_MODEL_ID, subfolder="text_encoder", torch_dtype=torch.float16,
+        ).eval().to(self.device)
+
+    def __call__(self, caption: pa.Array) -> pa.Array:
+        import numpy as np
+        import torch
         self._load()
-        raise NotImplementedError("T5 encoder not yet wired up")
+
+        texts = [c if c else " " for c in caption.to_pylist()]
+        toks = self.tokenizer(
+            texts,
+            padding="max_length", truncation=True,
+            max_length=T5_SEQ_LEN, return_tensors="pt",
+        ).to(self.device)
+        with torch.no_grad():
+            h = self.encoder(**toks).last_hidden_state  # (B, 512, 4096) fp16
+
+        # Flatten per-row to a python list-of-lists; pa builds a
+        # fixed_size_list<float16>[T5_TOTAL] cleanly from this.
+        flat = h.reshape(h.shape[0], -1).cpu().numpy().astype(np.float16)
+        torch.cuda.empty_cache()
+        return pa.array(flat.tolist(), type=pa.list_(pa.float16(), T5_TOTAL))
 
 
 @udf(
     data_type=pa.list_(pa.float16(), VAE_TOTAL),
-    input_columns=["video_bytes", "n_frames", "fps"],
-    num_gpus=1, num_cpus=1, cuda=True,
+    input_columns=["video_bytes"],
+    num_gpus=1, num_cpus=2, cuda=True,
 )
-class _VaeLatent(_LazyGpuUdf):
-    """Wan-VAE encoder over 49 sampled frames @ 480×720 → fp16 latent."""
+class _VaeLatent:
+    """Pre-encoded Wan-VAE latents for the cached training path.
 
-    def __call__(self, video_bytes: pa.Array,
-                 n_frames: pa.Array, fps: pa.Array) -> pa.Array:
+    Pipeline per row:
+      1. Decode mp4 bytes on CPU (pyav).
+      2. Sample ``VAE_INPUT_FRAMES`` evenly-spaced frames.
+      3. Resize to ``VAE_INPUT_H × VAE_INPUT_W``.
+      4. Normalise to ``[-1, 1]`` (the AutoencoderKLWan input range).
+      5. Stack into ``(1, 3, T, H, W)`` fp32 tensor on GPU.
+      6. VAE encode → ``(1, 48, 13, 30, 45)`` fp32 latent.
+      7. Cast to fp16, flatten, store.
+
+    The Wan VAE itself is ~705M params at fp32; we keep it in fp32 for
+    encode stability and only cast the output down to fp16 for storage.
+    """
+
+    def __init__(self) -> None:
+        self.vae = None
+        self.device = None
+
+    def _load(self) -> None:
+        if self.vae is not None:
+            return
+        import torch
+        from diffusers import AutoencoderKLWan
+        self.device = torch.device("cuda")
+        self.vae = AutoencoderKLWan.from_pretrained(
+            WAN_MODEL_ID, subfolder="vae", torch_dtype=torch.float32,
+        ).eval().to(self.device)
+
+    def __call__(self, video_bytes: pa.Array) -> pa.Array:
+        import numpy as np
+        import torch
+        from PIL import Image
         self._load()
-        raise NotImplementedError("Wan-VAE encoder not yet wired up")
+
+        results: list[list[float]] = []
+        for b in video_bytes.to_pylist():
+            frames = _decode_evenly_spaced_frames(b or b"", VAE_INPUT_FRAMES)
+            if len(frames) < VAE_INPUT_FRAMES:
+                # Pad by replicating the last frame so we always emit a
+                # fixed-size latent.  In production we'd skip these rows
+                # via curation, but the column has to be NOT NULL here.
+                if not frames:
+                    results.append(np.zeros(VAE_TOTAL, dtype=np.float16).tolist())
+                    continue
+                while len(frames) < VAE_INPUT_FRAMES:
+                    frames.append(frames[-1])
+
+            # Resize + stack → (T, H, W, 3) uint8 → (1, 3, T, H, W) fp32 in [-1, 1]
+            resized = [
+                np.asarray(im.resize((VAE_INPUT_W, VAE_INPUT_H), Image.BICUBIC))
+                for im in frames
+            ]
+            arr = np.stack(resized, axis=0)                              # (T,H,W,3)
+            t = torch.from_numpy(arr).to(self.device).float().div(127.5).sub(1.0)
+            t = t.permute(3, 0, 1, 2).unsqueeze(0).contiguous()           # (1,3,T,H,W)
+
+            with torch.no_grad():
+                enc = self.vae.encode(t)
+                lat = enc.latent_dist.sample() if hasattr(enc, "latent_dist") else enc.latents
+            # Sanity guard: ensure shape matches the schema constants.
+            assert lat.shape == (1, VAE_LATENT_C, VAE_LATENT_T,
+                                 VAE_LATENT_H, VAE_LATENT_W), \
+                f"Unexpected latent shape {tuple(lat.shape)}"
+            flat = lat.squeeze(0).reshape(-1).cpu().numpy().astype(np.float16)
+            results.append(flat.tolist())
+
+        torch.cuda.empty_cache()
+        return pa.array(results, type=pa.list_(pa.float16(), VAE_TOTAL))
 
 
 TIER3_UDFS: dict[str, object] = {
-    "t5_input_ids":     _T5InputIds(),
     "t5_hidden_states": _T5HiddenStates(),
     "vae_latent":       _VaeLatent(),
 }
@@ -484,4 +586,4 @@ TIER_UDFS: dict[int, dict[str, object]] = {
 # Explicit allowlist of *currently-implemented* UDF columns.  The backfill
 # orchestrator refuses to run anything outside this set unless the user
 # passes ``--force-stub``.  We extend this set as each tier comes online.
-IMPLEMENTED_COLUMNS: set[str] = set(TIER1_UDFS) | set(TIER2_UDFS)
+IMPLEMENTED_COLUMNS: set[str] = set(TIER1_UDFS) | set(TIER2_UDFS) | set(TIER3_UDFS)

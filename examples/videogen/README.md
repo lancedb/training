@@ -6,11 +6,13 @@ from raw clips to high-MFU training.
 
 See [PROPOSAL.md](PROPOSAL.md) for the full design + benchmark plan.
 
-> Status: **Tier-1 (CPU) + Tier-2 (light GPU) pipeline runnable end-to-end.**
+> Status: **Tier-1 (CPU) + Tier-2 (light GPU) + Tier-3 (heavy GPU) pipeline runnable end-to-end.**
 > Tier 2 = CLIP ViT-B/32 text + video embeddings, frame-absdiff motion score,
-> CLIP-based MTScore proxy.  Tier 3 (T5 hidden states + Wan-VAE latents) and
-> Tier 4 (dedup) are still scaffolded as stubs.
-> See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+> CLIP-based MTScore proxy.
+> Tier 3 = the **headline trick**: pre-tokenised UMT5-XXL hidden states and
+> pre-encoded Wan2.2-VAE latents stored as Lance columns; the training loop
+> reads only these and never loads the VAE or text encoder.
+> Tier 4 (dedup) is still scaffolded as stubs.  See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 ## Setup
 
@@ -40,6 +42,29 @@ python -m videogen.manage_views --action curate
 
 # 4) Status sentinel
 python -m videogen.verify_pipeline
+```
+
+## Quickstart — Tier 3 (heavy GPU, ~30-60s per 20 clips on H100)
+
+Pre-encodes the cached training features.  First run downloads Wan2.2-TI2V-5B
+weights (~15 GB) into `~/.cache/huggingface`.
+
+```bash
+# 8) Tier 3 backfill — UMT5-XXL hidden states + Wan2.2-VAE latents
+python -m videogen.backfill_geneva --columns t5_hidden_states
+python -m videogen.backfill_geneva --columns vae_latent
+
+# 9) Use the cached dataloader path — VAE and UMT5 never load in this process
+python - <<'PY'
+from videogen.dataloader import make_cached_loader
+loader = make_cached_loader("data/videos/lancedb", "phase_transitions_train",
+                            batch_size=2, num_workers=0)
+batch = next(iter(loader))
+print("prompt_embeds:", batch["prompt_embeds"].shape, batch["prompt_embeds"].dtype)
+print("vae_latent   :", batch["vae_latent"].shape,    batch["vae_latent"].dtype)
+# → torch.Size([2, 512, 4096]) float16
+# → torch.Size([2, 48, 13, 30, 45]) float16
+PY
 ```
 
 ## Quickstart — Tier 2 (GPU, ~10s for 100 clips on H100)
@@ -117,7 +142,7 @@ on-disk mp4 dir ─────────┘
                   │  backfill_geneva --tier 2     (GPU)  ← runnable today
                   │   clip_emb_* · motion · MTScore
                   │
-                  │  backfill_geneva --tier 3     (GPU)  ← deferred
+                  │  backfill_geneva --tier 3     (GPU)  ← runnable today
                   │   t5_hidden_states · vae_latent     ← headline trick
                   │
                   │  backfill_geneva --tier 4     (GPU + CPU)
@@ -139,7 +164,7 @@ videogen/                  Pipeline package
 ├── schema.py              Lance schema (per-tier field declarations)
 ├── ingest_chronomagic.py  Streaming ingest: synthetic / manifest / manifest+mp4
 ├── download_manifest.py   Pull just the HF caption parquet (no clips)
-├── geneva_udfs.py         Tier 1 (CPU keyword) + Tier 2 (CLIP/motion/MTScore) + Tier 3/4 stubs
+├── geneva_udfs.py         Tier 1 (CPU keyword) + Tier 2 (CLIP/motion/MTScore) + Tier 3 (UMT5 + Wan-VAE) + Tier 4 stubs
 ├── backfill_geneva.py     Geneva backfill orchestrator (--tier, --columns)
 ├── manage_views.py        Materialised views per phase transition
 ├── dataloader.py          Permutation-based loaders (cached + raw paths)
@@ -162,7 +187,6 @@ KNOWN_ISSUES.md            Upstream regressions we're working around
 
 These are tracked in `PROPOSAL.md §"Milestones"`:
 
-* Tier 3 Geneva UDF bodies — T5-XXL tokeniser + encoder, Wan-VAE latent encoder.
 * Tier 4 Geneva UDF bodies — dHash (GPU) + is_duplicate (CPU NN lookup).
 * `train_wan22_lora.py` — Wan2.2 LoRA training loop reading from cached MVs.
 * `bench_dataloader.py` — B5/B6 clips/sec + GPU MFU.

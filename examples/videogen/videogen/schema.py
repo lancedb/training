@@ -111,25 +111,37 @@ GENEVA_TIER2_FIELDS = [
 
 
 # ---------------------------------------------------------------------------
-# Geneva Tier 3 — heavy GPU.  Pre-tokenised T5 hidden states + pre-encoded
-# Wan-VAE latents.  These two columns are the **headline trick**: the train
-# loop reads only them, so the VAE and T5 are never loaded at train time.
+# Geneva Tier 3 — heavy GPU.  Pre-tokenised UMT5-XXL hidden states +
+# pre-encoded Wan-VAE latents.  These two columns are the **headline
+# trick**: the train loop reads only them, so the VAE and text encoder
+# are never loaded at train time.
+#
+# Shapes confirmed against Wan-AI/Wan2.2-TI2V-5B-Diffusers (commit
+# probed in this branch — see PROPOSAL.md §"Schema"):
+#   UMT5-XXL  encoder hidden: (512, 4096) fp16   → 4.2 MB/row
+#   Wan-VAE   latent (49f@480×720):  (48, 13, 30, 45) fp16 → 1.65 MB/row
+# Total cached-feature payload ≈ 5.9 MB / clip.
 # ---------------------------------------------------------------------------
 
-# Flat shapes; collate_fn reshapes back to (B, 226, 4096) and (B, 16, 13, 60, 90).
-T5_SEQ_LEN = 226
-T5_HIDDEN  = 4096
+T5_SEQ_LEN = 512                # WanPipeline.encode_prompt default
+T5_HIDDEN  = 4096               # UMT5-XXL d_model
 
-VAE_LATENT_C = 16
-VAE_LATENT_T = 13
-VAE_LATENT_H = 60
-VAE_LATENT_W = 90
+VAE_LATENT_C = 48               # Wan2.2-VAE z_dim
+VAE_LATENT_T = 13               # 49 frames / temporal_compression
+VAE_LATENT_H = 30               # 480 / 16
+VAE_LATENT_W = 45               # 720 / 16
+
+# Reference clip shape that produced the latent shape above.  Tier-3
+# UDFs resize/sample to this before encoding so every row's vae_latent
+# is the same length.
+VAE_INPUT_FRAMES = 49
+VAE_INPUT_H      = 480
+VAE_INPUT_W      = 720
 
 T5_TOTAL  = T5_SEQ_LEN * T5_HIDDEN
 VAE_TOTAL = VAE_LATENT_C * VAE_LATENT_T * VAE_LATENT_H * VAE_LATENT_W
 
 GENEVA_TIER3_FIELDS = [
-    pa.field("t5_input_ids",     pa.list_(pa.int32(),   T5_SEQ_LEN)),
     pa.field("t5_hidden_states", pa.list_(pa.float16(), T5_TOTAL)),
     pa.field("vae_latent",       pa.list_(pa.float16(), VAE_TOTAL)),
 ]
