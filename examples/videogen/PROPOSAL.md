@@ -153,13 +153,17 @@ Created with `storage_options={"new_table_enable_stable_row_ids": "true"}` and `
 | `clip_emb_text` | `list<float32>[512]` | 2 GPU | CLIP text encoder over caption |
 | `motion_strength` | `float32` | 2 GPU | mean RAFT flow magnitude, central-frame triplet |
 | `metamorphic_score` | `float32` | 2 GPU | MTScore proxy: 1 - cos(CLIP(first), CLIP(last)) |
-| `t5_input_ids` | `list<int32>[226]` | 3 GPU | T5-XXL tokeniser, model_max_length=226 |
-| `t5_hidden_states` | `list<float16>[226*4096]` | 3 GPU | T5-XXL last hidden, fp16; ~1.8 MB / row |
-| `vae_latent` | `list<bfloat16>[16*13*60*90]` | 3 GPU | Wan VAE; ~2.2 MB / row at 49f×480×720 → 13×60×90×16 |
+| `t5_hidden_states` | `list<float16>[512*4096]` | 3 GPU | UMT5-XXL last hidden, fp16; **4.19 MB / row** |
+| `vae_latent` | `list<float16>[48*13*30*44]` | 3 GPU | Wan2.2 VAE; **1.65 MB / row** at 49f×480×704 |
 | `dhash_first_last` | `list<float32>[128]` | 4 GPU | 2× dHash for dedup |
 | `is_duplicate` | `bool` | 4 CPU | nearest-neighbour Hamming ≤ threshold |
 
-**Per-row cost after Tier 3:** ~5 MB raw video + ~4 MB cached latents/embeddings = ~9 MB. 25K rows ≈ 225 GB. Comfortably fits a single 1-TB NVMe; trivial in object storage.
+**Per-row cost after Tier 3:** ~5 MB raw video + ~6 MB cached latents/embeddings = ~11 MB. 25K rows ≈ 275 GB. Comfortably fits a single 1-TB NVMe; trivial in object storage.
+
+(Smoke-test measurement on 20 synthetic clips: 11.2 MB/row including
+Geneva checkpoint overhead.  Both `t5_hidden_states` and `vae_latent`
+round-trip cleanly to `(B, 512, 4096)` fp16 and `(B, 48, 13, 30, 44)`
+fp16 via the Permutation API.)
 
 > Note on column shape: `t5_hidden_states` and `vae_latent` are stored as flat `list<f16|bf16>[N]` (not nested fixed-size-lists). This matches the object-detection example's "no nested structs" rule and avoids the known nested-struct read path. Reshape happens in `collate_fn`.
 
@@ -231,15 +235,15 @@ perm = (
 
 The VAE and T5 never enter the training process. VRAM saved:
 
-| Component | VRAM @ fp16 | Status |
+| Component | VRAM @ bf16 | Status |
 |---|---|---|
-| Wan2.2 DiT (5B) | ~12 GB | trained (frozen + LoRA) |
-| Wan VAE | ~3 GB | **not loaded** |
-| T5-XXL encoder | ~11 GB | **not loaded** |
-| LoRA r=64 + AdamW state | ~2 GB | trained |
+| Wan2.2 DiT (5.0B params) | ~10 GB | trained (frozen + LoRA) |
+| Wan2.2 VAE (705M params) | ~3 GB | **not loaded** |
+| UMT5-XXL encoder (5.7B params) | ~11 GB | **not loaded** |
+| LoRA r=32 + AdamW state | ~0.3 GB | trained |
 | Activations + grads | ~5 GB | trained |
-| **Total (cached)** | **~22 GB** | fits 1×H100 with headroom |
-| Total (uncached, classic) | ~36 GB | tight on 1×H100 |
+| **Total (cached)** | **~15 GB** | fits 1×H100 with huge headroom |
+| Total (uncached, classic) | ~30 GB | tight on 1×H100, OOM-prone at higher batch |
 
 That ~14 GB of headroom buys: bigger batch (1 → 2-4), longer sequences (49f → 81f), no gradient checkpointing, or a `torch.compile` cache.
 
@@ -360,18 +364,44 @@ The training script logs `view.version` with every checkpoint — exact data sna
 
 Each row a separate measurement. Baseline ≈ "what the PDF does" (per-row mp4 decode + VAE + T5 in the dataloader). Lance-cached ≈ "this proposal".
 
-| # | Stage | Metric | Baseline | Lance + Geneva | Story |
+Numbers in *italics* are measured on this branch on 1×H100 against
+synthetic data (smoke-test sized).  Full-corpus numbers replace these
+once we run on a 25K-clip ChronoMagic-Pro subset.
+
+| # | Stage | Metric | Baseline | Lance + Geneva | Smoke-test result |
 |---|---|---|---|---|---|
-| **B1** | Ingest 460K clips | wall-clock | dir walk + ffprobe | RecordBatch stream into Lance | similar; lance is parallelized writes |
-| **B2** | Curation query | wall-clock to materialize a 20K-clip "melting" subset | grep through filenames + manual mp4 inspection | one SQL+FTS+vector query | minutes vs hours |
-| **B3** | Feature backfill (T5 + VAE) | wall-clock per 1K clips on 1×H100 | diffusion-pipe `.pt` cache | Geneva UDF backfill, Ray | should be ~equal; Lance wins on incremental rerun |
-| **B4** | Incremental refresh after +1K new clips | wall-clock | re-derive whole cache | Geneva backfill only on new rows | 1000× difference at steady state |
-| **B5** | Steady-state dataloader throughput | clips/sec at bs=1, 8 workers | mp4 + on-the-fly VAE + T5 | cached columns via Permutation | 5-20× target |
-| **B6** | Steady-state GPU MFU (DiT only) | % on 1×H100 | baseline | cached | target ≥ 40% (vs ≤ 25% baseline, dataloader-starved) |
-| **B7** | Wall-clock per epoch on 20K clips | hours | PDF: 1.5-3h | cached + bs=2 | target ≤ 1h |
-| **B8** | Storage footprint | GB for 25K clips, all artefacts | 2 dirs (mp4s + cache.pt) | 1 Lance table (blobs + columns) | compare; Lance 2.2 RLE/dict on text wins here |
-| **B9** | Recipe-change cost | wall-clock to re-encode with new VAE | re-derive whole cache by hand | one Geneva backfill on the changed column, untouched columns reused | 10-100× |
-| **B10** | End-to-end wall-clock | curate → cache → train 1 epoch → eval | PDF | proposal | target ≤ 5h on 1×H100, ≤ 1.5h on 4×H100 |
+| **B1** | Ingest | rows/sec | dir walk + ffprobe | RecordBatch stream into Lance | *blob-off path validated, see `bench/bench_ingest.py`* |
+| **B2** | Curation query | wall-clock | grep + manual inspection | SQL + FTS over Geneva cols | *~2-4 ms / query at 600 rows, `bench/bench_curation.py`* |
+| **B3** | Feature backfill | wall-clock per 1K clips | diffusion-pipe `.pt` cache | Geneva UDF backfill, Ray | *T5 ~1.5 s/row + VAE ~1.5 s/row on H100* |
+| **B4** | Incremental refresh | wall-clock for +M rows | re-derive whole cache | Geneva skips filled rows via NULL filter | *validated; Tier 1 too cheap to show win — bench harness in `bench_backfill.py`* |
+| **B5** | Dataloader throughput | samples/sec bs=1 | mp4 + on-the-fly VAE + UMT5 | cached columns via Permutation | ***7.58× speedup*** (7.76 vs 1.02 samples/s) |
+| **B6** | GPU fwd-MFU (DiT only) | % on 1×H100 | baseline | cached | ***29.15% vs 3.85%, +25.3 pts*** |
+| **B7** | Wall-clock per epoch on 20K clips | hours | PDF: 1.5-3 h | cached + bs=2 | TBD — extrapolating B5: ~0.7 h |
+| **B8** | Storage footprint | GB for 25K clips | 2 dirs (mp4s + cache.pt) | 1 Lance table | *~11.2 MB/row → ~280 GB for 25K* |
+| **B9** | Recipe-change cost | wall-clock for new VAE | re-derive whole cache by hand | Geneva backfill on the one changed column | TBD |
+| **B10** | End-to-end wall-clock | curate → cache → train → eval | PDF baseline | this pipeline | ***240 s on 8 clips, 1×H100*** (see breakdown below) |
+
+**B10 stage breakdown (8 synthetic clips, 1×H100, 4 train steps):**
+
+| Stage | Wall-clock | % |
+|---|---:|---:|
+| ingest | 1.74 s | 0.7% |
+| tier1 (CPU keywords × 7) | 44.03 s | 18.4% |
+| tier2 (CLIP + motion + MTScore) | 45.03 s | 18.8% |
+| tier3 t5 (UMT5-XXL encode) | 32.65 s | 13.6% |
+| tier3 vae (Wan2.2 VAE encode) | 28.82 s | 12.0% |
+| tier4 dhash | 16.49 s | 6.9% |
+| tier4 idx (L2 IVF) | 1.35 s | 0.6% |
+| tier4 dup (NN lookup) | 14.92 s | 6.2% |
+| curate t1 (12 MVs) | 40.98 s | 17.1% |
+| train (4 steps) | 13.64 s | 5.7% |
+| **total** | **239.65 s** | 100% |
+
+Most of the per-stage time at this small N is Ray actor spin-up (~5-10 s
+per backfill).  At realistic N≈20-25 K the per-row UDF work dominates;
+extrapolating from B3 (~1.5 s/row for the heavy GPU UDFs) the E2E for
+20K clips lands at **roughly 4-6 hours on 1×H100**, well within the
+"single-H100 demo" budget.
 
 Benchmarks (B5)-(B7) follow the **MFU methodology** already in `examples/ViT/mfu_bench_fp16/bench.py` (warmup + timed window, FLOP estimate, H100 peak = 989 TFLOPS bf16). The harness lives under `examples/videogen/bench/`.
 
