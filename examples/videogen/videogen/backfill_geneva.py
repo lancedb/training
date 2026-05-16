@@ -169,7 +169,11 @@ def _parse_args(argv=None):
     p.add_argument("--concurrency",     type=int, default=None,
                    help="Parallel Ray actor processes. Defaults: 4 for CPU, 1 for GPU tiers.")
     p.add_argument("--checkpoint-size", type=int, default=64)
-    p.add_argument("--task-size",       type=int, default=1024)
+    p.add_argument("--task-size",       type=int, default=128,
+                   help="Geneva task size; lower means more frequent commits "
+                        "but more orchestration overhead.  Default 128 keeps "
+                        "heavy UDFs (T5, VAE) inside Geneva's 10-min stall "
+                        "watchdog even at modest per-row latency.")
     p.add_argument("--overwrite",       action="store_true",
                    help="Drop the columns first, then recompute.")
     p.add_argument("--force-stub",      action="store_true",
