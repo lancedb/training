@@ -148,12 +148,37 @@ def save_checkpoint(
     train_view: str,
     extra: dict | None = None,
 ) -> None:
+    """Save the LoRA adapter in BOTH formats:
+
+      * ``adapter_model.safetensors`` (peft native)   — for resuming training
+      * ``pytorch_lora_weights.safetensors`` (diffusers convention)
+        — for inference via ``pipe.load_lora_weights(<this dir>)``.
+
+    The two formats differ only in key naming: peft writes
+    ``base_model.model.<...>``; diffusers expects ``transformer.<...>``.
+    We translate inline so a single checkpoint dir works both ways.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     step_dir = out_dir / f"step-{step:06d}"
     step_dir.mkdir(parents=True, exist_ok=True)
 
-    # PEFT exposes save_pretrained for the adapter only.
+    # 1. PEFT native (for resume).
     model.save_pretrained(step_dir)
+
+    # 2. Diffusers convention (for inference).
+    import safetensors.torch
+    adapter = safetensors.torch.load_file(step_dir / "adapter_model.safetensors")
+    renamed = {}
+    for k, v in adapter.items():
+        # peft → "base_model.model.<rest>"   ;   diffusers → "transformer.<rest>"
+        if k.startswith("base_model.model."):
+            new_k = "transformer." + k[len("base_model.model."):]
+        else:
+            new_k = k
+        renamed[new_k] = v
+    safetensors.torch.save_file(
+        renamed, step_dir / "pytorch_lora_weights.safetensors"
+    )
 
     meta = {
         "step": step,
