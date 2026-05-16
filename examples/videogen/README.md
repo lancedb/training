@@ -222,6 +222,8 @@ python -m videogen.backfill_geneva --columns is_duplicate --dedup-threshold 12
 
 ## Training
 
+### Single H100
+
 Once Tiers 1-3 are backfilled and the curated view is materialised:
 
 ```bash
@@ -238,6 +240,30 @@ On a single H100 the cached path is **7-8× faster** than the
 decode-and-encode-every-step baseline.  See
 [`bench/bench_dataloader.py`](bench/bench_dataloader.py) for the
 methodology and numbers.
+
+### Multi-GPU "big run" (4×H100 DDP)
+
+The trainer detects `LOCAL_RANK`/`WORLD_SIZE` and wraps the LoRA-adapted
+model in `DistributedDataParallel` automatically.  Launch via
+`torchrun` (or `accelerate launch`):
+
+```bash
+torchrun --standalone --nproc-per-node=4 \
+    -m videogen.train_wan22_lora \
+        --db data/videos/lancedb \
+        --train-view phase_transitions_curated_train \
+        --steps 4000 --batch-size 1 \
+        --rank 64 --alpha 64 --lr 1e-4 \
+        --num-workers 4 --prefetch-factor 4 \
+        --save-every 500 \
+        --output-dir checkpoints/wan22_lora_4gpu
+```
+
+Each rank reads a different shuffle of the cached columns (seeded by
+`--seed + rank`).  Gradients are all-reduced via NCCL; only rank 0
+writes checkpoints.  No extra Lance work is needed — the same
+materialised view is opened per worker, and Permutation handles
+random access in parallel.
 
 ## Evaluation
 

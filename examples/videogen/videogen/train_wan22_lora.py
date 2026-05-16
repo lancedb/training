@@ -179,25 +179,46 @@ def _infinite(loader: Iterable):
             yield batch
 
 
+def _setup_distributed() -> tuple[torch.device, int, int]:
+    """If launched via ``accelerate launch`` / ``torchrun``, init DDP and
+    return (device, rank, world_size).  Otherwise return defaults."""
+    import os
+    if "RANK" not in os.environ and "LOCAL_RANK" not in os.environ:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu"), 0, 1
+    if not torch.distributed.is_initialized():
+        torch.distributed.init_process_group(backend="nccl")
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    rank       = int(os.environ.get("RANK", 0))
+    world      = int(os.environ.get("WORLD_SIZE", 1))
+    torch.cuda.set_device(local_rank)
+    return torch.device(f"cuda:{local_rank}"), rank, world
+
+
 def run(args) -> None:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device, rank, world = _setup_distributed()
+    is_main = rank == 0
     dtype  = torch.bfloat16 if (device.type == "cuda"
-                                and torch.cuda.get_device_capability(0)[0] >= 8) else torch.float16
-    print(f"Device: {device}  dtype: {dtype}")
+                                and torch.cuda.get_device_capability(device)[0] >= 8) else torch.float16
+    if is_main:
+        print(f"Device: {device}  dtype: {dtype}  world_size={world}")
 
     # ---- Data --------------------------------------------------------------
     db = lancedb.connect(args.db)
     train_tbl = db.open_table(args.train_view)
     train_view_version = train_tbl.version
-    print(f"Train view '{args.train_view}'  rows={len(train_tbl)}  version={train_view_version}")
+    if is_main:
+        print(f"Train view '{args.train_view}'  rows={len(train_tbl)}  "
+              f"version={train_view_version}")
 
     loader = make_cached_loader(
         uri=args.db, table_name=args.train_view,
         batch_size=args.batch_size, num_workers=args.num_workers,
-        prefetch_factor=args.prefetch_factor, shuffle=True, seed=args.seed,
+        prefetch_factor=args.prefetch_factor, shuffle=True,
+        seed=args.seed + rank,  # different shuffle per rank
     )
-    print(f"  loader: bs={args.batch_size}  workers={args.num_workers}  "
-          f"prefetch={args.prefetch_factor}  steps/epoch≈{len(loader)}")
+    if is_main:
+        print(f"  loader: bs={args.batch_size}  workers={args.num_workers}  "
+              f"prefetch={args.prefetch_factor}  steps/epoch≈{len(loader)}")
 
     # ---- Model + LoRA ------------------------------------------------------
     model = build_transformer(dtype=dtype, device=device)
@@ -208,9 +229,18 @@ def run(args) -> None:
     if args.gradient_checkpointing:
         try:
             model.gradient_checkpointing_enable()
-            print("  gradient checkpointing enabled")
+            if is_main:
+                print("  gradient checkpointing enabled")
         except Exception as e:
-            print(f"  gradient checkpointing not available: {e}")
+            if is_main:
+                print(f"  gradient checkpointing not available: {e}")
+
+    if world > 1:
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        model = DDP(model, device_ids=[device.index],
+                    find_unused_parameters=False)
+        if is_main:
+            print(f"  wrapped in DDP across {world} ranks")
 
     # ---- Optimiser ---------------------------------------------------------
     trainable_params = [p for p in model.parameters() if p.requires_grad]
@@ -220,7 +250,8 @@ def run(args) -> None:
     )
 
     # ---- Train -------------------------------------------------------------
-    print(f"\n=== Training {args.steps} steps ===")
+    if is_main:
+        print(f"\n=== Training {args.steps} steps ===")
     iterator = _infinite(loader)
 
     losses: list[float] = []
@@ -237,7 +268,7 @@ def run(args) -> None:
         optimizer.step()
 
         losses.append(loss.item())
-        if step % args.log_every == 0 or step == 1:
+        if is_main and (step % args.log_every == 0 or step == 1):
             now = time.perf_counter()
             dt = now - last_log
             last_log = now
@@ -246,21 +277,35 @@ def run(args) -> None:
             print(f"  step {step:5d}/{args.steps}  loss {sum(recent)/len(recent):.4f}  "
                   f"({steps_per_sec:.2f} steps/s)")
 
-        should_save = step == args.steps or (args.save_every and step % args.save_every == 0)
+        should_save = is_main and (
+            step == args.steps or (args.save_every and step % args.save_every == 0)
+        )
         if should_save:
+            inner = model.module if hasattr(model, "module") else model
             save_checkpoint(
-                model, Path(args.output_dir),
+                inner, Path(args.output_dir),
                 step=step,
                 train_view_version=train_view_version,
                 db_path=args.db,
                 train_view=args.train_view,
-                extra={"recent_loss_mean": float(sum(losses[-20:]) / max(len(losses[-20:]), 1))},
+                extra={
+                    "recent_loss_mean": float(
+                        sum(losses[-20:]) / max(len(losses[-20:]), 1)
+                    ),
+                    "world_size": world,
+                },
             )
 
-    total = time.perf_counter() - t_train_start
-    print(f"\nDone — {args.steps} steps in {total:.1f}s "
-          f"({args.steps / total:.2f} steps/s, "
-          f"{args.steps * args.batch_size / total:.2f} samples/s)")
+    if world > 1 and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+        torch.distributed.destroy_process_group()
+
+    if is_main:
+        total = time.perf_counter() - t_train_start
+        per_step_global = args.steps * args.batch_size * world / total
+        print(f"\nDone — {args.steps} steps in {total:.1f}s "
+              f"({args.steps / total:.2f} steps/s/rank, "
+              f"global samples/s = {per_step_global:.2f})")
 
 
 # ---------------------------------------------------------------------------
