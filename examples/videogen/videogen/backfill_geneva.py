@@ -45,6 +45,7 @@ import geneva
 from videogen.geneva_udfs import (
     IMPLEMENTED_COLUMNS,
     TIER_UDFS,
+    _IsDuplicate,
 )
 
 
@@ -63,8 +64,18 @@ def _resolve_columns(columns: list[str] | None, tier: int | None) -> list[str]:
     return list(TIER_UDFS[1])
 
 
-def _udf_for(column: str) -> object | None:
-    """Find the UDF instance registered for ``column``."""
+def _udf_for(column: str, *,
+             db_path: str = DEFAULT_DB,
+             table_name: str = DEFAULT_TABLE,
+             dedup_threshold: int = 12) -> object | None:
+    """Find the UDF instance registered for ``column``.
+
+    ``is_duplicate`` is instantiated lazily here so it can pick up the
+    correct db path + threshold from the CLI.
+    """
+    if column == "is_duplicate":
+        return _IsDuplicate(db_path=db_path, table_name=table_name,
+                            hamming_threshold=dedup_threshold)
     for regs in TIER_UDFS.values():
         if column in regs:
             return regs[column]
@@ -81,6 +92,7 @@ def backfill(
     force_stub: bool,
     checkpoint_size: int = 64,
     task_size: int = 1024,
+    dedup_threshold: int = 12,
 ) -> None:
     skipped = [c for c in columns if c not in IMPLEMENTED_COLUMNS]
     if skipped and not force_stub:
@@ -114,7 +126,8 @@ def backfill(
     new_cols = {}
     for col in columns:
         if col not in existing:
-            udf_obj = _udf_for(col)
+            udf_obj = _udf_for(col, db_path=db_path, table_name=table_name,
+                               dedup_threshold=dedup_threshold)
             if udf_obj is None:
                 print(f"  [SKIP] no UDF registered for column '{col}'")
                 continue
@@ -125,7 +138,8 @@ def backfill(
 
     with conn.local_ray_context():
         for col in columns:
-            udf_obj = _udf_for(col)
+            udf_obj = _udf_for(col, db_path=db_path, table_name=table_name,
+                               dedup_threshold=dedup_threshold)
             if udf_obj is None:
                 continue
             print(f"  [backfill] {col} …")
@@ -160,6 +174,9 @@ def _parse_args(argv=None):
                    help="Drop the columns first, then recompute.")
     p.add_argument("--force-stub",      action="store_true",
                    help="Run UDFs that are still placeholder stubs (will crash on __call__).")
+    p.add_argument("--dedup-threshold", type=int, default=12,
+                   help="Hamming distance threshold for is_duplicate "
+                        "(only used when 'is_duplicate' is in --columns).")
     return p.parse_args(argv)
 
 
@@ -181,6 +198,7 @@ def main(argv=None) -> int:
         force_stub=args.force_stub,
         checkpoint_size=args.checkpoint_size,
         task_size=args.task_size,
+        dedup_threshold=args.dedup_threshold,
     )
     return 0
 

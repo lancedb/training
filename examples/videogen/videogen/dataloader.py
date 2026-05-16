@@ -152,14 +152,21 @@ def make_cached_loader(
 # ---------------------------------------------------------------------------
 
 def _raw_collate(batch: pa.RecordBatch):
-    # NOTE: video_bytes on a blob v2 column comes back as a `struct<position,size>`
-    # descriptor here, not the actual bytes — for the raw baseline you must
-    # fetch real bytes with ``ds.take_blobs(...)``.  This collate is therefore
-    # only useful as a benchmark scaffold; we will replace it with a real
-    # blob-aware variant in bench_dataloader.py.
+    """Raw path collate — returns the mp4 bytes plus captions.
+
+    When schema.BLOB_META is empty (the current default — see
+    KNOWN_ISSUES.md) ``video_bytes`` is a plain ``large_binary`` column
+    and we can read the bytes directly via ``to_pylist()``.  When the
+    blob flag is enabled the column comes back as a
+    ``struct<position, size>`` descriptor instead and the raw path will
+    need a ``ds.take_blobs(...)`` step.  Today's bench_dataloader.py
+    handles the bytes-direct case.
+    """
     captions = batch.column("caption").to_pylist()
-    return {"video_bytes_descriptor": batch.column("video_bytes"),
-            "captions":               captions}
+    bytes_arr = batch.column("video_bytes")
+    return {"video_bytes": bytes_arr.to_pylist(),
+            "video_bytes_descriptor": bytes_arr,  # back-compat for callers
+            "captions": captions}
 
 
 def make_raw_loader(

@@ -129,14 +129,18 @@ T5_HIDDEN  = 4096               # UMT5-XXL d_model
 VAE_LATENT_C = 48               # Wan2.2-VAE z_dim
 VAE_LATENT_T = 13               # 49 frames / temporal_compression
 VAE_LATENT_H = 30               # 480 / 16
-VAE_LATENT_W = 45               # 720 / 16
+VAE_LATENT_W = 44               # 704 / 16 — keeps both latent H, W even so
+                                # the transformer's patch_size=(1, 2, 2) divides
+                                # cleanly.  720 would give W=45 (odd) and the
+                                # patchifier drops the last column → output
+                                # shape mismatch at training time.
 
 # Reference clip shape that produced the latent shape above.  Tier-3
 # UDFs resize/sample to this before encoding so every row's vae_latent
 # is the same length.
 VAE_INPUT_FRAMES = 49
 VAE_INPUT_H      = 480
-VAE_INPUT_W      = 720
+VAE_INPUT_W      = 704
 
 T5_TOTAL  = T5_SEQ_LEN * T5_HIDDEN
 VAE_TOTAL = VAE_LATENT_C * VAE_LATENT_T * VAE_LATENT_H * VAE_LATENT_W

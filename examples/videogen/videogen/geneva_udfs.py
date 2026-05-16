@@ -528,20 +528,64 @@ TIER3_UDFS: dict[str, object] = {
 
 
 # ---------------------------------------------------------------------------
-# Tier 4 — dedup (GPU dHash on first+last frame, CPU NN lookup).  Stubs.
+# Tier 4 — video dedup.  First-frame and last-frame perceptual hash on GPU,
+# then a cheap CPU pass that flags rows whose nearest-neighbour Hamming
+# distance is below a threshold.  Storing first + last gives us a 128-bit
+# fingerprint that catches both "exact same clip" and "different clip of
+# the same scene" duplicates that a single-frame hash would miss.
 # ---------------------------------------------------------------------------
+
+
+def _dhash_8x8(image_tensor) -> "torch.Tensor":
+    """Compute a 64-bit dHash on a single (3, H, W) GPU tensor.
+
+    Returns a length-64 float tensor of 0.0/1.0 values (so L2² == Hamming).
+    """
+    import torch
+    import torch.nn.functional as F
+    # ITU-R BT.601 luma
+    luma = torch.tensor([0.299, 0.587, 0.114],
+                        device=image_tensor.device,
+                        dtype=image_tensor.dtype).view(3, 1, 1)
+    gray = (image_tensor * luma).sum(dim=0, keepdim=True)            # (1, H, W)
+    gray = F.interpolate(gray.unsqueeze(0), size=(8, 9), mode="bilinear",
+                         align_corners=False).squeeze(0).squeeze(0)   # (8, 9)
+    bits = (gray[:, :-1] > gray[:, 1:]).float()                       # (8, 8)
+    return bits.flatten()                                             # (64,)
+
 
 @udf(
     data_type=pa.list_(pa.float32(), DHASH_BITS),
     input_columns=["video_bytes"],
     num_gpus=1, num_cpus=1, cuda=True,
 )
-class _DHashFirstLast(_LazyGpuUdf):
-    """Stack first-frame + last-frame 64-bit dHashes for video dedup."""
+class _DHashFirstLast:
+    """Concat 64-bit dHash of the first and last frame → 128-bit fingerprint."""
+
+    def __init__(self) -> None:
+        self.device = None
+
+    def _load(self) -> None:
+        import torch
+        self.device = torch.device("cuda")
 
     def __call__(self, video_bytes: pa.Array) -> pa.Array:
+        import numpy as np
+        import torch
         self._load()
-        raise NotImplementedError("dHash UDF not yet wired up")
+
+        out: list[list[float]] = []
+        for b in video_bytes.to_pylist():
+            frames = _decode_evenly_spaced_frames(b or b"", 2)
+            if len(frames) < 2:
+                out.append(np.zeros(DHASH_BITS, dtype=np.float32).tolist())
+                continue
+            first_t = torch.from_numpy(np.asarray(frames[0])).to(self.device).float().permute(2, 0, 1) / 255.0
+            last_t  = torch.from_numpy(np.asarray(frames[1])).to(self.device).float().permute(2, 0, 1) / 255.0
+            h = torch.cat([_dhash_8x8(first_t), _dhash_8x8(last_t)])  # (128,)
+            out.append(h.cpu().float().tolist())
+        torch.cuda.empty_cache()
+        return pa.array(out, type=pa.list_(pa.float32(), DHASH_BITS))
 
 
 @udf(
@@ -549,8 +593,12 @@ class _DHashFirstLast(_LazyGpuUdf):
     input_columns=["clip_id", "dhash_first_last"],
 )
 class _IsDuplicate:
-    """For each row, the nearest non-self neighbour in dhash_first_last;
-    duplicate if Hamming distance ≤ threshold."""
+    """Flag duplicates by nearest-neighbour Hamming on ``dhash_first_last``.
+
+    For binary 0/1 vectors stored under L2 metric, ``_distance`` equals
+    the Hamming distance.  We do a per-row vector search excluding the row
+    itself and threshold the result.
+    """
 
     def __init__(self, db_path: str = "data/videos/lancedb",
                  table_name: str = "videos_raw",
@@ -560,8 +608,38 @@ class _IsDuplicate:
         self.hamming_threshold = hamming_threshold
         self._tbl = None
 
+    def _open(self):
+        if self._tbl is None:
+            import lancedb as _ldb
+            self._tbl = _ldb.connect(self.db_path).open_table(self.table_name)
+        return self._tbl
+
     def __call__(self, clip_id: pa.Array, dhash_first_last: pa.Array) -> pa.Array:
-        raise NotImplementedError("is_duplicate UDF not yet wired up")
+        tbl = self._open()
+        results = []
+        ids   = clip_id.to_pylist()
+        hashes = dhash_first_last.to_pylist()
+        for iid, h in zip(ids, hashes):
+            if h is None:
+                results.append(False)
+                continue
+            try:
+                hits = (
+                    tbl.search(h, vector_column_name="dhash_first_last")
+                    .metric("l2")
+                    .where(f"clip_id != '{iid}'")
+                    .limit(1)
+                    .to_arrow()
+                )
+            except Exception:
+                results.append(False)
+                continue
+            is_dup = (
+                len(hits) > 0
+                and float(hits["_distance"][0].as_py()) <= float(self.hamming_threshold)
+            )
+            results.append(bool(is_dup))
+        return pa.array(results, type=pa.bool_())
 
 
 TIER4_UDFS: dict[str, object] = {
@@ -586,4 +664,7 @@ TIER_UDFS: dict[int, dict[str, object]] = {
 # Explicit allowlist of *currently-implemented* UDF columns.  The backfill
 # orchestrator refuses to run anything outside this set unless the user
 # passes ``--force-stub``.  We extend this set as each tier comes online.
-IMPLEMENTED_COLUMNS: set[str] = set(TIER1_UDFS) | set(TIER2_UDFS) | set(TIER3_UDFS)
+IMPLEMENTED_COLUMNS: set[str] = (
+    set(TIER1_UDFS) | set(TIER2_UDFS) | set(TIER3_UDFS) | set(TIER4_UDFS)
+    | {"is_duplicate"}  # instantiated dynamically by backfill_geneva.py
+)

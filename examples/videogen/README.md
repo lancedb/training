@@ -6,13 +6,16 @@ from raw clips to high-MFU training.
 
 See [PROPOSAL.md](PROPOSAL.md) for the full design + benchmark plan.
 
-> Status: **Tier-1 (CPU) + Tier-2 (light GPU) + Tier-3 (heavy GPU) pipeline runnable end-to-end.**
+> Status: **Full pipeline runnable end-to-end on a single H100.**
+> Tier 1 = caption-derived flags (CPU).
 > Tier 2 = CLIP ViT-B/32 text + video embeddings, frame-absdiff motion score,
 > CLIP-based MTScore proxy.
 > Tier 3 = the **headline trick**: pre-tokenised UMT5-XXL hidden states and
 > pre-encoded Wan2.2-VAE latents stored as Lance columns; the training loop
 > reads only these and never loads the VAE or text encoder.
-> Tier 4 (dedup) is still scaffolded as stubs.  See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+> Tier 4 = perceptual-hash dedup (first/last frame dHash + Hamming NN flag).
+> The Wan2.2-TI2V-5B LoRA training loop trains from the cached columns
+> (no VAE / no UMT5 in the train process).  See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 ## Setup
 
@@ -183,13 +186,42 @@ PROPOSAL.md                Full design doc + benchmark plan
 KNOWN_ISSUES.md            Upstream regressions we're working around
 ```
 
+## Tier 4 — dedup quickstart
+
+```bash
+# 10) Tier 4 backfill — first+last frame dHash (GPU) → IVF L2 index → is_duplicate
+python -m videogen.backfill_geneva --columns dhash_first_last
+python - <<'PY'
+import lancedb
+tbl = lancedb.connect("data/videos/lancedb").open_table("videos_raw")
+tbl.create_index(metric="l2", vector_column_name="dhash_first_last",
+                 index_type="IVF_FLAT", num_partitions=8)
+PY
+python -m videogen.backfill_geneva --columns is_duplicate --dedup-threshold 12
+```
+
+## Training
+
+Once Tiers 1-3 are backfilled and the curated view is materialised:
+
+```bash
+python -m videogen.train_wan22_lora \
+    --db data/videos/lancedb \
+    --train-view phase_transitions_curated_train \
+    --steps 2000 --batch-size 1 \
+    --rank 32 --alpha 32 --lr 1e-4 \
+    --save-every 200 \
+    --output-dir checkpoints/wan22_lora
+```
+
+On a single H100 the cached path is **7-8× faster** than the
+decode-and-encode-every-step baseline.  See
+[`bench/bench_dataloader.py`](bench/bench_dataloader.py) for the
+methodology and numbers.
+
 ## What's not done yet
 
 These are tracked in `PROPOSAL.md §"Milestones"`:
 
-* Tier 4 Geneva UDF bodies — dHash (GPU) + is_duplicate (CPU NN lookup).
-* `train_wan22_lora.py` — Wan2.2 LoRA training loop reading from cached MVs.
-* `bench_dataloader.py` — B5/B6 clips/sec + GPU MFU.
-* `bench_backfill.py` — B3/B4 incremental backfill timings.
 * `bench_e2e.py` — B10 end-to-end wall-clock.
 * `eval_chronomagic.py` / `eval_vbench.py` — quantitative eval.
