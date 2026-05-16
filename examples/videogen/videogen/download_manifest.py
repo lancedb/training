@@ -39,9 +39,15 @@ def download(variant: str, out: Path) -> None:
     try:
         # Streaming-friendly path: the HF datasets library will pull the
         # auto-converted parquet and we materialise it locally.
-        from datasets import load_dataset
+        # ChronoMagic-Pro and -ProH publish their data under the "test"
+        # split despite the contents being a full training corpus —
+        # detect the split at runtime rather than hardcoding.
+        from datasets import get_dataset_split_names, load_dataset
 
-        ds = load_dataset(repo, split="train", streaming=True)
+        splits = get_dataset_split_names(repo)
+        split = "train" if "train" in splits else splits[0]
+        print(f"  using split '{split}' (available: {splits})")
+        ds = load_dataset(repo, split=split, streaming=True)
         import pyarrow as pa
         import pyarrow.parquet as pq
 

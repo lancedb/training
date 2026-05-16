@@ -370,8 +370,8 @@ once we run on a 25K-clip ChronoMagic-Pro subset.
 
 | # | Stage | Metric | Baseline | Lance + Geneva | Smoke-test result |
 |---|---|---|---|---|---|
-| **B1** | Ingest | rows/sec | dir walk + ffprobe | RecordBatch stream into Lance | *blob-off path validated, see `bench/bench_ingest.py`* |
-| **B2** | Curation query | wall-clock | grep + manual inspection | SQL + FTS over Geneva cols | *~2-4 ms / query at 600 rows, `bench/bench_curation.py`* |
+| **B1** | Ingest | rows/sec | dir walk + ffprobe | RecordBatch stream into Lance | *144,654-row ChronoMagic-ProH manifest ingested in **&lt;5 s** (no clips, captions only) via `videogen.ingest_chronomagic --manifest`.* |
+| **B2** | Curation query | wall-clock | grep + manual inspection | SQL + FTS over Geneva cols | *FTS index on 144K-row ChronoMagic-ProH built in **2.3 s**; per-query latency **12-25 ms** for 1000-hit limit; SQL count_rows on Tier-1 keyword: **1.85 ms** at 100 rows.  See `bench/bench_curation.py`.* |
 | **B3** | Feature backfill | wall-clock per 1K clips | diffusion-pipe `.pt` cache | Geneva UDF backfill, Ray | *T5 ~1.5 s/row + VAE ~1.5 s/row on H100* |
 | **B4** | Incremental refresh | wall-clock for +M rows | re-derive whole cache | Geneva skips filled rows via NULL filter | *validated; Tier 1 too cheap to show win — bench harness in `bench_backfill.py`* |
 | **B5** | Dataloader throughput | samples/sec bs=1 | mp4 + on-the-fly VAE + UMT5 | cached columns via Permutation | ***7.58× speedup*** (7.76 vs 1.02 samples/s) |
