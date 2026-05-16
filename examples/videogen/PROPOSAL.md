@@ -71,9 +71,8 @@ LanceDB collapses all of that into one columnar table where every artefact — r
 │                       │    metamorphic_score [f32]           MTScore proxy on first/last
 │                       │
 │                       │  Tier 3 — GPU, expensive  *** headline trick ***
-│                       │    t5_input_ids     [list<i32>[226]]  T5 tokenisation only
-│                       │    t5_hidden_states [list<f16>[226*4096]]  T5-XXL last hidden
-│                       │    vae_latent       [list<bf16>[16*13*60*90]]  Wan VAE encoded
+│                       │    t5_hidden_states [list<f16>[512*4096]]    UMT5-XXL last hidden
+│                       │    vae_latent       [list<f16>[48*13*30*44]] Wan2.2 VAE encoded
 │                       │
 │                       │  Tier 4 — GPU, dedup
 │                       │    dhash_first_last [list<f32>[128]]   2× 64-bit perceptual hash
@@ -188,11 +187,11 @@ With Lance + Geneva, each cache becomes a **column** on the same table:
 
 ```python
 @udf(
-    data_type=pa.list_(pa.float16(), 226 * 4096),
+    data_type=pa.list_(pa.float16(), 512 * 4096),
     input_columns=["caption"],
     num_gpus=1, num_cpus=1, cuda=True,
 )
-class T5HiddenStates:
+class UMT5HiddenStates:
     def __init__(self):
         self.tok = None
         self.model = None
@@ -201,11 +200,13 @@ class T5HiddenStates:
     def _load(self):
         if self.model is not None: return
         import torch
-        from transformers import T5EncoderModel, T5Tokenizer
+        from transformers import UMT5EncoderModel, T5TokenizerFast
         self.device = torch.device("cuda")
-        self.tok = T5Tokenizer.from_pretrained("google/t5-v1_1-xxl")
-        self.model = T5EncoderModel.from_pretrained(
-            "google/t5-v1_1-xxl", torch_dtype=torch.float16,
+        self.tok = T5TokenizerFast.from_pretrained(
+            "Wan-AI/Wan2.2-TI2V-5B-Diffusers", subfolder="tokenizer")
+        self.model = UMT5EncoderModel.from_pretrained(
+            "Wan-AI/Wan2.2-TI2V-5B-Diffusers", subfolder="text_encoder",
+            torch_dtype=torch.float16,
         ).eval().to(self.device)
 
     def __call__(self, caption: pa.Array) -> pa.Array:
@@ -213,15 +214,17 @@ class T5HiddenStates:
         self._load()
         toks = self.tok(
             caption.to_pylist(), padding="max_length", truncation=True,
-            max_length=226, return_tensors="pt",
+            max_length=512, return_tensors="pt",
         ).to(self.device)
         with torch.no_grad():
-            out = self.model(**toks).last_hidden_state  # (B, 226, 4096) fp16
+            out = self.model(**toks).last_hidden_state  # (B, 512, 4096) fp16
         flat = out.reshape(out.shape[0], -1).cpu().numpy().tolist()
-        return pa.array(flat, type=pa.list_(pa.float16(), 226 * 4096))
+        return pa.array(flat, type=pa.list_(pa.float16(), 512 * 4096))
 ```
 
-(Equivalent pattern for `vae_latent`, swapping in the Wan2.2 VAE.)
+The `vae_latent` UDF follows the same pattern — decode mp4 → sample 49
+frames @ 480×704 → Wan2.2 VAE encode → `(48, 13, 30, 44)` fp16 latent.
+See `videogen/geneva_udfs.py` for the live implementation.
 
 At train time the DataLoader **only** projects the columns it needs:
 
@@ -321,15 +324,15 @@ class WanCachedDataset(torch.utils.data.Dataset):
 
 def collate(batch):
     import numpy as np
-    # zero-copy reshape from the flat list columns
-    t5 = torch.frombuffer(
-        batch.column("t5_hidden_states").to_numpy(zero_copy_only=False).tobytes(),
-        dtype=torch.float16,
-    ).reshape(-1, 226, 4096)
-    lat = torch.frombuffer(
-        batch.column("vae_latent").to_numpy(zero_copy_only=False).tobytes(),
-        dtype=torch.bfloat16,
-    ).reshape(-1, 16, 13, 60, 90)
+    # reshape from the flat fixed_size_list columns into (B, ...) tensors
+    t5 = torch.from_numpy(
+        batch.column("t5_hidden_states").flatten().to_numpy(zero_copy_only=False)
+        .astype(np.float16, copy=True)
+    ).reshape(-1, 512, 4096)
+    lat = torch.from_numpy(
+        batch.column("vae_latent").flatten().to_numpy(zero_copy_only=False)
+        .astype(np.float16, copy=True)
+    ).reshape(-1, 48, 13, 30, 44)
     return {"prompt_embeds": t5, "vae_latent": lat}
 
 
