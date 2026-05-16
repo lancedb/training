@@ -17,6 +17,19 @@ See [PROPOSAL.md](PROPOSAL.md) for the full design + benchmark plan.
 > The Wan2.2-TI2V-5B LoRA training loop trains from the cached columns
 > (no VAE / no UMT5 in the train process).  See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
+## Headline numbers (smoke-test, 1×H100)
+
+|  | cached path (Lance) | raw path (mp4 + VAE + UMT5 in loop) | speedup |
+|---|---:|---:|---:|
+| samples/s (DiT fwd, bs=1) | **7.76** | 1.02 | **× 7.58** |
+| fwd-only TFLOPS | 288 | 38 | |
+| fwd-only MFU (H100 bf16) | **29.2%** | 3.85% | **+ 25.3 pts** |
+
+End-to-end (ingest → tier 1-4 → curate views → 4 train steps) on
+8 synthetic clips: **240 s on a single H100**.  See
+[`bench/bench_dataloader.py`](bench/bench_dataloader.py) and
+[`bench/bench_e2e.py`](bench/bench_e2e.py) for the methodology.
+
 ## Setup
 
 ```bash
@@ -167,7 +180,11 @@ videogen/                  Pipeline package
 ├── schema.py              Lance schema (per-tier field declarations)
 ├── ingest_chronomagic.py  Streaming ingest: synthetic / manifest / manifest+mp4
 ├── download_manifest.py   Pull just the HF caption parquet (no clips)
-├── geneva_udfs.py         Tier 1 (CPU keyword) + Tier 2 (CLIP/motion/MTScore) + Tier 3 (UMT5 + Wan-VAE) + Tier 4 stubs
+├── download_clips.py      yt-dlp helper to fetch ChronoMagic-Pro clips by id
+├── geneva_udfs.py         Tier 1 (CPU keyword) + Tier 2 (CLIP/motion/MTScore) + Tier 3 (UMT5 + Wan-VAE) + Tier 4 (dHash+dedup)
+├── train_wan22_lora.py    Wan2.2 LoRA trainer reading the cached path
+├── eval_chronomagic.py    MTScore-proxy evaluator (ChronoMagic-Bench-style)
+├── eval_vbench.py         VBench-dimension proxies (dynamic, consistency, smoothness)
 ├── backfill_geneva.py     Geneva backfill orchestrator (--tier, --columns)
 ├── manage_views.py        Materialised views per phase transition
 ├── dataloader.py          Permutation-based loaders (cached + raw paths)
@@ -177,7 +194,10 @@ videogen/                  Pipeline package
 bench/                     Benchmark harness — see PROPOSAL.md §"Benchmarks"
 ├── bench_ingest.py        B1  ingest rows/sec
 ├── bench_curation.py      B2  SQL+FTS query timings
-└── bench_storage.py       B8  on-disk footprint per table/view
+├── bench_backfill.py      B3 / B4  feature backfill + incremental
+├── bench_dataloader.py    B5 / B6  clips/sec + GPU fwd-MFU (cached vs raw)
+├── bench_storage.py       B8  on-disk footprint per table/view
+└── bench_e2e.py           B10  end-to-end wall-clock summary
 
 notebooks/
 └── eda_phase_transitions.ipynb   Curation EDA
@@ -219,9 +239,31 @@ decode-and-encode-every-step baseline.  See
 [`bench/bench_dataloader.py`](bench/bench_dataloader.py) for the
 methodology and numbers.
 
+## Evaluation
+
+```bash
+# ChronoMagic-Bench-style: generate clips, score MTScore-proxy
+python -m videogen.eval_chronomagic \
+    --checkpoint checkpoints/wan22_lora/step-002000 \
+    --n-prompts 8 --output results_mtscore.json
+
+# VBench-dimension proxies: dynamic_degree, subject_consistency,
+# temporal_smoothness
+python -m videogen.eval_vbench \
+    --checkpoint checkpoints/wan22_lora/step-002000 \
+    --n-prompts 4 --output results_vbench.json
+```
+
+Both eval scripts also work on the base model (omit `--checkpoint`) so
+you can compute the before/after delta yourself.
+
 ## What's not done yet
 
-These are tracked in `PROPOSAL.md §"Milestones"`:
+The pipeline + benchmarks are runnable end-to-end on a single H100.
+What remains is real-world validation against published numbers:
 
-* `bench_e2e.py` — B10 end-to-end wall-clock.
-* `eval_chronomagic.py` / `eval_vbench.py` — quantitative eval.
+* Run end-to-end on the actual 20-25 K-clip ChronoMagic-Pro slice
+  (requires `videogen.download_clips` against the manifest, ~hours).
+* Replace the MTScore-proxy in `eval_chronomagic.py` with the upstream
+  ChronoMagic-Bench prompts list and CLIPScore-based reference.
+* 4×H100 "big run" recipe — currently each script is single-GPU only.

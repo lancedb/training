@@ -111,7 +111,8 @@ def _flat_fp16_to_tensor(arr: pa.Array, dtype: torch.dtype, shape: tuple[int, ..
     np_dtype = np_dtype_map[dtype]
     # zero_copy_only=False because the FSL → flat numpy conversion does one
     # contiguous copy.  Still 10-100× cheaper than per-row decode + VAE.
-    flat = arr.flatten().to_numpy(zero_copy_only=False).astype(np_dtype, copy=False)
+    # ``copy=True`` forces a writable buffer so torch.from_numpy doesn't warn.
+    flat = arr.flatten().to_numpy(zero_copy_only=False).astype(np_dtype, copy=True)
     flat = flat.reshape((len(arr),) + shape)
     return torch.from_numpy(flat)
 
