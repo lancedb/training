@@ -92,21 +92,29 @@ uv pip install -e .
 
 ## Quickstart — real ChronoMagic data
 
+The base `ChronoMagic` HF dataset ships 2,265 mp4 clips + captions
+directly (no yt-dlp needed).  ~2.7 GB total.
+
 ```bash
-# 1) Pull the caption manifest (just videoids + captions, ~80 MB)
+# 1) Download + unzip clips + build manifest (~10 s on a fast link)
+python -m videogen.download_chronomagic \
+    --out data/clips --manifest data/chronomagic.parquet
+
+# 2) Run the whole pipeline (ingest → tier 1-4 → curate → 20 train steps)
+bash scripts/run_pipeline.sh
+```
+
+For the larger `ChronoMagic-Pro` / `-ProH` (which ships only YouTube
+ids — needs yt-dlp + is rate-limited):
+
+```bash
 python -m videogen.download_manifest --variant proh \
     --out data/chronomagic_proh.parquet
-
-# 2) Download clips via yt-dlp (best-effort; many YouTube ids are dead).
-#    Use --parallel for ~10× speedup; --filter-any narrows to phase-keywords.
 python -m videogen.download_clips \
     --manifest data/chronomagic_proh.parquet \
-    --out data/clips --parallel 12 \
-    --filter-any melt freez dissolv boil evapor liquef thaw vapor crystalliz condens \
+    --out data/clips --parallel 8 \
+    --filter-any melt freez dissolv boil evapor \
     --max-duration 60
-
-# 3) Run the whole pipeline (ingest → tier 1-4 → curate → 20 train steps)
-bash scripts/run_pipeline.sh
 ```
 
 ### Long-haul "few thousand clips" run
