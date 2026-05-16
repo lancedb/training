@@ -8,18 +8,18 @@ id into a YouTube watch URL and download a tight clip into
 age-gated) are logged and the script moves on; the rest of the pipeline
 treats missing files as "no video bytes for this row".
 
-This is intentionally a thin wrapper — yt-dlp has hundreds of knobs
-(quality, codec, retries, cookies); we expose the ones we care about
-for a curation-driven training run and leave the rest as yt-dlp
-defaults.
+Parallelism: ``--parallel N`` spawns N concurrent yt-dlp subprocesses via
+a thread pool.  Each subprocess is independent so the speedup scales
+near-linearly with N until you hit network or YouTube rate-limits
+(empirically 8-16 is a sweet spot on a single home IP).
 
 Usage
 -----
-# Pull 200 clips listed in the manifest into data/videos/raw/
+# 8-way parallel, ~80 attempts:
 python -m videogen.download_clips \\
     --manifest data/chronomagic_proh.parquet \\
-    --out      data/videos/raw \\
-    --limit 200 --quality 480
+    --out      data/clips \\
+    --filter melting --limit 80 --parallel 8
 
 # Restart-safe: already-downloaded ids are skipped.
 """
@@ -30,7 +30,9 @@ import argparse
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -56,6 +58,26 @@ def _is_videoid(s: str) -> bool:
     return len(s) >= 8 and "/" not in s and " " not in s
 
 
+def _attempt_one(yt_dlp: str, vid: str, target: Path,
+                 quality: int, max_duration: int) -> str:
+    """Download a single clip.  Returns 'ok' / 'skipped' / 'err'."""
+    if target.exists() and target.stat().st_size > 1024:
+        return "skipped"
+    url = f"https://www.youtube.com/watch?v={vid}"
+    try:
+        subprocess.run(
+            _yt_dlp_command(yt_dlp, url, target, quality, max_duration),
+            check=True, capture_output=True, timeout=120,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        if target.exists():
+            target.unlink(missing_ok=True)
+        return "err"
+    if target.exists() and target.stat().st_size > 1024:
+        return "ok"
+    return "err"
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--manifest", type=Path, required=True,
@@ -66,12 +88,19 @@ def main(argv=None) -> int:
                    help="Cap how many clips to attempt to download.")
     p.add_argument("--quality",  type=int, default=480,
                    help="Max video height to keep (default: 480p).")
-    p.add_argument("--max-duration", type=int, default=120,
+    p.add_argument("--max-duration", type=int, default=60,
                    help="Skip clips longer than this many seconds.")
     p.add_argument("--filter",   default=None,
-                   help="Optional SQL-ish filter on the manifest, e.g. "
-                        "\"caption like '%melting%'\".  Naïve string match, "
-                        "case-insensitive.")
+                   help="Optional caption-substring filter, case-insensitive. "
+                        "Pass --filter '' to skip filtering.")
+    p.add_argument("--filter-any", nargs="+", default=None,
+                   help="Multiple substring filters; rows match if ANY matches.")
+    p.add_argument("--shuffle", action="store_true",
+                   help="Shuffle manifest order before limiting.")
+    p.add_argument("--seed",    type=int, default=0,
+                   help="Shuffle seed.")
+    p.add_argument("--parallel", type=int, default=1,
+                   help="Concurrent yt-dlp workers (default: 1).")
     args = p.parse_args(argv)
 
     # Resolve yt-dlp executable — try PATH first, fall back to sibling of
@@ -97,48 +126,53 @@ def main(argv=None) -> int:
     ids = table.column(id_col).to_pylist()
     caps = table.column(cap_col).to_pylist() if cap_col else [None] * len(ids)
 
+    pairs = list(zip(ids, caps))
     if args.filter:
         needle = args.filter.lower()
-        pairs = [(i, c) for i, c in zip(ids, caps) if c and needle in c.lower()]
+        pairs = [(i, c) for i, c in pairs if c and needle in c.lower()]
         print(f"Filter '{args.filter}' kept {len(pairs)} / {len(ids)} rows")
-    else:
-        pairs = list(zip(ids, caps))
+    elif args.filter_any:
+        needles = [s.lower() for s in args.filter_any]
+        pairs = [(i, c) for i, c in pairs
+                 if c and any(n in c.lower() for n in needles)]
+        print(f"--filter-any {args.filter_any} kept {len(pairs)} / {len(ids)} rows")
+
+    if args.shuffle:
+        import random
+        rng = random.Random(args.seed)
+        rng.shuffle(pairs)
 
     if args.limit is not None:
         pairs = pairs[: args.limit]
-    print(f"Will attempt {len(pairs):,} downloads → {args.out}")
+    print(f"Will attempt {len(pairs):,} downloads → {args.out}  "
+          f"(parallel={args.parallel})")
 
-    n_ok = n_skipped = n_err = 0
+    counts = {"ok": 0, "skipped": 0, "err": 0}
+    counts_lock = threading.Lock()
     t0 = time.perf_counter()
-    for vid, cap in tqdm(pairs):
+
+    def _job(vid):
         if not _is_videoid(str(vid)):
-            n_err += 1
-            continue
-        target = args.out / f"{vid}.mp4"
-        if target.exists() and target.stat().st_size > 1024:
-            n_skipped += 1
-            continue
-        url = f"https://www.youtube.com/watch?v={vid}"
-        try:
-            subprocess.run(
-                _yt_dlp_command(yt_dlp, url, target, args.quality, args.max_duration),
-                check=True, capture_output=True, timeout=120,
-            )
-            if target.exists() and target.stat().st_size > 1024:
-                n_ok += 1
-            else:
-                n_err += 1
-        except subprocess.CalledProcessError:
-            n_err += 1
-        except subprocess.TimeoutExpired:
-            n_err += 1
-            if target.exists():
-                target.unlink(missing_ok=True)
+            return "err"
+        return _attempt_one(yt_dlp, str(vid), args.out / f"{vid}.mp4",
+                            args.quality, args.max_duration)
+
+    progress = tqdm(total=len(pairs), unit="clip")
+    with ThreadPoolExecutor(max_workers=max(1, args.parallel)) as ex:
+        futures = [ex.submit(_job, vid) for vid, _ in pairs]
+        for f in as_completed(futures):
+            status = f.result()
+            with counts_lock:
+                counts[status] += 1
+            progress.update(1)
+            progress.set_postfix(counts, refresh=False)
+    progress.close()
 
     dt = time.perf_counter() - t0
-    print(f"\n  ok={n_ok}  skipped={n_skipped}  err={n_err}  "
-          f"wall={dt:.1f}s  ({n_ok / max(dt, 1e-6):.2f} clips/s)")
-    return 0 if n_ok > 0 else 1
+    print(f"\n  ok={counts['ok']}  skipped={counts['skipped']}  "
+          f"err={counts['err']}  wall={dt:.1f}s  "
+          f"({counts['ok'] / max(dt, 1e-6):.2f} clips/s)")
+    return 0 if counts["ok"] > 0 else 1
 
 
 if __name__ == "__main__":

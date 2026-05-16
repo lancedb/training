@@ -98,17 +98,29 @@ python -m videogen.download_manifest --variant proh \
     --out data/chronomagic_proh.parquet
 
 # 2) Download clips via yt-dlp (best-effort; many YouTube ids are dead).
-#    Filter by caption keyword to grab only what curation needs.
-for kw in melting freezing dissolving boiling evaporating; do
-    python -m videogen.download_clips \
-        --manifest data/chronomagic_proh.parquet \
-        --out data/clips --filter "$kw" \
-        --limit 80 --quality 480 --max-duration 60
-done
+#    Use --parallel for ~10× speedup; --filter-any narrows to phase-keywords.
+python -m videogen.download_clips \
+    --manifest data/chronomagic_proh.parquet \
+    --out data/clips --parallel 12 \
+    --filter-any melt freez dissolv boil evapor liquef thaw vapor crystalliz condens \
+    --max-duration 60
 
 # 3) Run the whole pipeline (ingest → tier 1-4 → curate → 20 train steps)
 bash scripts/run_pipeline.sh
 ```
+
+### Long-haul "few thousand clips" run
+
+For an overnight run targeting a real fine-tune + side-by-side video
+output, use `run_overnight.sh`:
+
+```bash
+TARGET_CLIPS=2500 TRAIN_STEPS=4000 LORA_RANK=64 \
+    bash scripts/run_overnight.sh
+```
+
+It's restart-safe: each stage skips if its output already exists, so a
+mid-run crash just needs `bash scripts/run_overnight.sh` to resume.
 
 Stop at any stage:
 
