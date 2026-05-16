@@ -17,22 +17,67 @@ See [PROPOSAL.md](PROPOSAL.md) for the full design + benchmark plan.
 > The Wan2.2-TI2V-5B LoRA training loop trains from the cached columns
 > (no VAE / no UMT5 in the train process).  See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
-## Headline numbers (1×H100)
+## Headline numbers (1×H100, **real ChronoMagic-ProH clips**)
 
-**Dataloader (forward-only, see [`bench/bench_dataloader.py`](bench/bench_dataloader.py)):**
+**Dataloader — forward-only, 25 real clips, bs=1, num_workers=0**
+([`bench/bench_dataloader.py`](bench/bench_dataloader.py))
 
-|  | cached path (Lance) | raw path (mp4 + VAE + UMT5 in loop) | speedup |
+|  | cached (Lance) | raw (mp4 + VAE + UMT5 in loop) | speedup |
 |---|---:|---:|---:|
-| samples/s (DiT fwd, bs=1) | **7.76** | 1.02 | **× 7.58** |
-| fwd-only TFLOPS | 288 | 38 | |
-| fwd-only MFU (H100 bf16) | **29.2%** | 3.85% | **+ 25.3 pts** |
+| samples/s (DiT fwd) | **7.63** | 0.82 | **× 9.36** |
+| fwd-only TFLOPS | 283 | 30 | |
+| fwd-only MFU (H100 bf16) | **28.7 %** | 3.06 % | **+ 25.6 pts** |
 
-**Curation (real data — ChronoMagic-ProH, 144,654 captions):**
+**Training step — full fwd + bwd + AdamW, 25 real clips, LoRA r=16**
+([`bench/bench_train_step.py`](bench/bench_train_step.py))
+
+|  | cached (Lance) | raw (decode + VAE + UMT5 in loop) | speedup |
+|---|---:|---:|---:|
+| samples/s (train step) | **2.51** | 0.68 | **× 3.68** |
+| train-step TFLOPS | 279 | 76 | |
+| train-step MFU | **28.2 %** | 7.7 % | **+ 20.6 pts** |
+| VRAM peak | **36.5 GB** | 52.9 GB | **−16.4 GB** |
+
+The VRAM saving is the headline: with the cached path, VAE (~3 GB) and
+UMT5 (~11 GB) are not loaded.  The freed memory lets us use a bigger
+batch or a higher LoRA rank.
+
+**End-to-end real-data run, 1×H100**
+
+```
+ingest 25 ChronoMagic-ProH clips        <  5 s
+Tier 1 backfill   (7 cols, CPU)         44 s
+Tier 2 backfill   (CLIP + motion + MT)  ~1 min
+Tier 3 UMT5       (25/25 captions)      37 s    ← cached prompt embeds
+Tier 3 Wan-VAE    (25/25 clips)        ~2 min   ← cached video latents
+LoRA train, 200 steps, r=32             85 s    (2.35 steps/s)
+eval_compare, 4 prompts × 20 steps      ~3 min
+```
+
+**Before/after on the same 4 prompts (after 200 LoRA steps on 25 melting clips)**
+
+```
+metric                     baseline    fine-tuned          Δ
+mtscore_proxy                0.1213        0.0745    -0.0469
+dynamic_degree               0.0077        0.0121    +0.0044
+subject_consistency          0.9867        0.9831    -0.0036
+temporal_smoothness          0.9996        0.9997    +0.0001
+```
+
+200 steps on 25 clips is a deliberate *minimal* run.  It moves
+`dynamic_degree` up (more motion in outputs) but the LoRA shifts the
+model toward calmer, less-metamorphic generations — `mtscore_proxy`
+drops.  Reading honestly: this is what under-training a 5 B-param model
+on a tiny corpus looks like.  Full-corpus runs (~25 K clips, several
+thousand steps) are the natural next step; the infrastructure now
+supports that drop-in.
+
+**Curation latency — real 144,654-row ChronoMagic-ProH captions**
 
 |  | Lance + Geneva |
 |---|---:|
 | Manifest ingest into Lance | **< 5 s** |
-| Tier-1 backfill (caption_length + 5 keyword flags + any-phase) | **~ 1 min** |
+| Tier-1 backfill (7 caption-derived cols) | **~ 1 min** |
 | FTS index build on `caption` | **2.3 s** |
 | FTS query latency (1000-hit limit) | **12-25 ms** |
 | CLIP text→video vector search latency | **4-23 ms** |

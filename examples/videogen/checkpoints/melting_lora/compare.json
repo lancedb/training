@@ -1,0 +1,94 @@
+{
+  "model_id": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+  "checkpoint": "checkpoints/melting_lora/step-000200",
+  "summary": {
+    "mtscore_proxy": {
+      "baseline": 0.12130725383758545,
+      "fine_tuned": 0.07445842027664185,
+      "delta": -0.046848833560943604
+    },
+    "dynamic_degree": {
+      "baseline": 0.007706585340201855,
+      "fine_tuned": 0.012079477950464934,
+      "delta": 0.004372892610263079
+    },
+    "subject_consistency": {
+      "baseline": 0.9866709262132645,
+      "fine_tuned": 0.9831107407808304,
+      "delta": -0.003560185432434082
+    },
+    "temporal_smoothness": {
+      "baseline": 0.9996211481952599,
+      "fine_tuned": 0.9996748804434219,
+      "delta": 5.373224816196398e-05
+    }
+  },
+  "baseline": [
+    {
+      "wall_clock_s": 8.516919590998441,
+      "mtscore_proxy": 0.13629460334777832,
+      "dynamic_degree": 0.011509859003126621,
+      "subject_consistency": 0.9726402759552002,
+      "temporal_smoothness": 0.9993657741579227,
+      "prompt": "An ice cube slowly melting into water on a warm sunny day."
+    },
+    {
+      "wall_clock_s": 7.199976589996368,
+      "mtscore_proxy": 0.07426184415817261,
+      "dynamic_degree": 0.012195450253784657,
+      "subject_consistency": 0.9932860136032104,
+      "temporal_smoothness": 0.9999712379503762,
+      "prompt": "Butter melting in a hot pan, golden bubbles forming as it browns."
+    },
+    {
+      "wall_clock_s": 7.204530839982908,
+      "mtscore_proxy": 0.26859354972839355,
+      "dynamic_degree": 0.0058759842067956924,
+      "subject_consistency": 0.9812300205230713,
+      "temporal_smoothness": 0.9991477988660336,
+      "prompt": "Hot wax dripping down the side of a candle, pooling at the base."
+    },
+    {
+      "wall_clock_s": 7.206437334010843,
+      "mtscore_proxy": 0.0060790181159973145,
+      "dynamic_degree": 0.0012450478971004486,
+      "subject_consistency": 0.9995273947715759,
+      "temporal_smoothness": 0.9999997818067072,
+      "prompt": "Snow on a black rooftop melting away as the morning sun rises."
+    }
+  ],
+  "fine_tuned": [
+    {
+      "wall_clock_s": 7.976793017995078,
+      "mtscore_proxy": 0.04031187295913696,
+      "dynamic_degree": 0.0022800310980528593,
+      "subject_consistency": 0.99579256772995,
+      "temporal_smoothness": 0.9999931920660856,
+      "prompt": "An ice cube slowly melting into water on a warm sunny day."
+    },
+    {
+      "wall_clock_s": 7.900976545002777,
+      "mtscore_proxy": 0.07467198371887207,
+      "dynamic_degree": 0.019040213897824287,
+      "subject_consistency": 0.9694041013717651,
+      "temporal_smoothness": 0.9992646962055005,
+      "prompt": "Butter melting in a hot pan, golden bubbles forming as it browns."
+    },
+    {
+      "wall_clock_s": 7.900407379027456,
+      "mtscore_proxy": 0.09878617525100708,
+      "dynamic_degree": 0.009985098615288734,
+      "subject_consistency": 0.9713230133056641,
+      "temporal_smoothness": 0.9994547034730203,
+      "prompt": "Hot wax dripping down the side of a candle, pooling at the base."
+    },
+    {
+      "wall_clock_s": 7.90256977599347,
+      "mtscore_proxy": 0.08406364917755127,
+      "dynamic_degree": 0.017012568190693855,
+      "subject_consistency": 0.9959232807159424,
+      "temporal_smoothness": 0.9999869300290811,
+      "prompt": "Snow on a black rooftop melting away as the morning sun rises."
+    }
+  ]
+}
