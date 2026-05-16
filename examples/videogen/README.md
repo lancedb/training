@@ -17,13 +17,25 @@ See [PROPOSAL.md](PROPOSAL.md) for the full design + benchmark plan.
 > The Wan2.2-TI2V-5B LoRA training loop trains from the cached columns
 > (no VAE / no UMT5 in the train process).  See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
-## Headline numbers (smoke-test, 1×H100)
+## Headline numbers (1×H100)
+
+**Dataloader / training (smoke-test, synthetic clips):**
 
 |  | cached path (Lance) | raw path (mp4 + VAE + UMT5 in loop) | speedup |
 |---|---:|---:|---:|
 | samples/s (DiT fwd, bs=1) | **7.76** | 1.02 | **× 7.58** |
 | fwd-only TFLOPS | 288 | 38 | |
 | fwd-only MFU (H100 bf16) | **29.2%** | 3.85% | **+ 25.3 pts** |
+
+**Curation (real data — ChronoMagic-ProH, 144,654 captions):**
+
+|  | Lance + Geneva |
+|---|---:|
+| Manifest ingest into Lance | **< 5 s** |
+| Tier-1 backfill (caption_length + 5 keyword flags + any-phase) | **~ 1 min** |
+| FTS index build on `caption` | **2.3 s** |
+| FTS query latency (1000-hit limit) | **12-25 ms** |
+| CLIP text→video vector search latency (1K rows) | **4-23 ms** |
 
 End-to-end (ingest → tier 1-4 → curate views → 4 train steps) on
 8 synthetic clips: **240 s on a single H100**.  See
