@@ -457,11 +457,15 @@ class _T5HiddenStates:
         with torch.no_grad():
             h = self.encoder(**toks).last_hidden_state  # (B, 512, 4096) fp16
 
-        # Flatten per-row to a python list-of-lists; pa builds a
-        # fixed_size_list<float16>[T5_TOTAL] cleanly from this.
-        flat = h.reshape(h.shape[0], -1).cpu().numpy().astype(np.float16)
+        # Build the PyArrow FixedSizeListArray directly from the flat
+        # numpy buffer.  Going through ``flat.tolist() → pa.array(...)``
+        # is 100-1000× slower at this scale because it materialises
+        # B * T5_TOTAL = ~134 M Python floats per batch.
+        flat_np = h.reshape(-1).cpu().numpy().astype(np.float16, copy=False)
         torch.cuda.empty_cache()
-        return pa.array(flat.tolist(), type=pa.list_(pa.float16(), T5_TOTAL))
+        return pa.FixedSizeListArray.from_arrays(
+            pa.array(flat_np, type=pa.float16()), T5_TOTAL,
+        )
 
 
 @udf(
@@ -505,40 +509,46 @@ class _VaeLatent:
         from PIL import Image
         self._load()
 
-        results: list[list[float]] = []
+        # Concatenate every row's flat latent into one big buffer so we
+        # can build the PyArrow FixedSizeListArray in O(1) Python calls
+        # rather than one tolist() per row.
+        chunks: list[np.ndarray] = []
         for b in video_bytes.to_pylist():
             frames = _decode_evenly_spaced_frames(b or b"", VAE_INPUT_FRAMES)
             if len(frames) < VAE_INPUT_FRAMES:
-                # Pad by replicating the last frame so we always emit a
-                # fixed-size latent.  In production we'd skip these rows
-                # via curation, but the column has to be NOT NULL here.
                 if not frames:
-                    results.append(np.zeros(VAE_TOTAL, dtype=np.float16).tolist())
+                    # malformed clip — emit zero latent
+                    chunks.append(np.zeros(VAE_TOTAL, dtype=np.float16))
                     continue
+                # Pad by replicating the last frame so we always emit a
+                # fixed-size latent.  Curation can drop these rows later.
                 while len(frames) < VAE_INPUT_FRAMES:
                     frames.append(frames[-1])
 
-            # Resize + stack → (T, H, W, 3) uint8 → (1, 3, T, H, W) fp32 in [-1, 1]
+            # Resize + stack → (T,H,W,3) uint8 → (1,3,T,H,W) fp32 in [-1, 1]
             resized = [
                 np.asarray(im.resize((VAE_INPUT_W, VAE_INPUT_H), Image.BICUBIC))
                 for im in frames
             ]
-            arr = np.stack(resized, axis=0)                              # (T,H,W,3)
+            arr = np.stack(resized, axis=0)                               # (T,H,W,3)
             t = torch.from_numpy(arr).to(self.device).float().div(127.5).sub(1.0)
-            t = t.permute(3, 0, 1, 2).unsqueeze(0).contiguous()           # (1,3,T,H,W)
+            t = t.permute(3, 0, 1, 2).unsqueeze(0).contiguous()            # (1,3,T,H,W)
 
             with torch.no_grad():
                 enc = self.vae.encode(t)
                 lat = enc.latent_dist.sample() if hasattr(enc, "latent_dist") else enc.latents
-            # Sanity guard: ensure shape matches the schema constants.
             assert lat.shape == (1, VAE_LATENT_C, VAE_LATENT_T,
                                  VAE_LATENT_H, VAE_LATENT_W), \
                 f"Unexpected latent shape {tuple(lat.shape)}"
-            flat = lat.squeeze(0).reshape(-1).cpu().numpy().astype(np.float16)
-            results.append(flat.tolist())
+            chunks.append(
+                lat.squeeze(0).reshape(-1).cpu().numpy().astype(np.float16, copy=False)
+            )
 
         torch.cuda.empty_cache()
-        return pa.array(results, type=pa.list_(pa.float16(), VAE_TOTAL))
+        flat_np = np.concatenate(chunks) if chunks else np.empty(0, dtype=np.float16)
+        return pa.FixedSizeListArray.from_arrays(
+            pa.array(flat_np, type=pa.float16()), VAE_TOTAL,
+        )
 
 
 TIER3_UDFS: dict[str, object] = {
