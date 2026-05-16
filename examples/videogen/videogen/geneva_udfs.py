@@ -109,18 +109,259 @@ TIER1_UDFS: dict[str, object] = {
 
 
 # ---------------------------------------------------------------------------
-# Tier 2 — light GPU (CLIP text/video, RAFT motion, MTScore).  Stubs.
+# Tier 2 — light GPU (CLIP text/video, motion, MTScore)
 # ---------------------------------------------------------------------------
 #
-# All Tier 2/3/4 UDFs are written as stateful class UDFs:
-#   __init__ runs on the driver — keep cheap, no model load
-#   _load()  runs lazily on first __call__ on a worker — loads the model
-#   __call__ runs on the worker for every batch
+# Class-based UDFs:
+#   __init__ runs on the driver — keep cheap, no model load.
+#   _load()  runs lazily on first __call__ on a worker — loads the model.
+#   __call__ runs on the worker for every batch — one CUDA forward pass.
 #
-# At the moment the worker bodies raise NotImplementedError so the backfill
-# orchestrator can register the columns + check the wiring, but won't
-# actually consume GPU until we fill them in.
+# Three of the four UDFs use CLIP ViT-B/32 (text, video frames, first/last
+# pair).  Geneva launches a separate Ray actor per backfill job so each
+# job loads CLIP once and reuses it for every batch — but the three
+# CLIP-using jobs do load CLIP independently of each other.  ~150 MB on
+# the H100, trivially cheap; not worth optimising further.
+#
+# ``motion_strength`` is CPU-only — it's a frame-absdiff scalar that needs
+# no model, so it can backfill in parallel with the GPU UDFs.
 
+
+# Shared helpers ------------------------------------------------------------
+
+def _decode_evenly_spaced_frames(video_bytes: bytes, n: int) -> list:
+    """Decode ``n`` evenly-spaced RGB frames from an MP4 byte string.
+
+    Returns a list of PIL Images (one per sampled frame).  ``n`` includes
+    both endpoints — for example ``n=8`` returns frames 0, 1/7, 2/7, …, 1.
+
+    If decoding fails we return an empty list; callers must handle that.
+    """
+    import io
+    import av
+    from PIL import Image
+
+    try:
+        container = av.open(io.BytesIO(video_bytes))
+    except Exception:
+        return []
+    stream = container.streams.video[0]
+    total = stream.frames or 0
+    # Some containers (e.g. fragmented MP4) report 0 frames; fall back to
+    # an unbounded decode and pick frames opportunistically.
+    if total <= 0:
+        frames = [f.to_image() for f in container.decode(video=0)]
+        container.close()
+        if not frames:
+            return []
+        if len(frames) <= n:
+            return frames
+        idx = [round(i * (len(frames) - 1) / (n - 1)) for i in range(n)]
+        return [frames[i] for i in idx]
+
+    targets = sorted({round(i * (total - 1) / max(n - 1, 1)) for i in range(n)})
+    out = []
+    target_set = set(targets)
+    for j, frame in enumerate(container.decode(video=0)):
+        if j in target_set:
+            out.append(frame.to_image())
+            if len(out) >= n:
+                break
+    container.close()
+    return out
+
+
+class _ClipBase:
+    """Shared CLIP ViT-B/32 lifecycle (driver-cheap, worker-lazy)."""
+
+    def __init__(self) -> None:
+        self.model = None
+        self.preprocess = None
+        self.tokenizer = None
+        self.device: Optional["torch.device"] = None  # noqa: F821
+
+    def _load(self) -> None:
+        if self.model is not None:
+            return
+        import open_clip
+        import torch
+        self.device = torch.device("cuda")
+        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+            "ViT-B-32", pretrained="openai", device=self.device,
+        )
+        self.model.eval()
+        self.tokenizer = open_clip.get_tokenizer("ViT-B-32")
+
+
+# 1. clip_emb_text ----------------------------------------------------------
+
+@udf(
+    data_type=pa.list_(pa.float32(), 512),
+    input_columns=["caption"],
+    num_gpus=1, num_cpus=1, cuda=True,
+)
+class _ClipEmbText(_ClipBase):
+    """CLIP ViT-B/32 text encoder → 512-d L2-normalised float32."""
+
+    def __call__(self, caption: pa.Array) -> pa.Array:
+        import torch
+        self._load()
+        # Empty / None captions get a zero vector — keeps the column NOT NULL.
+        texts = [c if c else " " for c in caption.to_pylist()]
+        toks = self.tokenizer(texts).to(self.device)
+        with torch.no_grad():
+            emb = self.model.encode_text(toks)
+            emb = emb / emb.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        torch.cuda.empty_cache()
+        return pa.array(emb.cpu().float().tolist(), type=pa.list_(pa.float32(), 512))
+
+
+# 2. clip_emb_video ---------------------------------------------------------
+
+_VIDEO_FRAMES_PER_CLIP = 8  # evenly-spaced sample for the video embedding
+
+
+@udf(
+    data_type=pa.list_(pa.float32(), 512),
+    input_columns=["video_bytes"],
+    num_gpus=1, num_cpus=1, cuda=True,
+)
+class _ClipEmbVideo(_ClipBase):
+    """Mean-pooled CLIP ViT-B/32 image embedding over evenly-spaced frames.
+
+    Decoded on CPU via pyav, batched onto GPU for one CLIP forward per
+    Geneva batch.  Returns the L2-normalised mean embedding per video.
+    """
+
+    def __call__(self, video_bytes: pa.Array) -> pa.Array:
+        import torch
+        self._load()
+
+        per_video_frames: list[list] = []
+        for b in video_bytes.to_pylist():
+            frames = _decode_evenly_spaced_frames(b or b"", _VIDEO_FRAMES_PER_CLIP)
+            per_video_frames.append(frames)
+
+        # Flatten and remember offsets so we can mean-pool back.
+        flat = []
+        slices: list[tuple[int, int]] = []
+        for frames in per_video_frames:
+            start = len(flat)
+            flat.extend(frames)
+            slices.append((start, len(flat)))
+
+        if flat:
+            tensors = torch.stack([self.preprocess(im) for im in flat]).to(self.device)
+            with torch.no_grad():
+                emb = self.model.encode_image(tensors)
+                emb = emb / emb.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        else:
+            emb = torch.zeros((0, 512), device=self.device)
+
+        outputs = []
+        for (a, b) in slices:
+            if b > a:
+                v = emb[a:b].mean(dim=0)
+                v = v / v.norm().clamp_min(1e-12)
+            else:
+                # No frames decoded — fall back to a zero vector.
+                v = torch.zeros(512, device=self.device)
+            outputs.append(v.cpu().float().tolist())
+        torch.cuda.empty_cache()
+        return pa.array(outputs, type=pa.list_(pa.float32(), 512))
+
+
+# 3. motion_strength --------------------------------------------------------
+#
+# A pre-encoded video's "is something actually moving" signal.  We do NOT
+# need RAFT for this — the per-pixel L1 difference between evenly-spaced
+# frames is a robust enough proxy for curation (filter out static
+# still-life clips, slow zoom-ins on a single object, etc.).
+
+_MOTION_FRAMES = 6  # evenly-spaced for the absdiff average
+
+
+@udf(
+    data_type=pa.float32(),
+    input_columns=["video_bytes"],
+    num_cpus=2, num_gpus=0, cuda=False,
+)
+def motion_strength(video_bytes: bytes) -> float:
+    """Mean per-pixel L1 difference between consecutive sampled frames, on a
+    0-100 scale (255 → 100).  Higher = more motion."""
+    import numpy as np
+    frames = _decode_evenly_spaced_frames(video_bytes or b"", _MOTION_FRAMES)
+    if len(frames) < 2:
+        return 0.0
+    arrs = [np.asarray(f, dtype=np.float32) for f in frames]
+    diffs = [
+        np.mean(np.abs(arrs[i + 1] - arrs[i]))
+        for i in range(len(arrs) - 1)
+    ]
+    return float(np.mean(diffs) / 255.0 * 100.0)
+
+
+# 4. metamorphic_score ------------------------------------------------------
+#
+# Proxy for ChronoMagic-Bench's MTScore: how visually different is the
+# first frame from the last frame?  A static scene has MTScore ≈ 0; a
+# time-lapse with a real phase transition has MTScore > 0.5 ish.
+
+@udf(
+    data_type=pa.float32(),
+    input_columns=["video_bytes"],
+    num_gpus=1, num_cpus=1, cuda=True,
+)
+class _MetamorphicScore(_ClipBase):
+    """MTScore proxy: ``1 - cos(CLIP(first), CLIP(last))`` per video."""
+
+    def __call__(self, video_bytes: pa.Array) -> pa.Array:
+        import torch
+        self._load()
+
+        per_video: list[tuple[object, object]] = []
+        for b in video_bytes.to_pylist():
+            frames = _decode_evenly_spaced_frames(b or b"", 2)
+            if len(frames) == 2:
+                per_video.append((frames[0], frames[1]))
+            else:
+                per_video.append((None, None))
+
+        flat = []
+        for f0, f1 in per_video:
+            if f0 is not None:
+                flat.extend([f0, f1])
+
+        if flat:
+            tensors = torch.stack([self.preprocess(im) for im in flat]).to(self.device)
+            with torch.no_grad():
+                emb = self.model.encode_image(tensors)
+                emb = emb / emb.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        else:
+            emb = torch.zeros((0, 512), device=self.device)
+
+        outputs = []
+        cur = 0
+        for f0, _ in per_video:
+            if f0 is None:
+                outputs.append(0.0)
+                continue
+            cos = (emb[cur] * emb[cur + 1]).sum().item()
+            outputs.append(float(max(0.0, 1.0 - cos)))
+            cur += 2
+        torch.cuda.empty_cache()
+        return pa.array(outputs, type=pa.float32())
+
+
+TIER2_UDFS: dict[str, object] = {
+    "clip_emb_text":     _ClipEmbText(),
+    "clip_emb_video":    _ClipEmbVideo(),
+    "motion_strength":   motion_strength,
+    "metamorphic_score": _MetamorphicScore(),
+}
+
+
+# A placeholder kept for Tier 3/4 stubs below — they still raise.
 class _LazyGpuUdf:
     """Skeleton: stash device + model in lazy ``_load()``, do nothing else."""
 
@@ -130,66 +371,6 @@ class _LazyGpuUdf:
 
     def _load(self) -> None:  # pragma: no cover — overridden by subclasses
         raise NotImplementedError("GPU body not yet implemented — see PROPOSAL.md")
-
-
-@udf(
-    data_type=pa.list_(pa.float32(), 512),
-    input_columns=["caption"],
-    num_gpus=1, num_cpus=1, cuda=True,
-)
-class _ClipEmbText(_LazyGpuUdf):
-    """CLIP ViT-B/32 text encoder → 512-d L2-normalised float32."""
-
-    def __call__(self, caption: pa.Array) -> pa.Array:
-        self._load()
-        raise NotImplementedError("CLIP text encoder not yet wired up")
-
-
-@udf(
-    data_type=pa.list_(pa.float32(), 512),
-    input_columns=["video_bytes", "n_frames"],
-    num_gpus=1, num_cpus=1, cuda=True,
-)
-class _ClipEmbVideo(_LazyGpuUdf):
-    """CLIP ViT-B/32 image encoder over evenly-spaced frames → mean-pooled 512-d."""
-
-    def __call__(self, video_bytes: pa.Array, n_frames: pa.Array) -> pa.Array:
-        self._load()
-        raise NotImplementedError("CLIP video encoder not yet wired up")
-
-
-@udf(
-    data_type=pa.float32(),
-    input_columns=["video_bytes"],
-    num_gpus=1, num_cpus=1, cuda=True,
-)
-class _MotionStrength(_LazyGpuUdf):
-    """Mean RAFT optical-flow magnitude across central triplet of frames."""
-
-    def __call__(self, video_bytes: pa.Array) -> pa.Array:
-        self._load()
-        raise NotImplementedError("RAFT motion UDF not yet wired up")
-
-
-@udf(
-    data_type=pa.float32(),
-    input_columns=["video_bytes"],
-    num_gpus=1, num_cpus=1, cuda=True,
-)
-class _MetamorphicScore(_LazyGpuUdf):
-    """MTScore proxy: 1 - cos(CLIP(first), CLIP(last))."""
-
-    def __call__(self, video_bytes: pa.Array) -> pa.Array:
-        self._load()
-        raise NotImplementedError("MTScore proxy not yet wired up")
-
-
-TIER2_UDFS: dict[str, object] = {
-    "clip_emb_text":     _ClipEmbText(),
-    "clip_emb_video":    _ClipEmbVideo(),
-    "motion_strength":   _MotionStrength(),
-    "metamorphic_score": _MetamorphicScore(),
-}
 
 
 # ---------------------------------------------------------------------------
@@ -303,4 +484,4 @@ TIER_UDFS: dict[int, dict[str, object]] = {
 # Explicit allowlist of *currently-implemented* UDF columns.  The backfill
 # orchestrator refuses to run anything outside this set unless the user
 # passes ``--force-stub``.  We extend this set as each tier comes online.
-IMPLEMENTED_COLUMNS: set[str] = set(TIER1_UDFS)
+IMPLEMENTED_COLUMNS: set[str] = set(TIER1_UDFS) | set(TIER2_UDFS)

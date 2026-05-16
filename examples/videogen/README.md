@@ -6,9 +6,11 @@ from raw clips to high-MFU training.
 
 See [PROPOSAL.md](PROPOSAL.md) for the full design + benchmark plan.
 
-> Status: **CPU pipeline runnable end-to-end on synthetic data.**
-> GPU UDFs (CLIP / RAFT / T5 / VAE / dHash) are scaffolded but not yet wired
-> up — they land once an H100 frees up.  See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+> Status: **Tier-1 (CPU) + Tier-2 (light GPU) pipeline runnable end-to-end.**
+> Tier 2 = CLIP ViT-B/32 text + video embeddings, frame-absdiff motion score,
+> CLIP-based MTScore proxy.  Tier 3 (T5 hidden states + Wan-VAE latents) and
+> Tier 4 (dedup) are still scaffolded as stubs.
+> See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 ## Setup
 
@@ -38,6 +40,33 @@ python -m videogen.manage_views --action curate
 
 # 4) Status sentinel
 python -m videogen.verify_pipeline
+```
+
+## Quickstart — Tier 2 (GPU, ~10s for 100 clips on H100)
+
+Adds CLIP text + video embeddings, motion strength, and the MTScore proxy.
+
+```bash
+# 5) Tier 2 backfill (CLIP, motion, MTScore)
+python -m videogen.backfill_geneva --tier 2
+
+# 6) Tier-2 quality-gated views (curated_train / curated_val)
+python -m videogen.manage_views --action curate-2
+
+# 7) Vector + SQL discovery
+python - <<'PY'
+import lancedb, open_clip, torch
+tbl = lancedb.connect("data/videos/lancedb").open_table("videos_raw")
+
+# Text → video retrieval via CLIP
+m, _, _ = open_clip.create_model_and_transforms("ViT-B-32", pretrained="openai", device="cuda")
+tok = open_clip.get_tokenizer("ViT-B-32")
+with torch.no_grad():
+    q = m.encode_text(tok(["ice melting into water"]).cuda())
+    q = (q / q.norm(dim=-1, keepdim=True)).cpu().float()[0].tolist()
+print(tbl.search(q, vector_column_name="clip_emb_video")
+         .metric("cosine").limit(5).to_pandas()[["clip_id", "caption", "_distance"]])
+PY
 ```
 
 You should see something like:
@@ -85,7 +114,7 @@ on-disk mp4 dir ─────────┘
                   │  backfill_geneva --tier 1     (CPU)  ← runnable today
                   │   keyword_* · caption_length
                   │
-                  │  backfill_geneva --tier 2     (GPU)  ← deferred
+                  │  backfill_geneva --tier 2     (GPU)  ← runnable today
                   │   clip_emb_* · motion · MTScore
                   │
                   │  backfill_geneva --tier 3     (GPU)  ← deferred
@@ -110,7 +139,7 @@ videogen/                  Pipeline package
 ├── schema.py              Lance schema (per-tier field declarations)
 ├── ingest_chronomagic.py  Streaming ingest: synthetic / manifest / manifest+mp4
 ├── download_manifest.py   Pull just the HF caption parquet (no clips)
-├── geneva_udfs.py         Tier 1 (CPU keyword) + Tier 2/3/4 stubs
+├── geneva_udfs.py         Tier 1 (CPU keyword) + Tier 2 (CLIP/motion/MTScore) + Tier 3/4 stubs
 ├── backfill_geneva.py     Geneva backfill orchestrator (--tier, --columns)
 ├── manage_views.py        Materialised views per phase transition
 ├── dataloader.py          Permutation-based loaders (cached + raw paths)
@@ -131,10 +160,10 @@ KNOWN_ISSUES.md            Upstream regressions we're working around
 
 ## What's not done yet
 
-These are tracked in `PROPOSAL.md §"Milestones"` and will be filled in
-once the GPU is free:
+These are tracked in `PROPOSAL.md §"Milestones"`:
 
-* Tier 2/3/4 Geneva UDF bodies (CLIP / RAFT / MTScore / T5 / Wan-VAE / dHash).
+* Tier 3 Geneva UDF bodies — T5-XXL tokeniser + encoder, Wan-VAE latent encoder.
+* Tier 4 Geneva UDF bodies — dHash (GPU) + is_duplicate (CPU NN lookup).
 * `train_wan22_lora.py` — Wan2.2 LoRA training loop reading from cached MVs.
 * `bench_dataloader.py` — B5/B6 clips/sec + GPU MFU.
 * `bench_backfill.py` — B3/B4 incremental backfill timings.
