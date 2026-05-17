@@ -4,8 +4,6 @@ End-to-end fine-tune of a video-diffusion model (Wan2.2-TI2V-5B) on a curated
 time-lapse phase-transition slice — using LanceDB + Geneva at every stage
 from raw clips to high-MFU training.
 
-See [PROPOSAL.md](PROPOSAL.md) for the full design + benchmark plan.
-
 > Status: **Full pipeline runnable end-to-end on a single H100.**
 > Tier 1 = caption-derived flags (CPU).
 > Tier 2 = CLIP ViT-B/32 text + video embeddings, frame-absdiff motion score,
@@ -15,7 +13,7 @@ See [PROPOSAL.md](PROPOSAL.md) for the full design + benchmark plan.
 > reads only these and never loads the VAE or text encoder.
 > Tier 4 = perceptual-hash dedup (first/last frame dHash + Hamming NN flag).
 > The Wan2.2-TI2V-5B LoRA training loop trains from the cached columns
-> (no VAE / no UMT5 in the train process).  See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+> (no VAE / no UMT5 in the train process).
 
 ## Headline numbers (1×H100, **2,255 real ChronoMagic clips**)
 
@@ -205,24 +203,22 @@ videogen/                  Pipeline package
 ├── upload_to_hf.py        Publish a curated MV as a HF Lance-format dataset
 └── verify_pipeline.py     End-to-end status sentinel
 
-bench/                     Benchmark harness — see PROPOSAL.md §"Benchmarks"
-├── bench_ingest.py        B1   ingest rows/sec
-├── bench_curation.py      B2   SQL+FTS query timings
-├── bench_backfill.py      B3 / B4   feature backfill + incremental
-├── bench_dataloader.py    B5 / B6   forward-only clips/sec + GPU MFU
-├── bench_train_step.py    Training-step throughput (fwd + bwd + opt)
-├── bench_storage.py       B8   on-disk footprint per table/view
-├── bench_recipe_change.py B9   one-column re-derive vs whole pipeline
-└── bench_e2e.py           B10  end-to-end wall-clock summary
+bench/                     Benchmark harness
+├── bench_ingest.py        ingest rows/sec
+├── bench_curation.py      SQL+FTS query timings
+├── bench_backfill.py      feature backfill + incremental
+├── bench_dataloader.py    forward-only clips/sec + GPU MFU
+├── bench_train_step.py    training-step throughput (fwd + bwd + opt)
+├── bench_storage.py       on-disk footprint per table/view
+├── bench_recipe_change.py one-column re-derive vs whole pipeline
+└── bench_e2e.py           end-to-end wall-clock summary
 
 scripts/
-└── run_pipeline.sh        one-command pipeline runner
+├── run_pipeline.sh        one-command pipeline runner (short demo)
+└── run_overnight.sh       longer training + side-by-side eval video grid
 
 notebooks/
 └── eda_phase_transitions.ipynb   Curation EDA
-
-PROPOSAL.md                Full design doc + benchmark plan
-KNOWN_ISSUES.md            Upstream regressions we're working around
 ```
 
 ## Training
