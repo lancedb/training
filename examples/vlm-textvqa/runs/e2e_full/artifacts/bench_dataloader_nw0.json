@@ -1,0 +1,43 @@
+{
+  "config": {
+    "bs": 8,
+    "nw": 0,
+    "batches": 200,
+    "db": "data/textvqa.lance",
+    "layout_dir": "/home/ubuntu/training/examples/vlm-textvqa/data/baselines"
+  },
+  "results": [
+    {
+      "loader": "lance",
+      "batches": 200,
+      "samples": 1600,
+      "wall_s": 26.506804943084717,
+      "samples_per_s": 60.36185815059613,
+      "batches_per_s": 7.545232268824516
+    },
+    {
+      "loader": "hf_datasets",
+      "batches": 200,
+      "samples": 1600,
+      "wall_s": 25.32495141029358,
+      "samples_per_s": 63.17879841418626,
+      "batches_per_s": 7.897349801773283
+    },
+    {
+      "loader": "raw_fs_nw0",
+      "batches": 200,
+      "samples": 1600,
+      "wall_s": 25.38761329650879,
+      "samples_per_s": 63.02286005829568,
+      "batches_per_s": 7.87785750728696
+    },
+    {
+      "loader": "webdataset",
+      "batches": 200,
+      "samples": 1600,
+      "wall_s": 26.28710150718689,
+      "samples_per_s": 60.866353012048904,
+      "batches_per_s": 7.608294126506113
+    }
+  ]
+}

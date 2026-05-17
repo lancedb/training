@@ -1,0 +1,19 @@
+# Lance datasets and downloaded caches
+data/
+hf_cache/
+
+# Python build artifacts
+__pycache__/
+*.egg-info/
+*.pyc
+.venv
+
+# Bench output / training runs — large adapter weights, raw logs
+runs/*/lora/
+runs/*/*.log
+runs/*/*.log.*
+runs/*/pid
+runs/*/info
+runs/*/predictions_*.jsonl
+
+# Keep small summary jsons + side-by-side md (no .gitignore for these)

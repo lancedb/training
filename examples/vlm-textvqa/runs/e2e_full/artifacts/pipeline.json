@@ -1,0 +1,33 @@
+{
+  "stages": {
+    "ingest": {
+      "wall_s": 290.901,
+      "rows": 34602
+    },
+    "tier1_backfill": {
+      "wall_s": 30.6019,
+      "rows": 34602
+    },
+    "tier2_backfill": {
+      "wall_s": 314.639,
+      "rows": 34602
+    },
+    "tier3_backfill": {
+      "wall_s": 1865.05,
+      "rows": 34602
+    },
+    "layouts_export": {
+      "wall_s": 37.6861,
+      "rows": 34602
+    },
+    "train": {
+      "wall_s": 4363.12,
+      "rows": 34602
+    },
+    "eval": {
+      "wall_s": 203.397,
+      "rows": 200
+    }
+  },
+  "total_wall_s": 7105.3949999999995
+}

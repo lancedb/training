@@ -1,0 +1,34 @@
+{
+  "config": {
+    "db": "data/textvqa.lance",
+    "bs": 2,
+    "steps": 30,
+    "lora_r": 64,
+    "mode": "both",
+    "out": "runs/e2e_full/bench_train_step.json"
+  },
+  "results": [
+    {
+      "mode": "cached",
+      "steps": 30,
+      "batch_size": 2,
+      "samples": 60,
+      "wall_s": 3.972646713256836,
+      "samples_per_s": 15.103281094636047,
+      "steps_per_s": 7.551640547318024,
+      "peak_vram_mb": 14106.549248,
+      "final_loss": 2.3614161014556885
+    },
+    {
+      "mode": "raw",
+      "steps": 30,
+      "batch_size": 2,
+      "samples": 60,
+      "wall_s": 7.605214595794678,
+      "samples_per_s": 7.889323732321393,
+      "steps_per_s": 3.9446618661606965,
+      "peak_vram_mb": 15451.672064,
+      "final_loss": 2.3284964561462402
+    }
+  ]
+}
