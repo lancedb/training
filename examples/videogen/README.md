@@ -1,8 +1,19 @@
 # Video Generation Training with LanceDB
 
 End-to-end fine-tune of a video-diffusion model (Wan2.2-TI2V-5B) on a curated
-time-lapse phase-transition slice — using LanceDB + Geneva at every stage
-from raw clips to high-MFU training.
+time-lapse phase-transition slice — one LanceDB table backing the whole loop,
+from raw clips to a tuned adapter. The same three jobs as every example in
+this repo:
+
+- **Curate & engineer features** — clip bytes, captions, CLIP text/video
+  embeddings, motion + metamorphic scores, and dedup flags live in one
+  table; slice into training views with SQL / FTS / vector search.
+- **Manage at scale** — the expensive encoder outputs are added as columns
+  with **zero-copy schema evolution** (no table rewrite): pre-encode the
+  UMT5-XXL text states and Wan-VAE latents **once**, reuse them every step.
+- **Load & train** — the train loop reads `t5_hidden_states` + `vae_latent`
+  straight off Lance and never loads the VAE or text encoder —
+  **×14 dataloader throughput, ×5 per training step** vs decoding inline.
 
 > Status: **Full pipeline runnable end-to-end on a single H100.**
 > Tier 1 = caption-derived flags (CPU).
