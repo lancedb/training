@@ -30,6 +30,7 @@ dependencies = [
     "qwen-vl-utils>=0.0.8",
     "accelerate>=1.0.0",
     "peft>=0.13.0",
+    "bitsandbytes>=0.43.0",   # NF4 QLoRA for the Colab T4 path
     "sentencepiece>=0.2.0",
     "open-clip-torch>=2.24.0",
 

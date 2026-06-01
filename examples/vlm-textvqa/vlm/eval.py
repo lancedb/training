@@ -61,17 +61,32 @@ def _score_one(pred: str, gts: list[str]) -> float:
 # Model + generation
 # ---------------------------------------------------------------------------
 
-def _load_model(adapter_dir: str | None):
-    LOG.info("loading base model %s", _QWEN_MODEL_ID)
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        _QWEN_MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda:0",
-        attn_implementation="sdpa",
-    )
+def _load_model(adapter_dir: str | None, load_4bit: bool = False):
+    LOG.info("loading base model %s%s", _QWEN_MODEL_ID,
+             " (4-bit NF4)" if load_4bit else "")
+    kwargs = dict(attn_implementation="sdpa")
+    if load_4bit:
+        from transformers import BitsAndBytesConfig
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+        kwargs["device_map"] = {"": 0}
+    else:
+        kwargs["torch_dtype"] = torch.bfloat16
+        kwargs["device_map"] = "cuda:0"
+
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(_QWEN_MODEL_ID, **kwargs)
     if adapter_dir:
         LOG.info("loading LoRA adapter from %s", adapter_dir)
         from peft import PeftModel
         model = PeftModel.from_pretrained(model, adapter_dir)
-        model = model.merge_and_unload()
+        # merge_and_unload can't fold LoRA into 4-bit weights; keep the
+        # adapter active for generation in that case.
+        if not load_4bit:
+            model = model.merge_and_unload()
     model.eval()
     processor = AutoProcessor.from_pretrained(_QWEN_MODEL_ID)
     return model, processor
@@ -247,6 +262,8 @@ def main() -> int:
     p.add_argument("--mode",      default="both",
                    choices=["base", "tuned", "both"])
     p.add_argument("--side-by-side-k", type=int, default=8)
+    p.add_argument("--load-4bit", action="store_true",
+                   help="load Qwen in 4-bit (NF4) for low-VRAM eval on a Colab T4")
     args = p.parse_args()
 
     out_dir = Path(args.out).resolve()
@@ -260,13 +277,13 @@ def main() -> int:
     tuned_preds: list[dict] = []
 
     if args.mode in ("base", "both"):
-        model, proc = _load_model(adapter_dir=None)
+        model, proc = _load_model(adapter_dir=None, load_4bit=args.load_4bit)
         results["base"] = _evaluate("base", model, proc, ds, args.limit, out_dir)
         base_preds = [json.loads(l) for l in (out_dir / "predictions_base.jsonl").open()]
         del model; torch.cuda.empty_cache()
 
     if args.mode in ("tuned", "both") and args.adapter:
-        model, proc = _load_model(adapter_dir=args.adapter)
+        model, proc = _load_model(adapter_dir=args.adapter, load_4bit=args.load_4bit)
         results["tuned"] = _evaluate("tuned", model, proc, ds, args.limit, out_dir)
         tuned_preds = [json.loads(l) for l in (out_dir / "predictions_tuned.jsonl").open()]
         del model; torch.cuda.empty_cache()

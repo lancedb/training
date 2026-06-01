@@ -49,18 +49,32 @@ _QWEN_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 _IMAGE_PAD_TOKEN = "<|image_pad|>"
 
 
-def _build_model(use_lora: bool, lora_r: int):
+def _build_model(use_lora: bool, lora_r: int, load_4bit: bool = False):
     """Load Qwen2.5-VL with `model.model.visual = None`.
 
     The vision tower is ~1.3 GB; not loading it frees that much VRAM
     for activations / a bigger batch.
+
+    ``load_4bit`` quantises the LLM weights to NF4 (bitsandbytes) so the
+    3.75 B-param model + LoRA fits a free Colab T4 (16 GB).  On an H100
+    leave it ``False`` and train in bf16.
     """
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        _QWEN_MODEL_ID,
-        torch_dtype=torch.bfloat16,
-        device_map="cuda:0",
-        attn_implementation="sdpa",
-    )
+    kwargs = dict(attn_implementation="sdpa")
+    if load_4bit:
+        from transformers import BitsAndBytesConfig
+        LOG.info("loading LLM in 4-bit (NF4) for low-VRAM training")
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+        kwargs["device_map"] = {"": 0}
+    else:
+        kwargs["torch_dtype"] = torch.bfloat16
+        kwargs["device_map"] = "cuda:0"
+
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(_QWEN_MODEL_ID, **kwargs)
 
     # Free the vision tower weights.
     LOG.info("freeing vision tower (~%.0f MB)",
@@ -69,6 +83,13 @@ def _build_model(use_lora: bool, lora_r: int):
     del model.model.visual
     model.model.visual = None
     torch.cuda.empty_cache()
+
+    if load_4bit and use_lora:
+        # QLoRA: cast norms to fp32, enable input grads, gradient checkpointing.
+        from peft import prepare_model_for_kbit_training
+        model = prepare_model_for_kbit_training(
+            model, use_gradient_checkpointing=True,
+        )
 
     if use_lora:
         LOG.info("wrapping LLM with LoRA r=%d on q/k/v/o", lora_r)
@@ -132,6 +153,8 @@ def main() -> int:
     p.add_argument("--lora-r",     type=int, default=64)
     p.add_argument("--no-lora",    action="store_true",
                    help="full fine-tune (debug only — does not fit comfortably)")
+    p.add_argument("--load-4bit",  action="store_true",
+                   help="QLoRA: quantise LLM to NF4 so it fits a Colab T4 (16 GB)")
     p.add_argument("--log-every",  type=int, default=10)
     p.add_argument("--max-steps",  type=int, default=0,
                    help="cap steps (0 = no cap)")
@@ -153,7 +176,8 @@ def main() -> int:
     LOG.info("image_pad id = %d", image_pad_id)
 
     # Model
-    model = _build_model(use_lora=not args.no_lora, lora_r=args.lora_r)
+    model = _build_model(use_lora=not args.no_lora, lora_r=args.lora_r,
+                         load_4bit=args.load_4bit)
     model.train()
 
     # Optimiser only over trainable params

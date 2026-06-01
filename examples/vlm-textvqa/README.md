@@ -1,15 +1,48 @@
 # VLM Fine-Tune on Scene-Text Q&A with LanceDB
 
-End-to-end LoRA SFT of **Qwen2.5-VL-3B-Instruct** for TextVQA, with
-LanceDB + Geneva at every stage from raw image bytes to high-MFU
-training.
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/lancedb/training/blob/vlm-textvqa/examples/vlm-textvqa/notebooks/colab_textvqa_lance.ipynb)
+
+End-to-end LoRA SFT of **Qwen2.5-VL-3B-Instruct** for TextVQA, with one
+LanceDB table backing the whole loop — raw image bytes to a tuned
+adapter. The same three jobs as every other example in this repo:
+
+- **Curate & engineer features** — image bytes, CLIP embeddings, OCR
+  tokens, and Geneva-backfilled text/quality columns live in one
+  schema-enforced table; slice with SQL / FTS / vector search.
+- **Manage at scale** — the expensive vision-tower output is added as a
+  column with **zero-copy schema evolution** (no table rewrite): compute
+  it **once**, reuse it every epoch forever.
+- **Load & train** — the train loop reads `vision_tower_hiddens` straight
+  off Lance and skips the vision tower entirely — **~2× train-step
+  throughput at −1.3 GB VRAM**.
 
 **Headline trick:** freeze the vision tower at SFT time and pre-compute
-its hidden states as a Lance column.  The train process loads only the
+its hidden states as a Lance column. The train process loads only the
 LLM — no vision-tower forward in the loop, no image decode, no
 tokenisation.
 
-> Status: e2e validated on the full corpus.  Branch: `vlm-textvqa`.
+> Status: e2e validated on the full corpus (1×H100). Branch: `vlm-textvqa`.
+
+## Run it on a free Colab T4
+
+[`notebooks/colab_textvqa_lance.ipynb`](./notebooks/colab_textvqa_lance.ipynb)
+runs the **whole loop on a single free T4** at demo scale: download a
+pre-baked Lance subset → benchmark **Lance-vs-Parquet** read throughput →
+**QLoRA** fine-tune from the cached columns → **before/after** answer grid
+on held-out images. Qwen2.5-VL-3B fits 16 GB via 4-bit NF4 (`--load-4bit`)
+plus the vision-tower-free cached path.
+
+The notebook reads a small subset with the cached columns already
+computed. Bake and host it once on any GPU box:
+
+```bash
+python -m vlm.colab_prepare \
+    --out data/colab --train-rows 512 --val-rows 64 \
+    --hf-repo <your-org>/textvqa-lance-colab --push      # needs HF_TOKEN
+```
+
+Then point the notebook at it via the `TEXTVQA_COLAB_REPO` env var (it
+defaults to `lance-format/textvqa-lance-colab`).
 
 ## Real-run numbers (1×H100, 34,602 train rows, 200 eval rows)
 
@@ -175,10 +208,13 @@ examples/vlm-textvqa/
 │   ├── geneva_udfs.py                 ← Tier 1/2 UDFs
 │   ├── backfill_geneva.py             ← Tier 1/2 runner
 │   ├── backfill_direct.py             ← Tier 3 (vision + tokeniser, batched)
+│   ├── colab_prepare.py              ← bake + push a small cached subset for Colab
 │   ├── dataloader.py                  ← Lance cached + raw paths
 │   ├── dataloader_baselines.py        ← HF datasets / raw FS / WebDataset
-│   ├── train_qwen25vl_lora.py         ← LoRA SFT, cached path
-│   └── eval.py                        ← accuracy + side-by-side
+│   ├── train_qwen25vl_lora.py         ← LoRA SFT, cached path (--load-4bit for QLoRA)
+│   └── eval.py                        ← accuracy + side-by-side (--load-4bit)
+├── notebooks/
+│   └── colab_textvqa_lance.ipynb     ← free-T4 end-to-end demo
 ├── bench/
 │   ├── bench_dataloader.py            ← 1:1 throughput (4 loaders)
 │   ├── bench_train_step.py            ← cached vs raw train step
