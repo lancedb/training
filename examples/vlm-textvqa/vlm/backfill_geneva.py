@@ -1,14 +1,21 @@
-"""Run Geneva backfills for Tier-1/2 UDFs over the local TextVQA Lance table.
+"""Run Geneva backfills over the local TextVQA Lance table.
 
-The heavy Tier-3 vision_tower_hiddens column has its own dedicated script
-(``vlm/backfill_direct.py``) because Geneva's actor pool stalls on
-multi-GB GPU UDFs (see ``examples/videogen/KNOWN_ISSUES.md``).
+Every feature column — including the heavy Tier-3 ``vision_tower_hiddens``
+— is a Geneva UDF defined in ``vlm/geneva_udfs.py`` and backfilled here.
+The UDFs are stateful classes that lazy-load their model in the worker
+process, so the driver never touches a GPU and Geneva distributes the
+forward passes across its actor pool.
+
+``vlm/backfill_direct.py`` is a single-process fallback for the same
+Tier-3 columns (Lance ``add_columns`` with no Ray) — handy on a single
+box / for the Colab bake, or if you hit an actor-pool issue.
 
 Usage:
 
-    python -m vlm.backfill_geneva --tier 1
-    python -m vlm.backfill_geneva --tier 2
-    python -m vlm.backfill_geneva --tier all
+    python -m vlm.backfill_geneva --tier 1     # CPU text columns
+    python -m vlm.backfill_geneva --tier 2     # dhash (image decode)
+    python -m vlm.backfill_geneva --tier 3     # vision tower + SFT tokens (GPU)
+    python -m vlm.backfill_geneva --tier all   # 1 + 2 + 3
 """
 from __future__ import annotations
 
@@ -19,7 +26,7 @@ from pathlib import Path
 
 import geneva
 
-from .geneva_udfs import TIER1_UDFS, TIER2_UDFS
+from .geneva_udfs import TIER1_UDFS, TIER2_UDFS, TIER3_UDFS
 
 LOG = logging.getLogger("vlm.backfill_geneva")
 
@@ -29,8 +36,10 @@ def _udfs_for_tier(tier: str) -> dict:
         return TIER1_UDFS
     if tier == "2":
         return TIER2_UDFS
+    if tier == "3":
+        return TIER3_UDFS
     if tier == "all":
-        return {**TIER1_UDFS, **TIER2_UDFS}
+        return {**TIER1_UDFS, **TIER2_UDFS, **TIER3_UDFS}
     raise SystemExit(f"unknown tier {tier!r}")
 
 
@@ -53,7 +62,7 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--db",          default="data/textvqa.lance",
                    help="Lance dataset path")
-    p.add_argument("--tier",        default="1", choices=["1", "2", "all"])
+    p.add_argument("--tier",        default="1", choices=["1", "2", "3", "all"])
     p.add_argument("--concurrency", type=int, default=2)
     p.add_argument("--task-size",   type=int, default=256)
     p.add_argument("--checkpoint",  type=int, default=128)

@@ -51,7 +51,7 @@ defaults to `lance-format/textvqa-lance-colab`).
 | ingest (stream)    | 4 min 51 s | 119 rows/s from HF |
 | Tier-1 backfill    | 31 s       | 4 CPU UDFs via Geneva |
 | Tier-2 backfill    | 5 min 15 s | dhash (image decode) via Geneva |
-| Tier-3 backfill    | 31 min 5 s | vision tower + tokeniser, direct add_columns |
+| Tier-3 backfill    | 31 min 5 s | vision tower + SFT tokens (Geneva GPU UDFs; this number was the single-process `direct` path) |
 | layouts export     | 38 s       | raw_fs + WDS + parquet for baselines |
 | train (3 epochs)   | 1 h 13 min | LoRA r=64, bs=2, grad-accum=4 |
 | eval (base+tuned)  | 3 min 23 s | 200 val rows × 2 models |
@@ -143,11 +143,11 @@ vlm/ingest.py  →  textvqa.lance (local copy)
   ├── Tier 2 (image decode — via Geneva)
   │     dhash  (uint64, 64-bit perceptual hash)
   │
-  └── Tier 3 (heavy GPU — direct lance.add_columns)
-        vision_tower_hiddens  fp16[400 × 2048]
-        input_ids             int32[512]   ── full chat template incl 400 image_pads
-        attention_mask        int8 [512]
-        labels                int32[512]   ── prompt masked to -100
+  └── Tier 3 (heavy GPU — via Geneva, distributed across the actor pool)
+        vision_tower_hiddens  fp16[400 × 2048]               (vision_tower_hiddens UDF)
+        sft_tokens { input_ids int32[512], attention_mask    (sft_tokens UDF, one call)
+                     int8[512], labels int32[512] }
+        (TIER3_BACKEND=direct → flat columns via backfill_direct.py instead)
   ▼
 train_qwen25vl_lora.py   LoRA r=64 on q/k/v/o; vision tower = None
   ▼
@@ -187,7 +187,8 @@ Stage-by-stage:
 .venv/bin/python -m vlm.ingest           --dst data/textvqa.lance
 .venv/bin/python -m vlm.backfill_geneva  --db  data/textvqa.lance --tier 1
 .venv/bin/python -m vlm.backfill_geneva  --db  data/textvqa.lance --tier 2
-.venv/bin/python -m vlm.backfill_direct  --db  data/textvqa.lance --batch-size 16
+.venv/bin/python -m vlm.backfill_geneva  --db  data/textvqa.lance --tier 3   # Geneva GPU UDFs
+# fallback (single box / no Ray): python -m vlm.backfill_direct --db data/textvqa.lance --batch-size 16
 .venv/bin/python -m vlm.train_qwen25vl_lora --db data/textvqa.lance --out runs/lora
 .venv/bin/python -m vlm.eval             --db  data/textvqa_val.lance \
                                          --adapter runs/lora/lora --mode both
@@ -205,9 +206,9 @@ examples/vlm-textvqa/
 ├── vlm/
 │   ├── schema.py
 │   ├── ingest.py                      ← stream HF -> local lance
-│   ├── geneva_udfs.py                 ← Tier 1/2 UDFs
-│   ├── backfill_geneva.py             ← Tier 1/2 runner
-│   ├── backfill_direct.py             ← Tier 3 (vision + tokeniser, batched)
+│   ├── geneva_udfs.py                 ← Tier 1/2/3 UDFs (incl. vision_tower_hiddens, sft_tokens)
+│   ├── backfill_geneva.py             ← Tier 1/2/3 runner (default Tier-3 path)
+│   ├── backfill_direct.py             ← Tier 3 single-process fallback (no Ray)
 │   ├── colab_prepare.py              ← bake + push a small cached subset for Colab
 │   ├── dataloader.py                  ← Lance cached + raw paths
 │   ├── dataloader_baselines.py        ← HF datasets / raw FS / WebDataset
@@ -231,6 +232,8 @@ examples/vlm-textvqa/
 - **Geneva 0.12.0 + pylance 3.0.0** are pinned together; the source HF
   Lance dataset uses a newer encoding so we stream-and-rewrite via
   `datasets.load_dataset` rather than open it directly.
-- **Geneva actor pool stalls** on Tier-3-style multi-GB GPU UDFs.  We
-  bypass it with `lance.add_columns(transform, read_columns=...)`,
-  same pattern used in the videogen example.
+- **Tier-3 GPU UDFs run two per actor by default** (`--concurrency 2`).
+  Each actor lazy-loads the Qwen vision tower (~668 MB) in its worker, so
+  tune concurrency to your GPU's memory. If you hit an actor-pool stall,
+  fall back to the single-process path with `TIER3_BACKEND=direct`
+  (`vlm/backfill_direct.py`).

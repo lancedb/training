@@ -1,10 +1,16 @@
-"""Direct ``lance.add_columns`` backfill for the heavy Tier-3 columns.
+"""Single-process Tier-3 backfill — the fallback for ``backfill_geneva``.
 
-We can't run Tier-3 through Geneva because the actor pool stalls when the
-UDF holds a multi-GB GPU model (see videogen/KNOWN_ISSUES.md).  Instead
-we use Lance's ``add_columns(transform, read_columns=...)`` API which
-batches reads from the Lance file, runs the transform in-process, and
-writes the output columns as fresh fragments.  No Ray, no actor pool.
+The default Tier-3 path is Geneva (``vlm/backfill_geneva.py --tier 3``),
+which distributes the vision-tower forward across its actor pool.  This
+module is the single-process equivalent: it uses Lance's
+``add_columns(transform, read_columns=...)`` API to batch reads from the
+Lance file, run the transform in-process, and write the output columns as
+fresh fragments — no Ray, no actor pool.
+
+Use this when you're on a single box (e.g. the Colab bake in
+``vlm/colab_prepare.py``), or to sidestep Ray if an actor-pool issue
+shows up.  It writes the same four columns as the Geneva path's
+``vision_tower_hiddens`` + ``sft_tokens`` UDFs, just as flat columns.
 
 One combined transform writes four columns from a single image decode +
 processor call:

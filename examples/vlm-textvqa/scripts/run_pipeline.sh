@@ -8,7 +8,8 @@
 #   1. ingest train + validation
 #   2. tier1 backfill   (CPU UDFs)
 #   3. tier2 backfill   (dhash, CPU image decode)
-#   4. tier3 backfill   (vision tower + tokeniser, direct add_columns)
+#   4. tier3 backfill   (vision tower + SFT tokens, Geneva GPU UDFs;
+#                        TIER3_BACKEND=direct for the single-process fallback)
 #   5. baseline layouts (raw_fs, wds, parquet) for bench_dataloader.py
 #   6. train            (Qwen2.5-VL-3B + LoRA, cached path)
 #   7. eval             (base vs tuned, side-by-side)
@@ -29,6 +30,7 @@ EPOCHS="${EPOCHS:-2}"
 BSZ="${BSZ:-2}"
 GACC="${GACC:-4}"
 TIER3_BS="${TIER3_BS:-16}"
+TIER3_BACKEND="${TIER3_BACKEND:-geneva}"   # geneva (default) | direct (single-process fallback)
 TRAIN_ROWS="${TRAIN_ROWS:-0}"   # 0 = full split
 VAL_ROWS="${VAL_ROWS:-500}"
 
@@ -84,9 +86,16 @@ stage tier1_backfill "$(.venv/bin/python -c 'import lance;print(lance.dataset("'
 stage tier2_backfill "$(.venv/bin/python -c 'import lance;print(lance.dataset("'$DB_TRAIN'").count_rows())')" \
     $PY -m vlm.backfill_geneva --db "$DB_TRAIN" --tier 2 --concurrency 4
 
-# 4) tier-3 backfill
-stage tier3_backfill "$(.venv/bin/python -c 'import lance;print(lance.dataset("'$DB_TRAIN'").count_rows())')" \
-    $PY -m vlm.backfill_direct --db "$DB_TRAIN" --batch-size "$TIER3_BS"
+# 4) tier-3 backfill — Geneva by default (showcases the distributed
+#    GPU-UDF path); set TIER3_BACKEND=direct for the single-process fallback.
+TIER3_ROWS="$(.venv/bin/python -c 'import lance;print(lance.dataset("'$DB_TRAIN'").count_rows())')"
+if [[ "$TIER3_BACKEND" == "direct" ]]; then
+    stage tier3_backfill "$TIER3_ROWS" \
+        $PY -m vlm.backfill_direct --db "$DB_TRAIN" --batch-size "$TIER3_BS"
+else
+    stage tier3_backfill "$TIER3_ROWS" \
+        $PY -m vlm.backfill_geneva --db "$DB_TRAIN" --tier 3 --concurrency 2
+fi
 
 # 5) baseline layouts
 stage layouts_export "$(.venv/bin/python -c 'import lance;print(lance.dataset("'$DB_TRAIN'").count_rows())')" \

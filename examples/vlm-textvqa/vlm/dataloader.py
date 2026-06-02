@@ -78,11 +78,20 @@ class RawBatch:
 # ---------------------------------------------------------------------------
 
 class LanceCachedLoader:
-    """Reads pre-computed tier-3 columns; zero vision-tower / tokeniser work."""
+    """Reads pre-computed tier-3 columns; zero vision-tower / tokeniser work.
 
-    CACHED_COLUMNS = [
-        "vision_tower_hiddens", "input_ids", "attention_mask", "labels",
-    ]
+    Tolerates both Tier-3 layouts:
+
+      * **flat** — ``input_ids`` / ``attention_mask`` / ``labels`` as
+        their own top-level columns (``backfill_direct.py``), and
+      * **struct** — a single ``sft_tokens`` struct column with those
+        three fields (the ``sft_tokens`` Geneva UDF in
+        ``backfill_geneva.py --tier 3``).
+
+    ``vision_tower_hiddens`` is a flat fixed-size-list column in both.
+    """
+
+    _TOKEN_FIELDS = ("input_ids", "attention_mask", "labels")
 
     def __init__(
         self,
@@ -97,6 +106,18 @@ class LanceCachedLoader:
         self.infinite = infinite
         self._n_rows = self.ds.count_rows()
 
+        # Detect token layout once from the schema.
+        names = set(self.ds.schema.names)
+        self._struct_tokens = "sft_tokens" in names and not (
+            set(self._TOKEN_FIELDS) <= names
+        )
+        if self._struct_tokens:
+            self.CACHED_COLUMNS = ["vision_tower_hiddens", "sft_tokens"]
+        else:
+            self.CACHED_COLUMNS = ["vision_tower_hiddens", *self._TOKEN_FIELDS]
+        LOG.info("cached token layout: %s",
+                 "sft_tokens struct" if self._struct_tokens else "flat columns")
+
     def __len__(self) -> int:
         return (self._n_rows + self.batch_size - 1) // self.batch_size
 
@@ -108,15 +129,22 @@ class LanceCachedLoader:
             flat_v.reshape(bsz, LLM_TOKENS_PER_IMAGE, VISION_HIDDEN)
         )  # fp16
 
-        def _flat_int(name: str, dtype: np.dtype) -> torch.Tensor:
-            flat = table.column(name).combine_chunks().values.to_numpy(zero_copy_only=False).astype(dtype, copy=False)
+        # Resolve the three token arrays from whichever layout is present.
+        if self._struct_tokens:
+            struct = table.column("sft_tokens").combine_chunks()
+            token_arrays = {f: struct.field(f) for f in self._TOKEN_FIELDS}
+        else:
+            token_arrays = {f: table.column(f).combine_chunks() for f in self._TOKEN_FIELDS}
+
+        def _to_long(arr) -> torch.Tensor:
+            flat = arr.values.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
             return torch.from_numpy(flat.reshape(bsz, MAX_TEXT_TOKENS)).to(torch.long)
 
         return CachedBatch(
             vision_hiddens = vision,
-            input_ids      = _flat_int("input_ids",      np.int64),
-            attention_mask = _flat_int("attention_mask", np.int64),
-            labels         = _flat_int("labels",         np.int64),
+            input_ids      = _to_long(token_arrays["input_ids"]),
+            attention_mask = _to_long(token_arrays["attention_mask"]),
+            labels         = _to_long(token_arrays["labels"]),
         )
 
     def __iter__(self) -> Iterator[CachedBatch]:
