@@ -17,11 +17,10 @@ from __future__ import annotations
 import argparse
 import io
 import logging
-import shutil
 import time
 from pathlib import Path
 
-import lance
+import lancedb
 import numpy as np
 import pyarrow as pa
 from datasets import load_dataset
@@ -86,24 +85,27 @@ def _batch_iter(split: str, batch_size: int, limit: int | None):
 
 
 def _ingest_split(split: str, dst: Path, limit: int | None) -> int:
-    if dst.exists():
-        LOG.info("removing existing %s", dst)
-        shutil.rmtree(dst)
+    """Write the split as a LanceDB table at ``<dst.parent>/<dst.stem>``."""
     dst.parent.mkdir(parents=True, exist_ok=True)
+    uri = str(dst.parent)
+    table_name = dst.name[:-len(".lance")] if dst.name.endswith(".lance") else dst.name
+
+    db = lancedb.connect(uri)
+    if table_name in db.list_tables().tables:
+        LOG.info("dropping existing table %s", table_name)
+        db.drop_table(table_name)
+
     reader = pa.RecordBatchReader.from_batches(
         BASE_SCHEMA, _batch_iter(split, BATCH, limit)
     )
-    lance.write_dataset(
-        reader,
-        str(dst),
+    tbl = db.create_table(
+        table_name,
+        data=reader,
         schema=BASE_SCHEMA,
-        mode="create",
-        data_storage_version="2.2",
-        enable_v2_manifest_paths=True,
         storage_options={"new_table_enable_stable_row_ids": "true"},
     )
-    n = lance.dataset(str(dst)).count_rows()
-    LOG.info("FINAL %s -> %d rows", dst, n)
+    n = len(tbl)
+    LOG.info("FINAL %s/%s -> %d rows", uri, table_name, n)
     return n
 
 

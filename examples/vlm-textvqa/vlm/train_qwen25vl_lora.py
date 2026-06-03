@@ -40,7 +40,7 @@ from transformers import (
     get_cosine_schedule_with_warmup,
 )
 
-from .dataloader import LanceCachedLoader
+from .dataloader import make_cached_loader
 from .schema import LLM_TOKENS_PER_IMAGE, MAX_TEXT_TOKENS, VISION_HIDDEN
 
 LOG = logging.getLogger("vlm.train")
@@ -155,6 +155,8 @@ def main() -> int:
                    help="full fine-tune (debug only — does not fit comfortably)")
     p.add_argument("--load-4bit",  action="store_true",
                    help="QLoRA: quantise LLM to NF4 so it fits a Colab T4 (16 GB)")
+    p.add_argument("--num-workers", type=int, default=4,
+                   help="DataLoader workers (each reopens its own Permutation)")
     p.add_argument("--log-every",  type=int, default=10)
     p.add_argument("--max-steps",  type=int, default=0,
                    help="cap steps (0 = no cap)")
@@ -186,9 +188,10 @@ def main() -> int:
     LOG.info("trainable params: %.1f M", n_trainable / 1e6)
     optim = torch.optim.AdamW(trainable, lr=args.lr, betas=(0.9, 0.95), weight_decay=0.0)
 
-    # Data
-    loader = LanceCachedLoader(
-        args.db, batch_size=args.batch_size, seed=args.seed, infinite=False,
+    # Data — LanceDB Permutation API, shuffled per epoch.
+    loader = make_cached_loader(
+        args.db, batch_size=args.batch_size, num_workers=args.num_workers,
+        shuffle=True, seed=args.seed,
     )
     steps_per_epoch = math.ceil(len(loader) / args.grad_accum)
     total_steps = steps_per_epoch * args.epochs

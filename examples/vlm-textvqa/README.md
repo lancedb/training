@@ -52,7 +52,6 @@ defaults to `lance-format/textvqa-lance-colab`).
 | Tier-1 backfill    | 31 s       | 4 CPU UDFs via Geneva |
 | Tier-2 backfill    | 5 min 15 s | dhash (image decode) via Geneva |
 | Tier-3 backfill    | 31 min 5 s | vision tower + SFT tokens (Geneva GPU UDFs; this number was the single-process `direct` path) |
-| layouts export     | 38 s       | raw_fs + WDS + parquet for baselines |
 | train (3 epochs)   | 1 h 13 min | LoRA r=64, bs=2, grad-accum=4 |
 | eval (base+tuned)  | 3 min 23 s | 200 val rows × 2 models |
 | **total**          | **1 h 58 min** | — |
@@ -61,9 +60,7 @@ defaults to `lance-format/textvqa-lance-colab`).
 |---|---|
 | **TextVQA acc, base**  | 0.793 |
 | **TextVQA acc, tuned** | 0.815  (+2.2 pp) |
-| **Cached-vs-raw train step** | **16.1 vs 7.9 samples/s** (-1.3 GB VRAM) |
-| **1:1 dataloader (PIL decode in loop)** | Lance 60, HF 63, raw_fs 63, WDS 61 sps — all converge |
-| **1:1 dataloader (raw bytes only)** | Lance 1.6 k, HF 14.7 k, raw_fs 19.3 k, WDS 2.5 k sps |
+| **Cached-vs-raw train step** | **16.1 vs 7.9 samples/s** (−1.3 GB VRAM) |
 
 ---
 
@@ -80,50 +77,28 @@ defaults to `lance-format/textvqa-lance-colab`).
 
 ---
 
-## Two benchmark stories
+## The win: cache the vision tower, train on what's left
 
-### 1.  1:1 read throughput (apples-to-apples)
+Both dataloaders serve the table through the **LanceDB Permutation API**
+(`vlm/dataloader.py`, same pattern as the object-detection example): a
+`torch.utils.data.Dataset` that stores connection params, each worker
+reopens its own `Permutation`, and `__getitems__` returns an Arrow
+`RecordBatch` the collate turns into a model batch.
 
-`bench/bench_dataloader.py` measures throughput on a fixed workload —
-read (image_bytes, question, answer) at bs=8 with shuffled batches.
-**Honest result: at the same worker count, all four loaders converge.**
-With PIL decode in the loop (the real workload), JPEG decoding is the
-bottleneck and every loader lands at ~60 samples/s.  With workers,
-`raw_fs` parallelises decode and wins; the others stay single-process
-in this implementation.
+The point isn't raw read speed — it's *what you serve*:
 
-For raw bytes alone (`--no-decode`), Lance is **not** the fastest —
-parquet via HF datasets reads ~9× more bytes/sec, and direct file
-reads ~12× more.  Lance's columnar random-access `take()` pays a
-seek-and-fragment overhead on shuffled access that flat I/O doesn't.
-
-| Baseline | What it is |
-|---|---|
-| **Lance**             | `LanceRawLoader` — fragment-level random access |
-| **HF `datasets`**     | parquet shards, `.shuffle().iter(batch_size=...)` |
-| **Raw filesystem**    | dir of JPEGs + manifest, PyTorch `DataLoader` |
-| **WebDataset**        | tar-shard streaming |
-
-The takeaway from this bench is not "Lance is faster on reads" — it's
-"Lance is **competitive** with the alternatives on reads, and lets you
-write extra columns alongside the raw bytes without rewriting the
-whole table."  The real win is below.
-
-### 2.  Lance lets you do something the others **can't**
-
-`bench/bench_train_step.py` measures fwd+bwd+step throughput in two
-modes against the same model:
-
-| Component | Raw path | Cached path |
+| Component | `make_raw_loader` | `make_cached_loader` |
 |---|---:|---:|
 | Qwen2.5-VL ViT (~1.3 GB @ bf16) | runs every step | **not loaded** |
 | Qwen2.5-LLM (3 B @ bf16)        | runs every step | runs every step |
 | Image decode + processor        | runs every step | runs at backfill, cached |
 
-The cached path reads `vision_tower_hiddens` from Lance and injects them
-at `<|image_pad|>` positions in `inputs_embeds` via `masked_scatter`.
-The full prompt was pre-tokenised at backfill time so the train loop
-does not touch the processor either.
+`make_cached_loader` reads `vision_tower_hiddens` from Lance and the
+train loop injects them at `<|image_pad|>` positions in `inputs_embeds`
+via `masked_scatter`. The full prompt was pre-tokenised at backfill time,
+so the loop never touches the vision tower or the processor — **16.1 vs
+7.9 samples/s, −1.3 GB VRAM** vs the raw path. That's the feature
+engineering (Tier 3) and the cheap column read paying off at train time.
 
 ---
 
@@ -210,16 +185,12 @@ examples/vlm-textvqa/
 │   ├── backfill_geneva.py             ← Tier 1/2/3 runner (default Tier-3 path)
 │   ├── backfill_direct.py             ← Tier 3 single-process fallback (no Ray)
 │   ├── colab_prepare.py              ← bake + push a small cached subset for Colab
-│   ├── dataloader.py                  ← Lance cached + raw paths
-│   ├── dataloader_baselines.py        ← HF datasets / raw FS / WebDataset
+│   ├── dataloader.py                  ← LanceDB Permutation loaders (cached + raw)
 │   ├── train_qwen25vl_lora.py         ← LoRA SFT, cached path (--load-4bit for QLoRA)
-│   └── eval.py                        ← accuracy + side-by-side (--load-4bit)
+│   ├── eval.py                        ← accuracy + side-by-side (--load-4bit)
+│   └── verify_pipeline.py             ← sanity-check columns + artifacts
 ├── notebooks/
 │   └── colab_textvqa_lance.ipynb     ← free-T4 end-to-end demo
-├── bench/
-│   ├── bench_dataloader.py            ← 1:1 throughput (4 loaders)
-│   ├── bench_train_step.py            ← cached vs raw train step
-│   └── bench_pipeline.py              ← e2e stage wall-clocks
 └── scripts/
     └── run_pipeline.sh                ← single-command e2e runner
 ```

@@ -23,7 +23,7 @@ import re
 import time
 from pathlib import Path
 
-import lance
+import lancedb
 import torch
 from PIL import Image
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
@@ -31,6 +31,12 @@ from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 LOG = logging.getLogger("vlm.eval")
 
 _QWEN_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
+
+
+def _split_db(db: str) -> tuple[str, str]:
+    p = Path(db)
+    name = p.name[:-len(".lance")] if p.name.endswith(".lance") else p.name
+    return str(p.parent), name
 
 
 # ---------------------------------------------------------------------------
@@ -117,33 +123,28 @@ def _generate(model, processor, image: Image.Image, question: str,
 # Eval driver
 # ---------------------------------------------------------------------------
 
-def _iter_eval_rows(ds, limit: int | None):
+def _iter_eval_rows(tbl, limit: int | None):
     cols = ["id", "question_id", "image", "question", "answer", "answers"]
-    scanner = ds.scanner(columns=cols, batch_size=16)
-    seen = 0
-    for batch in scanner.to_batches():
-        for i in range(batch.num_rows):
-            yield {
-                "id":          batch.column("id")[i].as_py(),
-                "question_id": batch.column("question_id")[i].as_py(),
-                "image":       batch.column("image")[i].as_py(),
-                "question":    batch.column("question")[i].as_py(),
-                "answer":      batch.column("answer")[i].as_py(),
-                "answers":     batch.column("answers")[i].as_py(),
-            }
-            seen += 1
-            if limit is not None and seen >= limit:
-                return
+    n = limit if limit is not None else tbl.count_rows()
+    table = tbl.search().select(cols).limit(n).to_arrow()
+    for i in range(table.num_rows):
+        yield {
+            "id":          table.column("id")[i].as_py(),
+            "question_id": table.column("question_id")[i].as_py(),
+            "image":       table.column("image")[i].as_py(),
+            "question":    table.column("question")[i].as_py(),
+            "answer":      table.column("answer")[i].as_py(),
+            "answers":     table.column("answers")[i].as_py(),
+        }
 
 
-def _evaluate(model_label: str, model, processor, ds, limit, out_dir: Path) -> dict:
-    LOG.info("evaluating %s on %s (limit=%s)", model_label,
-             ds.uri if hasattr(ds, "uri") else "<lance ds>", limit)
+def _evaluate(model_label: str, model, processor, tbl, limit, out_dir: Path) -> dict:
+    LOG.info("evaluating %s (limit=%s)", model_label, limit)
     preds_path = out_dir / f"predictions_{model_label}.jsonl"
     pf = preds_path.open("w")
     scores: list[float] = []
     t0 = time.time()
-    for i, row in enumerate(_iter_eval_rows(ds, limit)):
+    for i, row in enumerate(_iter_eval_rows(tbl, limit)):
         img = Image.open(io.BytesIO(row["image"])).convert("RGB")
         pred = _generate(model, processor, img, row["question"])
         score = _score_one(pred, row["answers"])
@@ -183,7 +184,7 @@ def _b64_thumb(image_bytes: bytes, size: int = 192) -> str:
 
 
 def _build_side_by_side(
-    ds, base_preds: list[dict], tuned_preds: list[dict],
+    tbl, base_preds: list[dict], tuned_preds: list[dict],
     out_md: Path, k: int = 8,
 ):
     """Render top-K rows where base lost but tuned won, then K random rows."""
@@ -197,14 +198,14 @@ def _build_side_by_side(
     LOG.info("side-by-side: %d common, %d tuned-wins; rendering top %d wins + %d random",
              len(common_ids), len(wins), k, k)
 
-    # Map question_id -> image bytes (need to re-scan)
+    # Map question_id -> image bytes (need to re-read those rows)
     needed = set(wins[:k] + common_ids[:k])
     img_by_id: dict[str, bytes] = {}
-    for batch in ds.scanner(columns=["question_id", "image"], batch_size=128).to_batches():
-        for i in range(batch.num_rows):
-            qid = batch.column("question_id")[i].as_py()
-            if qid in needed:
-                img_by_id[qid] = batch.column("image")[i].as_py()
+    table = tbl.search().select(["question_id", "image"]).limit(tbl.count_rows()).to_arrow()
+    for i in range(table.num_rows):
+        qid = table.column("question_id")[i].as_py()
+        if qid in needed:
+            img_by_id[qid] = table.column("image")[i].as_py()
 
     lines: list[str] = [
         "# TextVQA — base vs LoRA-tuned, side by side\n",
@@ -269,8 +270,9 @@ def main() -> int:
     out_dir = Path(args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    ds = lance.dataset(args.db)
-    LOG.info("eval dataset: rows=%d", ds.count_rows())
+    uri, table_name = _split_db(args.db)
+    tbl = lancedb.connect(uri).open_table(table_name)
+    LOG.info("eval table: %s/%s rows=%d", uri, table_name, tbl.count_rows())
 
     results: dict[str, dict] = {}
     base_preds: list[dict] = []
@@ -278,13 +280,13 @@ def main() -> int:
 
     if args.mode in ("base", "both"):
         model, proc = _load_model(adapter_dir=None, load_4bit=args.load_4bit)
-        results["base"] = _evaluate("base", model, proc, ds, args.limit, out_dir)
+        results["base"] = _evaluate("base", model, proc, tbl, args.limit, out_dir)
         base_preds = [json.loads(l) for l in (out_dir / "predictions_base.jsonl").open()]
         del model; torch.cuda.empty_cache()
 
     if args.mode in ("tuned", "both") and args.adapter:
         model, proc = _load_model(adapter_dir=args.adapter, load_4bit=args.load_4bit)
-        results["tuned"] = _evaluate("tuned", model, proc, ds, args.limit, out_dir)
+        results["tuned"] = _evaluate("tuned", model, proc, tbl, args.limit, out_dir)
         tuned_preds = [json.loads(l) for l in (out_dir / "predictions_tuned.jsonl").open()]
         del model; torch.cuda.empty_cache()
 
@@ -294,7 +296,7 @@ def main() -> int:
 
     if base_preds and tuned_preds:
         _build_side_by_side(
-            ds, base_preds, tuned_preds, out_dir / "side_by_side.md",
+            tbl, base_preds, tuned_preds, out_dir / "side_by_side.md",
             k=args.side_by_side_k,
         )
 

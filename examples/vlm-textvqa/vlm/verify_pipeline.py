@@ -15,45 +15,59 @@ import logging
 import sys
 from pathlib import Path
 
-import lance
+import lancedb
 import numpy as np
 
 from .schema import (
     BASE_SCHEMA, LLM_TOKENS_PER_IMAGE, MAX_TEXT_TOKENS,
-    TIER1_COLUMNS, TIER2_COLUMNS, TIER3_COLUMNS,
+    TIER1_COLUMNS, TIER2_COLUMNS,
     VISION_HIDDEN,
 )
 
 LOG = logging.getLogger("vlm.verify")
 
+_TOKEN_FIELDS = ("input_ids", "attention_mask", "labels")
 
-def _check_columns(ds: lance.LanceDataset) -> list[str]:
+
+def _split_db(db: str) -> tuple[str, str]:
+    p = Path(db)
+    name = p.name[:-len(".lance")] if p.name.endswith(".lance") else p.name
+    return str(p.parent), name
+
+
+def _check_columns(schema) -> list[str]:
     """Return list of issues (empty list = pass)."""
     issues: list[str] = []
-    have = {f.name: f.type for f in ds.schema}
+    have = {f.name: f.type for f in schema}
 
     for f in BASE_SCHEMA:
         if f.name not in have:
             issues.append(f"missing base column {f.name}")
 
-    expected = {
-        "Tier 1": TIER1_COLUMNS, "Tier 2": TIER2_COLUMNS, "Tier 3": TIER3_COLUMNS,
-    }
-    for tier, cols in expected.items():
+    for tier, cols in {"Tier 1": TIER1_COLUMNS, "Tier 2": TIER2_COLUMNS}.items():
         for name, dtype in cols.items():
             if name not in have:
                 issues.append(f"missing {tier} column {name} ({dtype})")
             elif str(have[name]) != str(dtype):
-                issues.append(
-                    f"{tier} column {name}: type {have[name]} != expected {dtype}"
-                )
+                issues.append(f"{tier} column {name}: type {have[name]} != expected {dtype}")
+
+    # Tier 3: vision_tower_hiddens + tokens as flat columns OR an sft_tokens struct.
+    if "vision_tower_hiddens" not in have:
+        issues.append("missing Tier 3 column vision_tower_hiddens")
+    flat = all(t in have for t in _TOKEN_FIELDS)
+    struct = "sft_tokens" in have
+    if not (flat or struct):
+        issues.append("missing Tier 3 tokens (neither flat input_ids/... nor sft_tokens struct)")
     return issues
 
 
-def _check_tier3_row(ds: lance.LanceDataset) -> list[str]:
+def _check_tier3_row(tbl) -> list[str]:
     issues = []
-    row = ds.take([0], columns=["vision_tower_hiddens", "input_ids",
-                                 "attention_mask", "labels"]).to_pydict()
+    have = set(tbl.schema.names)
+    struct = "sft_tokens" in have and not all(t in have for t in _TOKEN_FIELDS)
+    cols = ["vision_tower_hiddens"] + (["sft_tokens"] if struct else list(_TOKEN_FIELDS))
+    row = tbl.search().select(cols).limit(1).to_arrow().to_pydict()
+
     v = np.asarray(row["vision_tower_hiddens"][0], dtype=np.float16)
     if v.shape != (LLM_TOKENS_PER_IMAGE * VISION_HIDDEN,):
         issues.append(f"vision shape {v.shape} != ({LLM_TOKENS_PER_IMAGE*VISION_HIDDEN},)")
@@ -62,19 +76,17 @@ def _check_tier3_row(ds: lance.LanceDataset) -> list[str]:
     if abs(v.mean()) > 5.0:
         issues.append(f"vision mean {v.mean():.3f} is suspiciously large")
 
-    for col, n in [("input_ids", MAX_TEXT_TOKENS),
-                   ("attention_mask", MAX_TEXT_TOKENS),
-                   ("labels", MAX_TEXT_TOKENS)]:
-        arr = np.asarray(row[col][0])
-        if arr.shape != (n,):
-            issues.append(f"{col} shape {arr.shape} != ({n},)")
+    tokens = row["sft_tokens"][0] if struct else row
+    for col in _TOKEN_FIELDS:
+        arr = np.asarray(tokens[col][0] if not struct else tokens[col])
+        if arr.shape != (MAX_TEXT_TOKENS,):
+            issues.append(f"{col} shape {arr.shape} != ({MAX_TEXT_TOKENS},)")
     return issues
 
 
 def _check_run_dir(run_dir: Path) -> list[str]:
     issues = []
-    expected = ["lora/lora", "eval/accuracy.json", "eval/side_by_side.md",
-                "bench_dataloader.json", "bench_train_step.json", "pipeline.json"]
+    expected = ["lora/lora", "eval/accuracy.json", "eval/side_by_side.md"]
     for rel in expected:
         if not (run_dir / rel).exists():
             issues.append(f"missing artifact {rel}")
@@ -98,12 +110,14 @@ def main() -> int:
         print(f"FAIL: db not found: {db_path}")
         return 1
 
-    ds = lance.dataset(str(db_path))
-    LOG.info("opened %s (rows=%d, cols=%d)", db_path, ds.count_rows(), len(ds.schema.names))
+    uri, table_name = _split_db(str(db_path))
+    tbl = lancedb.connect(uri).open_table(table_name)
+    LOG.info("opened %s/%s (rows=%d, cols=%d)", uri, table_name,
+             tbl.count_rows(), len(tbl.schema.names))
 
-    issues.extend(_check_columns(ds))
+    issues.extend(_check_columns(tbl.schema))
     if not any("Tier 3" in i for i in issues):
-        issues.extend(_check_tier3_row(ds))
+        issues.extend(_check_tier3_row(tbl))
 
     if args.run_dir:
         rd = Path(args.run_dir).resolve()
