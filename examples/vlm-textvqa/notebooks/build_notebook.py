@@ -304,9 +304,6 @@ def build():
         "# Parquet fp16 *shuffled* re-decodes whole row groups per random batch (slow); skip it to keep this",
         "# notebook fast — the sequential row above already shows the gap. LanceDB shuffled stays fast:",
         "print(f'{\"vision vectors fp16 shuffled\":34}{shuf(lance_ds, VEC):9.0f}{\"--\":>9}')",
-        "print()",
-        "print('Parquet is competitive on sequential scans; the shuffled random access a training loop does')",
-        "print('every epoch favours the row index, and the fixed-size fp16 vectors read faster off Lance too.')",
     ))
 
     # 6 — train
