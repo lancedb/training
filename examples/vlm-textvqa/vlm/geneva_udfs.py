@@ -117,6 +117,7 @@ def dhash(image: bytes) -> int:
 
 _QWEN_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 _IGNORE = -100
+_IMAGE_PAD = "<|image_pad|>"
 
 
 class VisionTowerEmbedder:
@@ -179,31 +180,48 @@ vision_tower_hiddens = udf(
 class SFTTokenizer:
     """Pre-tokenise the SFT pair into (input_ids, attention_mask, labels).
 
+    The prompt is the **vision-aware** Qwen2.5-VL chat template: an image
+    message followed by the question, so the template emits
+    ``<|vision_start|>`` + ``LLM_TOKENS_PER_IMAGE`` × ``<|image_pad|>`` +
+    ``<|vision_end|>`` before the question.  Those ``<|image_pad|>``
+    positions are exactly where the train loop ``masked_scatter``-injects
+    the cached ``vision_tower_hiddens`` — so the model actually sees the
+    image.  (The image side is fixed to ``IMAGE_PX`` → ``LLM_TOKENS_PER_IMAGE``
+    merged tokens, so we expand the single template placeholder to that many
+    without needing the pixels here.)
+
     Returns a single struct so Geneva writes three columns from one call.
-    Prompt tokens are masked to -100 in `labels` so loss is only on
-    the answer span.
+    Prompt tokens (incl. the image pads) are masked to -100 in ``labels`` so
+    loss is only on the answer span.
     """
 
     def __init__(self) -> None:
+        self._proc = None
         self._tok = None
 
     def _lazy_load(self) -> None:
         if self._tok is not None:
             return
-        from transformers import AutoTokenizer
-        self._tok = AutoTokenizer.from_pretrained(_QWEN_MODEL_ID)
+        from transformers import AutoProcessor
+        self._proc = AutoProcessor.from_pretrained(_QWEN_MODEL_ID)
+        self._tok = self._proc.tokenizer
 
     def __call__(self, question: str, answer: str) -> dict[str, list[int]]:
         self._lazy_load()
         question = question or ""
         answer = answer or ""
 
-        # Mirror what Qwen2.5-VL processor does (without the vision pad)
-        # but in plain text: turn-based chat template with answer appended.
-        prompt = self._tok.apply_chat_template(
-            [{"role": "user", "content": question}],
-            tokenize=False, add_generation_prompt=True,
+        # Vision-aware chat template (image message + question). The template
+        # writes one <|image_pad|>; expand it to LLM_TOKENS_PER_IMAGE so the
+        # placeholders line up 1:1 with the cached vision hiddens.
+        messages = [{"role": "user", "content": [
+            {"type": "image"},
+            {"type": "text", "text": question},
+        ]}]
+        prompt = self._proc.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
         )
+        prompt = prompt.replace(_IMAGE_PAD, _IMAGE_PAD * LLM_TOKENS_PER_IMAGE)
         prompt_ids = self._tok(prompt, add_special_tokens=False)["input_ids"]
         ans_ids    = self._tok(answer + self._tok.eos_token,
                                add_special_tokens=False)["input_ids"]

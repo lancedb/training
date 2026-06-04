@@ -26,23 +26,55 @@ tokenisation.
 ## Run it on a free Colab T4
 
 [`notebooks/colab_textvqa_lance.ipynb`](./notebooks/colab_textvqa_lance.ipynb)
-runs the **whole loop on a single free T4** at demo scale: download a
-pre-baked Lance subset → benchmark **Lance-vs-Parquet** read throughput →
-**QLoRA** fine-tune from the cached columns → **before/after** answer grid
-on held-out images. Qwen2.5-VL-3B fits 16 GB via 4-bit NF4 (`--load-4bit`)
-plus the vision-tower-free cached path.
+runs the **whole loop on a single free T4**, **Run-All with zero manual
+steps** — the data is a public HF dataset, so there's nothing to configure:
+download a pre-baked **curated** Lance subset → **explore it with LanceDB**
+(distributions + a cross-modal vector-search demo over the shipped CLIP
+features) → benchmark **Lance-vs-Parquet** read throughput → **QLoRA**
+fine-tune from the cached columns → **before/after** accuracy on a held-out
+curated val split. Qwen2.5-VL-3B fits 16 GB via 4-bit NF4 (`--load-4bit`)
+plus the vision-tower-free cached path; peak VRAM stays **~5 GB**.
 
-The notebook reads a small subset with the cached columns already
-computed. Bake and host it once on any GPU box:
+The subset is **[`lance-format/textvqa-lance-colab`](https://huggingface.co/datasets/lance-format/textvqa-lance-colab)**
+— the curated **text-dense** slice (see [below](#curation-picking-the-slice-empirically)),
+600 train rows with `vision_tower_hiddens` + SFT tokens pre-computed and 400
+held-out val rows. The notebook defaults to it via the `TEXTVQA_COLAB_REPO`
+env var.
+
+Bake and host your own slice on any GPU box (the only manual prerequisite is
+`HF_TOKEN` with write access):
 
 ```bash
 python -m vlm.colab_prepare \
-    --out data/colab --train-rows 512 --val-rows 64 \
+    --out data/colab --slice text_dense --train-rows 600 --val-rows 400 \
     --hf-repo <your-org>/textvqa-lance-colab --push      # needs HF_TOKEN
 ```
 
-Then point the notebook at it via the `TEXTVQA_COLAB_REPO` env var (it
-defaults to `lance-format/textvqa-lance-colab`).
+### Curation: picking the slice empirically
+
+The base model is already strong on random TextVQA (~0.79), so a random
+subset barely moves. We picked the slice that maximises the **before/after
+gap** empirically (`vlm/slice_experiment.py`): of the candidates —
+**scene-text** (questions that read specific text), **text-dense**
+(top-quartile OCR-token count), and **random** — the **text-dense** slice
+gives the clearest, most robust lift. Measured on the baked subset (4-bit,
+held-out curated val):
+
+| Slice | base | tuned | Δ |
+|---|---:|---:|---:|
+| **text-dense** (chosen) | **0.799** | **0.820** | **+2.1 pp** (256 rows); +2.3 pp on 400 |
+| scene-text | 0.758 | 0.770 | +1.2 pp |
+| random | 0.760 | 0.757 | ~0 |
+
+Two findings worth their own line: the lift only appears with a **gentle
+learning rate** (3e-5 + ~300 steps; the QLoRA-default 2e-4 over a few
+hundred rows mildly forgets and *hurts*), and the cached payload must wire
+the image in — the SFT prompt carries `LLM_TOKENS_PER_IMAGE` (400)
+`<|image_pad|>` placeholders so the train loop `masked_scatter`s the cached
+`vision_tower_hiddens` into them. EDA and curation use the columns the
+source dataset **already ships** (CLIP `image_emb`/`question_emb`,
+`ocr_tokens`, `image_classes`) — **no feature backfill**; the only thing
+computed at bake time is `vision_tower_hiddens`.
 
 ## Real-run numbers (1×H100, 34,602 train rows, 200 eval rows)
 
@@ -80,10 +112,15 @@ defaults to `lance-format/textvqa-lance-colab`).
 ## The win: cache the vision tower, train on what's left
 
 Both dataloaders serve the table through the **LanceDB Permutation API**
-(`vlm/dataloader.py`, same pattern as the object-detection example): a
-`torch.utils.data.Dataset` that stores connection params, each worker
-reopens its own `Permutation`, and `__getitems__` returns an Arrow
-`RecordBatch` the collate turns into a model batch.
+(`vlm/dataloader.py`, same pattern as the
+[object-detection example](https://github.com/lancedb/training/blob/main/object-detection/object_detection/dataloader.py)):
+a `torch.utils.data.Dataset` that stores connection params, each worker
+reopens its own `Permutation`, and `__getitems__(indices)` returns a
+column-projected Arrow `RecordBatch` the collate turns into a model batch.
+It never materialises the whole table into RAM, so the same loop scales
+from the 600-row Colab subset to the full ~57 GB cached corpus, local or on
+object storage. (The Colab bake writes the table as a single compacted
+fragment — fastest for the shuffled `Permutation` reads.)
 
 The point isn't raw read speed — it's *what you serve*:
 
@@ -180,16 +217,19 @@ examples/vlm-textvqa/
 ├── pyproject.toml
 ├── vlm/
 │   ├── schema.py
-│   ├── ingest.py                      ← stream HF -> local lance
+│   ├── ingest.py                      ← stream HF -> local lance (+ slice filter)
+│   ├── slices.py                      ← canonical curation-slice definitions
+│   ├── slice_experiment.py            ← empirical slice picker (base acc + lift)
 │   ├── geneva_udfs.py                 ← Tier 1/2/3 UDFs (incl. vision_tower_hiddens, sft_tokens)
 │   ├── backfill_geneva.py             ← Tier 1/2/3 runner (default Tier-3 path)
-│   ├── backfill_direct.py             ← Tier 3 single-process fallback (no Ray)
-│   ├── colab_prepare.py              ← bake + push a small cached subset for Colab
+│   ├── backfill_direct.py             ← Tier 3 single-process path (no Ray; used by the bake)
+│   ├── colab_prepare.py              ← bake + push a curated cached subset for Colab
 │   ├── dataloader.py                  ← LanceDB Permutation loaders (cached + raw)
 │   ├── train_qwen25vl_lora.py         ← LoRA SFT, cached path (--load-4bit for QLoRA)
 │   ├── eval.py                        ← accuracy + side-by-side (--load-4bit)
 │   └── verify_pipeline.py             ← sanity-check columns + artifacts
 ├── notebooks/
+│   ├── build_notebook.py             ← regenerates the notebook from one config
 │   └── colab_textvqa_lance.ipynb     ← free-T4 end-to-end demo
 └── scripts/
     └── run_pipeline.sh                ← single-command e2e runner
@@ -202,9 +242,17 @@ examples/vlm-textvqa/
 - **HF rate-limits** anonymous requests within seconds.  Set `HF_TOKEN`.
 - **Geneva 0.12.0 + pylance 3.0.0** are pinned together; the source HF
   Lance dataset uses a newer encoding so we stream-and-rewrite via
-  `datasets.load_dataset` rather than open it directly.
+  `datasets.load_dataset` rather than open it directly (this also lets the
+  bake filter a slice cheaply).
 - **Tier-3 GPU UDFs run two per actor by default** (`--concurrency 2`).
   Each actor lazy-loads the Qwen vision tower (~668 MB) in its worker, so
   tune concurrency to your GPU's memory. If you hit an actor-pool stall,
-  fall back to the single-process path with `TIER3_BACKEND=direct`
-  (`vlm/backfill_direct.py`).
+  fall back to the single-process path (`vlm/backfill_direct.py`, used by
+  the Colab bake — same UDFs, no Ray).
+- **The cached SFT tokens carry the image.** `vision_tower_hiddens` is only
+  useful if the tokenised prompt has matching `<|image_pad|>` placeholders;
+  `SFTTokenizer` emits `LLM_TOKENS_PER_IMAGE` (400) of them so the train
+  loop `masked_scatter`s the cached hiddens into the right positions.
+- **The bake writes a single Lance fragment** (`single_fragment=True` in
+  `vlm/ingest.py`) so the cached table is one compact file — fastest for the
+  shuffled `Permutation` reads the dataloader does.

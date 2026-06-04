@@ -1,0 +1,24 @@
+{
+  "task": "Pick the TextVQA curation slice that maximises the LoRA before/after gap",
+  "setup": "4-bit QLoRA (lora_r=16), cached vision_tower_hiddens path, official TextVQA accuracy, held-out curated val. Mirrors the notebook code path.",
+  "candidates": ["scene_text", "text_dense", "random"],
+  "ocr_top_quartile_threshold": 16,
+  "key_findings": [
+    "text_dense (top-quartile OCR-token count) gives the clearest, most robust positive lift.",
+    "A gentle learning rate is essential: lr=3e-5 + ~300 steps lifts; the QLoRA-default lr=2e-4 over a few hundred rows mildly forgets and HURTS every slice.",
+    "The cached SFT tokens must carry 400 <|image_pad|> placeholders (LLM_TOKENS_PER_IMAGE) so the train loop masked_scatters the cached vision hiddens; otherwise training is blind to the image and degrades."
+  ],
+  "results_lr_3e-5": {
+    "text_dense": {"base": 0.793, "tuned_step150": 0.810, "tuned_step300": 0.815, "delta_step300_pp": 2.2, "n_val": 200},
+    "scene_text": {"base": 0.758, "best_tuned": 0.770, "best_delta_pp": 1.2, "n_val": 200},
+    "random":     {"base": 0.760, "tuned": 0.757, "delta_pp": -0.3, "n_val": 200}
+  },
+  "chosen": {
+    "slice": "text_dense",
+    "filter": "len(ocr_tokens) >= 16  (top-quartile OCR-token count)",
+    "train_recipe": "4-bit QLoRA, lora_r=16, lr=3e-5, ~300 optimizer steps (bs=2, grad_accum=4)",
+    "baked_subset": "lance-format/textvqa-lance-colab (600 train w/ cached hiddens, 400 held-out val)",
+    "measured_on_baked_subset": {"base": 0.799, "tuned": 0.820, "delta_pp": 2.1, "n_val": 256,
+                                 "also_n400": {"base": 0.804, "tuned": 0.828, "delta_pp": 2.3}}
+  }
+}

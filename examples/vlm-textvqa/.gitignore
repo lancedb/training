@@ -17,3 +17,14 @@ runs/*/info
 runs/*/predictions_*.jsonl
 
 # Keep small summary jsons + side-by-side md (no .gitignore for these)
+
+# scratch: local headless-exec copy of the notebook
+notebooks/_local_exec.ipynb
+
+# scratch: in-notebook throughput stand-in
+bench/
+
+# scratch: in-notebook throughput mirror
+mirror.parquet
+raw.parquet
+vec.parquet

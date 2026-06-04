@@ -21,12 +21,13 @@ dependencies = [
     # Training / eval stack (GPU)
     "torch>=2.4.0",
     "torchvision>=0.19.0",
-    "transformers>=4.46.0",
+    "transformers>=4.49.0",   # Qwen2.5-VL
     "qwen-vl-utils>=0.0.8",
     "accelerate>=1.0.0",
     "peft>=0.13.0",
     "bitsandbytes>=0.43.0",   # NF4 QLoRA for the Colab T4 path
     "sentencepiece>=0.2.0",
+    "matplotlib>=3.7.0",      # EDA plots in the notebook
 ]
 
 [project.scripts]
