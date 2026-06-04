@@ -69,22 +69,20 @@ def build():
         "We picked this slice empirically: of the candidate slices, it's the one where LoRA "
         "gives the clearest lift over the already-strong base model (see the repo README for the numbers).",
         "",
-        "**Why it fits a 16 GB T4 — the LanceDB trick:** the vision tower is the expensive part of a VLM. "
-        "We run it **once**, offline, and store its output (`vision_tower_hiddens`) as a column in a Lance table. "
-        "Training then reads that column straight off disk and skips the vision tower entirely — so the train "
-        "loop only holds the (4-bit quantized) language model + a LoRA adapter. This is "
-        "`Curate → Manage → Load & train` from the "
-        "[repo README](https://github.com/lancedb/training#why-use-lancedb-for-training), at toy scale.",
+        "**Why it fits a 16 GB T4:** the vision tower is the expensive part of a VLM. We run it **once**, "
+        "offline, and store its output (`vision_tower_hiddens`) as a column in the Lance table. Training reads "
+        "that column off disk and skips the vision tower entirely, so the loop only holds the (4-bit) language "
+        "model + a LoRA adapter.",
         "",
         "What you'll run:",
-        "1. **Download** a pre-baked, curated Lance subset (cached vision hiddens already computed on a GPU).",
-        "2. **Explore** it with LanceDB — distributions + a cross-modal **vector-search** demo over the shipped CLIP features.",
-        "3. **Benchmark** read throughput: the same cached columns from **Lance vs Parquet**.",
+        "1. **Download** the pre-baked, curated Lance subset (cached vision hiddens already computed on a GPU).",
+        "2. **Explore** it — distributions + a cross-modal vector-search demo over the shipped CLIP features.",
+        "3. **Benchmark** read throughput (sequential vs shuffled), Lance vs Parquet.",
         "4. **QLoRA fine-tune** from the cached columns — vision tower never loaded.",
-        "5. **Before / after**: generate answers with the base model and the tuned model on **held-out** images, side by side.",
+        "5. **Before / after**: base vs tuned answers on **held-out** images, side by side.",
         "",
         "> ⏱️ End-to-end on a T4: a few minutes. Demo scale (hundreds of rows) — the point is the mechanics, "
-        "the LanceDB data layer, and the curated lift, not a SOTA checkpoint.",
+        "not a SOTA checkpoint.",
     ))
 
     # 1 — GPU check
@@ -271,9 +269,8 @@ def build():
         "- the **raw multimodal** columns (`image` bytes + `question` + `answer`), and",
         "- the cached **fixed-size fp16 vision vectors** (`vision_tower_hiddens`).",
         "",
-        "**Sequential** streams the split in order (`to_batches`) — Parquet's home turf. **Shuffled** is what "
-        "training does every epoch: a random batch of rows by index (`.take`). Numbers print live from *your* "
-        "runtime.",
+        "**Sequential** streams the split in order (`to_batches`); **shuffled** is what training does every "
+        "epoch: a random batch of rows by index (`.take`). Numbers print live from *your* runtime.",
     ))
     cells.append(code(
         "import time, numpy as np, pyarrow.parquet as pq, pyarrow.dataset as pds",
@@ -308,10 +305,8 @@ def build():
         "# notebook fast — the sequential row above already shows the gap. LanceDB shuffled stays fast:",
         "print(f'{\"vision vectors fp16 shuffled\":34}{shuf(lance_ds, VEC):9.0f}{\"--\":>9}')",
         "print()",
-        "print('Parquet wins raw sequential scans (its home turf). But training reshuffles every epoch, and')",
-        "print('there LanceDB wins on random access (row index vs row-group reads) — and on the fixed-size fp16')",
-        "print('vision vectors it reads ~10x+ faster even sequentially. Same data off disk, no full load into')",
-        "print('RAM — which is what lets the same loop scale to the full ~57 GB cached corpus.')",
+        "print('Parquet is competitive on sequential scans; the shuffled random access a training loop does')",
+        "print('every epoch favours the row index, and the fixed-size fp16 vectors read faster off Lance too.')",
     ))
 
     # 6 — train
@@ -438,18 +433,17 @@ def build():
     cells.append(md(
         "## Recap",
         "",
-        f"On a free T4 you just ran the full shape of a real VLM fine-tune on a **curated {SLICE}** slice:",
+        f"On a free T4 you ran the full shape of a VLM fine-tune on a curated **{SLICE}** slice, all off one "
+        "Lance table:",
         "",
-        "| Stage | What LanceDB did |",
-        "|---|---|",
-        "| **Curate** | picked the slice empirically; sliced + explored it (distributions + cross-modal vector search) straight from the table |",
-        "| **Manage** | the expensive vision-tower output lives as a column you computed once and reuse forever (`vision_tower_hiddens`) |",
-        "| **Load & train** | shuffled random access off disk — no full-corpus load into RAM — feeding a vision-tower-free, 4-bit train loop |",
-        "| **Eval** | base vs tuned, side by side, on held-out curated images |",
+        "1. curated the slice empirically and explored it (distributions + cross-modal vector search),",
+        "2. computed the vision-tower output once and stored it as a column (`vision_tower_hiddens`),",
+        "3. trained a vision-tower-free, 4-bit LoRA loop reading that column off disk,",
+        "4. compared base vs tuned on held-out images.",
         "",
-        "**Scale it up:** the same code runs the full 34,602-row corpus on an H100 — see "
+        "The same code runs the full 34,602-row corpus on an H100 — see "
         "[`examples/vlm-textvqa`](https://github.com/lancedb/training/tree/vlm-textvqa/examples/vlm-textvqa). "
-        f"On the curated slice the cached path lifts held-out TextVQA accuracy {lift_str}.",
+        f"On this curated slice the lift was {lift_str}.",
     ))
 
     nb = {
