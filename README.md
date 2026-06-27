@@ -6,7 +6,7 @@ One LanceDB table for the entire training loop
 
 - **Curate & engineer features** — compute new signals (detections, CLIP embeddings, scene tags, dedup flags) as columns via distributed, checkpointed UDF backfills, then slice with SQL, full-text, and vector search directly on the table. Create a dataloder directly using filtered reads from the table or create a training split as *versioned materialized view*, not a CSV manifest.
 - **Manage at scale** — bytes, metadata, annotations, and embeddings all live in one schema-enforced table, and **zero-copy schema evolution** lets you add a column without rewriting the data: pre-tokenize or pre-embed a multi-TB corpus once and append it as a new column for free.
-- **Load & train** — With random-access, zero-copy dataloading reads straight from LanceDB tables, from local or object storage, keeping the GPU fed and shards cleanly across Ray workers.
+- **Load & train** — With random-access, zero-copy dataloading reads straight from LanceDB tables, from local or object storage, keeping the GPUs fed
 
 ---
 
