@@ -90,26 +90,18 @@ lerobot-convert-to-lance-video --repo-id=local/libero_video \
 
 ## 2. Migration: what actually changes in your training code
 
-LeRobot's `make_dataset` factory hardcodes the `LeRobotDataset` class, so the plugin ships
-as a drop-in subclass. The **entire migration** is a 30-line launcher that swaps the class
-and hands control back to stock `lerobot-train` — the policy, processors, sampler,
-optimizer, and `accelerate` multi-GPU path are all untouched upstream code:
+LeRobot's `make_dataset` factory hardcodes the `LeRobotDataset` class, and the plugin's
+dataset classes are drop-in constructor-compatible subclasses (lerobot-lancedb ≥ 0.2) — so
+the **entire migration** is pointing the factory at the Lance class and handing control
+back to stock `lerobot-train`. Policy, processors, sampler, optimizer, and the
+`accelerate` multi-GPU path are all untouched upstream code:
 
 ```python
-# train_lance.py — the whole "migration"
+# train_lance.py — the whole migration
 import lerobot.datasets.factory as factory
 from lerobot_lancedb import LeRobotLanceVideoDataset
 
-class LanceVideoDataset(LeRobotLanceVideoDataset):
-    absolute_to_relative_idx = None  # lance serves every frame by absolute index
-
-def make_lance_dataset(repo_id, root=None, episodes=None, delta_timestamps=None,
-                       image_transforms=None, revision=None, **_parquet_only):
-    return LanceVideoDataset(root=root, episodes=episodes,
-                             delta_timestamps=delta_timestamps,
-                             image_transforms=image_transforms, return_uint8=True)
-
-factory.LeRobotDataset = make_lance_dataset   # <-- the switch
+factory.LeRobotDataset = LeRobotLanceVideoDataset  # <-- the switch
 
 if __name__ == "__main__":
     from lerobot.scripts.lerobot_train import main
