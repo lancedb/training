@@ -50,8 +50,7 @@ video-grade compression *and* frame-level random access.
 ```bash
 uv venv --python 3.12 .venv && source .venv/bin/activate
 uv pip install "lerobot[libero,smolvla,dataset]==0.6.0" \
-               "git+https://github.com/lancedb/lerobot-lancedb.git" \
-               "torchcodec==0.10.*"
+               "lerobot-lancedb>=0.2.1" "torchcodec==0.10.*"
 export MUJOCO_GL=egl   # headless sim rendering
 ```
 
@@ -299,5 +298,5 @@ benchmarks (`bench_throughput.py`), training launchers (`train_lance.py`,
 plots (`make_plots.py`).
 
 Hardware: 4×H100 80GB, 104 CPU cores. Software: python 3.12, lerobot 0.6.0,
-lerobot-lancedb 0.1.0, lancedb 0.34, pylance 8.0, torchcodec 0.10 + FFmpeg 7,
+lerobot-lancedb 0.2.1, lancedb 0.34, pylance 8.0, torchcodec 0.10 + FFmpeg 7,
 geneva 0.14 (separate venv: lancedb 0.35b0 + pylance 9b20 from the fury preview indexes).
