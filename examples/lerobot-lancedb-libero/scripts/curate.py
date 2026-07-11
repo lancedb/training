@@ -124,6 +124,8 @@ def main():
     print(f"curated {len(curated)} episodes -> curated_episodes.npy")
     print("train with: LeRobotLanceVideoDataset(root=..., episodes=curated) + EpisodeAwareSampler")
 
+    extras(root, out, tbl, frames_ds, text_vec)
+
     # ── frame grids for the blog ──
     log_step("saving search-result frame grids")
     from lerobot_lancedb import LeRobotLanceVideoDataset
@@ -144,6 +146,47 @@ def main():
         fig.tight_layout()
         fig.savefig(out / f"search_{qi}.png")
     print("done ->", out)
+
+
+
+
+def extras(root: Path, out: Path, tbl, frames_ds, text_vec):
+    """Extended curation examples: dedup, outliers, hybrid query, time travel."""
+    import numpy as np
+    log_step("near-duplicate episodes (redundancy pruning)")
+    t0 = time.time()
+    df = frames_ds.to_table(columns=["episode_index", "frame_index", "emb_image"]).to_pandas()
+    mid = df[df.frame_index == 30].dropna(subset=["emb_image"])
+    E = np.stack(mid["emb_image"].to_numpy())
+    eps = mid["episode_index"].to_numpy()
+    sims = E @ E.T
+    np.fill_diagonal(sims, 0)
+    ii, jj = np.where(np.triu(sims, 1) > 0.995)
+    print(f"episode pairs with >0.995 mid-episode similarity: {len(ii)} "
+          f"(e.g. {[(int(eps[a]), int(eps[b])) for a, b in list(zip(ii, jj))[:5]]}) "
+          f"in {time.time()-t0:.1f}s — candidates for dedup before training")
+
+    log_step("visual outliers within a task (teleop glitch mining)")
+    task_rows = tbl.search().where("task LIKE '%microwave%'").select(["index", "episode_index", "emb_image"]).limit(50000).to_pandas()
+    T = np.stack(task_rows["emb_image"].to_numpy())
+    centroid = T.mean(0); centroid /= np.linalg.norm(centroid)
+    d = 1 - T @ centroid
+    worst = task_rows.iloc[np.argsort(d)[-5:]]
+    print("frames farthest from the task's visual centroid (potential anomalies):")
+    print(worst[["index", "episode_index"]].to_string(index=False))
+
+    log_step("hybrid query: task text + visual state")
+    t0 = time.time()
+    hits = (tbl.search(text_vec("the gripper is holding the object in the air"), vector_column_name="emb_image")
+            .where("task LIKE '%basket%'", prefilter=True).limit(6).to_pandas())
+    print(f"'holding object' ∩ task~basket -> episodes {hits['episode_index'].tolist()} "
+          f"in {(time.time()-t0)*1000:.0f} ms")
+
+    log_step("time travel: versioned, reproducible splits")
+    versions = frames_ds.versions()
+    print(f"table has {len(versions)} versions; e.g. v{versions[1]['version']} = pre-embedding table.")
+    print("checkout any version for a bit-reproducible training split:")
+    print("  lance.dataset(uri, version=N)  # the split you trained on, forever")
 
 
 if __name__ == "__main__":

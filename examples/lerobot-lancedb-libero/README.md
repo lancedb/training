@@ -248,7 +248,19 @@ column commit, no rewrite of the 1.9 GB of video. The task text joins in the sam
 Queries like *"the microwave door is open"* or *"robot arm reaching into a drawer"* return
 the right frames from the right episodes (see `assets/search_*.png`).
 
-### 5.3 Curation that feeds straight back into training
+### 5.3 Four more things the same table answers
+
+- **Near-duplicate episodes**: comparing mid-episode embeddings across all 1,693 episodes
+  takes 0.9 s (one matrix product) and surfaces pair (1106, 1210) at >0.995 similarity —
+  dedup before training.
+- **Outlier mining**: frames farthest from a task's visual centroid = teleop glitches;
+  episode 217 appears twice in the microwave tasks' top-5 anomalies.
+- **Hybrid queries**: `"gripper holding the object" ∩ task LIKE '%basket%'` in 25 ms
+  (vector + FTS prefilter composed in one call).
+- **Time travel**: 26 committed table versions from the backfills;
+  `lance.dataset(uri, version=N)` re-opens the exact table any run trained on.
+
+### 5.4 Curation that feeds straight back into training
 
 The "best model" run in this example is the loop closed: select the `libero_object`
 episodes with a SQL filter on task text, get an episode list, and train on it —
