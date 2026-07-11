@@ -172,6 +172,25 @@ mp4 loader also steals CPU from trainer threads). Heavy 4-cam 480×640 real data
 counterexample that proves the mechanism: decode dominates both formats equally there and
 the loader ratio itself collapses to 1.25×.
 
+### Object storage as a first-class training disk
+
+Base LeRobot has no S3 read path (sync first, then train). The Lance reader takes an
+`s3://` URI directly. The headline: **streaming Lance from S3 is faster than reading
+parquet+mp4 from local NVMe, on every pattern we measured** (samples/s, 8 workers,
+same-region bucket, time-to-first-batch 10–15 s):
+
+| read pattern | parquet+mp4, local NVMe | Lance, streamed from S3 | Lance, local NVMe |
+|---|---|---|---|
+| DROID (3 cams) | 722 | **897** | 1,709 |
+| ALOHA sim | 817 | **1,013** | 2,296 |
+| LIBERO (SmolVLA pattern) | 1,271 | **1,445** | 3,111 |
+
+At 16 workers S3 reaches 1,690–2,458 smp/s — enough to feed every budget-tier config
+above with the dataset never touching the machine. What that buys: no dataset volume to
+provision, no sync step, one bucket copy shared by N nodes, ~3–4× cheaper per GB than the
+SSD volumes you'd sync to, and random access means a curated episode list can train
+against a corpus that never fits on the node.
+
 ## 4. Same data, same policy: LIBERO success rates
 
 
