@@ -157,9 +157,20 @@ faster GPUs take every configuration, converging on the dataloader-cost ceiling
 (~2.4–2.9× on these read patterns). See [`H200_RUNBOOK.md`](./H200_RUNBOOK.md) to verify
 on newer silicon.
 
-Loader-only microbenchmarks (single process, mechanism behind the numbers): DROID
-pattern 722 vs 1,709 smp/s at 8 workers (2.37×); ALOHA-sim 817 vs 2,296 (2.81×);
-heavy 4-cam 480×640 real data converges (1.25×) — decode dominates both formats there.
+### Loader-only vs end-to-end: the convergence
+
+The loader measured in isolation is where the advantage lives; training exposes it only
+when the loader binds. Side by side:
+
+| read pattern | loader-only (8 wkr) | e2e @26 vCPU/GPU | e2e @8 | e2e @4 | e2e @3 |
+|---|---|---|---|---|---|
+| DROID (3 cams) | **2.37×** | 1.26× | 1.92× | 2.57× | **2.85×** |
+| ALOHA sim (1 cam) | **2.81×** | 1.06× | 1.29× | 2.31× | **2.47×** |
+
+Squeezed budgets push e2e to — on DROID slightly past — the loader-only ratio (a starved
+mp4 loader also steals CPU from trainer threads). Heavy 4-cam 480×640 real data is the
+counterexample that proves the mechanism: decode dominates both formats equally there and
+the loader ratio itself collapses to 1.25×.
 
 ## 4. Same data, same policy: LIBERO success rates
 
@@ -196,6 +207,13 @@ SQL query on the Lance table's task column — 30k steps, ~1h50m on the Lance lo
 same run on the base loader would have been ~4.5h). From 0% to **77%** on its suite
 (10k-step checkpoint; later checkpoints overfit: 76% @ 20k, 72% @ 30k), with zero data
 copied — the episode list goes straight into `--dataset.episodes`.
+
+| libero_object success | % |
+|---|---|
+| smolvla_base (before) | 0 |
+| curated split, 10k steps | **77** |
+| curated split, 20k / 30k | 76 / 72 |
+| 40-task generalist, 40k | **89** |
 
 The multi-suite checkpoint still wins on that suite (89%): at this scale, multi-task
 transfer beats a focused finetune. The point of the curated run is the workflow — *a

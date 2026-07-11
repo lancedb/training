@@ -347,12 +347,25 @@ finished in <b>50m04s vs 1h55m37s</b> for base (<b>2.31×</b>); at 8 vCPU/GPU,
 <b>33m06s vs 60m37s</b> (<b>1.83×</b>). Loss curves match to the third decimal at every logged step —
 same bytes, same model, same result; one just waits on its dataloader.</p>
 
-<p>The pattern generalizes: on the ALOHA sim dataset (native 480×640, single camera) the
-same sweep gives 2.47× / 2.31× / 1.29× / 1.06× at 3 / 4 / 8 / 26 vCPU per GPU, and its full
-20k-step pair finished in <b>53 min (Lance) vs 99 min (base)</b>. Even at lerobot's stock
-defaults on the full 104-thread box — no CPU cap anywhere — the ALOHA run shows 1.46×.
-Dataloader microbenchmarks (2.4–2.9× across read patterns) and the batch-size sweep
-(1.98×→2.31× when demand rises at fixed CPU) are in the
+<p>Why does the gap grow as CPU shrinks? Because the dataloader itself — measured in
+isolation, no training attached — is where the advantage lives, and training only exposes
+it when the loader is the binding constraint. Put the loader-only ratio next to the e2e
+ratio at each budget and you can watch the convergence:</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th>read pattern</th><th>loader-only<br/>(isolated, 8 wkr)</th><th>e2e @ 26<br/>vCPU/GPU</th><th>e2e @ 8</th><th>e2e @ 4</th><th>e2e @ 3</th></tr></thead>
+<tbody>
+<tr><td>DROID (3 cams)</td><td><b>2.37×</b></td><td>1.26×</td><td>1.92×</td><td>2.57×</td><td><b>2.85×</b></td></tr>
+<tr><td>ALOHA sim (1 cam, 480×640)</td><td><b>2.81×</b></td><td>1.06×</td><td>1.29×</td><td>2.31×</td><td><b>2.47×</b></td></tr>
+</tbody></table></div>
+
+<p>Abundant CPU hides the loader (right columns → 1×); squeeze it and the e2e number
+climbs to — and on DROID slightly past — the loader-only ratio, because a starved mp4
+loader also steals CPU from the trainer's own threads. The generalization holds across
+datasets, and even at lerobot's stock defaults on the full 104-thread box (no CPU cap
+anywhere) the ALOHA run shows 1.46×. The ALOHA full 20k-step pair: <b>53 min (Lance) vs
+99 min (base)</b>. The batch-size sweep (1.98×→2.31× when demand rises at fixed CPU) and
+all loader matrices are in the
 <a href="https://github.com/lancedb/training/pull/6">repro repo</a>.</p>
 
 <h3>Faster GPUs make this gap bigger, not smaller</h3>
