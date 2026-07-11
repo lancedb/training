@@ -207,6 +207,14 @@ same seed, evaluated with `lerobot-eval` closed-loop (`n_action_steps=1`),
 | libero_10 | 0.0 | 71.0 | 82.0 |
 | **average** | **0.0** | **80.8** | **82.0** |
 
+*Provenance: the base checkpoint trains on `HuggingFaceVLA/libero` exactly as
+published; the Lance checkpoint on its video conversion — same recipe, seed, and
+hyperparameters (`--policy.path=lerobot/smolvla_base --policy.input_features=null
+--policy.output_features=null --policy.freeze_vision_encoder=false
+--policy.train_expert_only=false --steps=40000 --batch_size=16 --num_workers=8` under
+4-process `accelerate launch`). Quality baseline only — no speed comparison is made
+between these runs.*
+
 Per-suite differences flip direction randomly — binomial noise at n=100, on top of
 bit-for-bit identical loss curves (final 0.081 vs 0.080). No speed claims here: at 450M
 parameters the GPU is the bottleneck and both formats keep it fed — the speed story is
@@ -325,6 +333,10 @@ byte-range reads — locally or over S3. That is why conversion takes seconds (b
 copied verbatim, so decoded frames are bit-exact vs the source videos), why the dataset
 stays video-sized, and why torchcodec can decode straight from an in-memory buffer that
 never touched a filesystem path.
+
+*Aside: the plugin also ships a JPEG-per-frame "frames format"
+(`LeRobotLanceDataset`) with optional GPU NVJPEG decode (`decode_device="cuda"`) —
+lossy and larger on disk, so this example uses the bit-exact video format throughout.*
 
 ## Repro
 

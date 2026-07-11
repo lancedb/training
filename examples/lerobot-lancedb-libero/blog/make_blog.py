@@ -580,6 +580,12 @@ supporting byte-range reads — locally or over S3. torchcodec decodes straight 
 in-memory buffers. That's why conversion is instant, pixels are bit-exact, the dataset
 stays video-sized, and a shuffled DataLoader gets frame-level random access anyway.</p>
 
+<p><i>Aside: the plugin also ships a second, JPEG-per-frame "frames format"
+(<code>LeRobotLanceDataset</code>) that trades the video container for per-frame random
+access and optional GPU-side NVJPEG decode (<code>decode_device="cuda"</code>). It is
+lossy and larger on disk, so everything in this post uses the bit-exact video format —
+but if your bottleneck is CPU decode and you can spend storage, it exists.</i></p>
+
 <h2>Takeaways</h2>
 <p>For a robotics team on LeRobot today: keep recording exactly as you do, run one
 conversion command, swap one launcher file — and get a 2.4× faster dataloader on

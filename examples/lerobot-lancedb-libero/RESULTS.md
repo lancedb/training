@@ -41,9 +41,11 @@ ABC-130k smoke: DISQUALIFIED — FrameTimestampError in base lerobot decode (dat
 - droid pattern nw8: 722/1,709 (2.37×)
 - aloha static 4-cam nw8: 477/598 (1.25×)  ← heavy-decode collapse data point
 - LIBERO smolvla pattern (older matrix): nw4 645/1,561, nw8 1,271/3,111, nw16 2,547/6,121 (2.4×)
-- LIBERO image-parquet (banned from blog): 16/31/70 smp/s
 
-## Quality parity (LIBERO, SmolVLA 40k identical runs, closed-loop nas=1, 100 eps/suite)
+## Quality parity (LIBERO, SmolVLA 40k, closed-loop nas=1, 100 eps/suite)
+(base ckpt trained on the officially published dataset; lance on the video conversion —
+quality baseline only, never used for perf claims. Earlier image-parquet-vs-video PERF
+measurements were removed as not apples-to-apples.)
 | suite | before | base | lance |
 | spatial | 0 | 81 | 80 |
 | object | 0 | 88 | 89 |
