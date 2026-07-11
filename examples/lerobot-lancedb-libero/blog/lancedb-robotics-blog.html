@@ -267,18 +267,37 @@ LIBERO numbers look inexplicably bad, check this flag before blaming your model.
 step is cheap in sim — and cheap to discover when your evals aren't queued behind a
 dataloader-starved GPU box.</figcaption></figure>
 
-<h2>Part 4 — Stream training data from S3</h2>
-<p>The Lance reader takes an <code>s3://</code> URI directly — byte-range reads against
-the blob column, no local copy. Measured from a same-region bucket on the LIBERO table:</p>
-<div class="statrow">
-<div class="stat accent"><div class="v">2,458/s</div><div class="l">samples/s streaming from S3, 16 workers</div></div>
-<div class="stat"><div class="v">1,445/s</div><div class="l">at 8 workers</div></div>
-<div class="stat"><div class="v">0 bytes</div><div class="l">of local disk required</div></div>
-</div>
-<p>That is several times what the 4-GPU trainings above consume — object storage becomes
-a place you can train <em>from</em>, not just sync <em>from</em>. It matters most when
-the corpus outgrows the training node: Lance's random access means an episode list from a
-table query can train on a 50 GB slice of a 10 TB bucket without materializing the rest.</p>
+<h2>Part 4 — Object storage as a first-class training disk</h2>
+<p>Base LeRobot has no S3 read path: sync the dataset down, then train. The Lance reader
+takes an <code>s3://</code> URI directly — byte-range reads against the blob column, no
+local copy ever created. The number that matters isn't "how close is S3 to local Lance" —
+it's this one:</p>
+
+<blockquote><b>Streaming Lance from S3 is faster than reading parquet+mp4 from local
+NVMe</b> — on every read pattern we measured.</blockquote>
+
+<div class="tablewrap"><table>
+<thead><tr><th>read pattern (8 workers)</th><th>parquet+mp4,<br/>local NVMe</th><th>Lance,<br/>streamed from S3</th><th>Lance,<br/>local NVMe</th></tr></thead>
+<tbody>
+<tr><td>DROID (3 cams)</td><td>722</td><td><b>897</b></td><td>1,709</td></tr>
+<tr><td>ALOHA sim</td><td>817</td><td><b>1,013</b></td><td>2,296</td></tr>
+<tr><td>LIBERO (2 cams, SmolVLA pattern)</td><td>1,271</td><td><b>1,445</b></td><td>3,111</td></tr>
+</tbody></table></div>
+
+<p>Samples per second, same-region bucket, time-to-first-batch 10–15 s. At 16 workers the
+S3 numbers grow to 1,690–2,458 smp/s — enough to fully feed every budget-tier training
+config in Part 1 with the dataset never touching the machine.</p>
+
+<h3>What that buys you</h3>
+<p><b>No dataset volume at all.</b> The GPU node needs disk for checkpoints, not data —
+no capacity planning, no "is the EBS volume big enough for the next dataset."
+<b>No sync step</b> in the training job: node boots, training starts, first batch in
+seconds. <b>One copy, N nodes</b>: every worker in a sweep streams the same bucket
+object — no per-node duplication of a growing corpus. <b>Storage economics</b>: object
+storage runs roughly 3–4× cheaper per GB than the SSD volumes you'd otherwise sync to,
+and robotics corpora only grow. And because Lance is random-access over S3, a
+<b>curated slice</b> — an episode list from a Part-5 query — can train against a corpus
+that never fits on the node at all: read the 50 GB you selected out of the 10 TB you own.</p>
 
 <h2>Part 5 — The training table is also a database</h2>
 <p>This is where the format decision compounds. Everything in this section ran against

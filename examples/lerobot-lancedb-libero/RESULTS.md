@@ -58,6 +58,11 @@ NOTE: LIBERO base ckpt trained on official image-parquet release — quality bas
 - stream training reads: 1,445 smp/s @8w, 2,458 @16w; TTFB 68s/108s
 - 1.9 GB sync = 9s on this pipe
 
+## S3 streaming (same-region, lance video, smp/s)
+- droid: nw8 897 (ttfb 14.5s), nw16 1,690 — vs local mp4 722/1,604, local lance 1,709/2,920
+- aloha_sim: nw8 1,013 (ttfb 9.9s), nw16 1,709 — vs local mp4 817/1,604, local lance 2,296/2,920
+- CLAIM (all patterns): S3-streamed lance >= local-NVMe parquet+mp4
+
 ## Curation (LIBERO lance table, 273k rows)
 - Geneva 0.14 stateful GPU UDF backfill (SigLIP2 768d): 273k frames ~10 min on 2 GPUs
 - IVF-PQ index 47s; FTS 0.1s; btree <0.1s; semantic search 13-15ms; FTS 7ms; btree scan 7ms
