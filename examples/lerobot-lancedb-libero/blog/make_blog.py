@@ -347,6 +347,13 @@ finished in <b>50m04s vs 1h55m37s</b> for base (<b>2.31×</b>); at 8 vCPU/GPU,
 <b>33m06s vs 60m37s</b> (<b>1.83×</b>). Loss curves match to the third decimal at every logged step —
 same bytes, same model, same result; one just waits on its dataloader.</p>
 
+<figure class="chart"><div class="ttl">The same 600 training steps, seen from the GPUs</div>
+<img class="figimg" alt="Left: Lance runs at 329 W and finishes in half the time of base at 215 W. Right: base spends 33 percent of every step waiting on data versus 10 percent for Lance across the full 20k-step runs" src="{b64(ASSETS / 'gpu_and_wait_droid.png', 'image/png')}"/>
+<figcaption>Left: GPU power during identical 600-step DROID segments at 4 vCPU/GPU —
+Lance holds <b>329 W</b> and finishes in half the time; base idles at <b>215 W</b>
+(nvidia-smi "utilization" hides this; watts don't). Right: share of each training step
+spent waiting on the dataloader over the full 20k-step runs — a steady <b>33% vs ~10%</b>.</figcaption></figure>
+
 <p>Why does the gap grow as CPU shrinks? Because the dataloader itself — measured in
 isolation, no training attached — is where the advantage lives, and training only exposes
 it when the loader is the binding constraint. Put the loader-only ratio next to the e2e

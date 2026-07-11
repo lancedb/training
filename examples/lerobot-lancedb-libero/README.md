@@ -157,6 +157,12 @@ faster GPUs take every configuration, converging on the dataloader-cost ceiling
 (~2.4–2.9× on these read patterns). See [`H200_RUNBOOK.md`](./H200_RUNBOOK.md) to verify
 on newer silicon.
 
+![GPU power and data-wait comparison](assets/gpu_and_wait_droid.png)
+
+*Left: identical 600-step DROID segments at 4 vCPU/GPU — Lance holds 329 W and finishes in
+half the time; base idles at 215 W. Right: share of each step spent waiting on data over
+the full 20k-step runs — 33% vs ~10%.*
+
 ### Loader-only vs end-to-end: the convergence
 
 The loader measured in isolation is where the advantage lives; training exposes it only
