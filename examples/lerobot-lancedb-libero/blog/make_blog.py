@@ -483,11 +483,13 @@ manifest pipeline — three systems that can drift out of sync with your trainin
 <h3>Four more things the same table answers</h3>
 <p><b>Near-duplicate episodes</b> — embed once, then redundancy pruning is a matrix
 product: comparing mid-episode frames across all 1,693 episodes takes 0.9 s and surfaces
-episode pair (1106, 1210) at &gt;0.995 cosine similarity — drop one before training.</p>
+episode pair (1106, 1210) at &gt;0.995 cosine similarity — drop one before training:</p>
+<figure class="chart"><img class="figimg" alt="Two episodes shown at frames 0, 30 and 60 — visually identical scene and trajectory" src="{b64(ASSETS / 'dedup_pair.png', 'image/png')}"/></figure>
 <p><b>Outlier mining</b> — within a task, frames farthest from the task's visual centroid
-are your teleop glitches and sensor artifacts: episode 217 shows up twice in the top-5
-anomalies for the microwave tasks; that's the episode to eyeball before it pollutes a
-finetune.</p>
+are your teleop glitches and camera-occlusion moments: episode 217 shows up twice in the
+top-5 anomalies for the microwave tasks — the arm swallowing the lens, exactly the frames
+to eyeball before they pollute a finetune:</p>
+<figure class="chart"><img class="figimg" alt="Five anomaly frames: the robot arm occluding the camera at close range" src="{b64(ASSETS / 'outliers.png', 'image/png')}"/></figure>
 <p><b>Hybrid queries</b> — full-text and vector compose: <em>"the gripper is holding the
 object in the air"</em> restricted to <code>task LIKE '%basket%'</code> answers in 25 ms,
 turning "find me mid-grasp frames in basket tasks" into one call.</p>

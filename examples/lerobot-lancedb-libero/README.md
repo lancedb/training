@@ -253,8 +253,12 @@ the right frames from the right episodes (see `assets/search_*.png`).
 - **Near-duplicate episodes**: comparing mid-episode embeddings across all 1,693 episodes
   takes 0.9 s (one matrix product) and surfaces pair (1106, 1210) at >0.995 similarity —
   dedup before training.
-- **Outlier mining**: frames farthest from a task's visual centroid = teleop glitches;
-  episode 217 appears twice in the microwave tasks' top-5 anomalies.
+
+  ![Near-duplicate episode pair](assets/dedup_pair.png)
+- **Outlier mining**: frames farthest from a task's visual centroid = camera-occlusion
+  moments and teleop glitches; episode 217 appears twice in the microwave tasks' top-5:
+
+  ![Anomaly frames](assets/outliers.png)
 - **Hybrid queries**: `"gripper holding the object" ∩ task LIKE '%basket%'` in 25 ms
   (vector + FTS prefilter composed in one call).
 - **Time travel**: 26 committed table versions from the backfills;
