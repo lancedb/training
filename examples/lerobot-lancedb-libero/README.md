@@ -3,47 +3,42 @@
 End-to-end comparison of training [SmolVLA](https://huggingface.co/docs/lerobot/en/smolvla)
 on the [LIBERO](https://huggingface.co/docs/lerobot/libero) benchmark with two data backends:
 
-1. **Base [LeRobot](https://github.com/huggingface/lerobot)** — the official
-   [`HuggingFaceVLA/libero`](https://huggingface.co/datasets/HuggingFaceVLA/libero) dataset as published
-2. **[lerobot-lancedb](https://lancedb.github.io/lerobot-lancedb/)** — the same data in the Lance
-   **video format** (mp4 bytes in a [blob v2](https://lancedb.github.io/lance/format/) column, bit-exact pixels)
+1. **Base [LeRobot](https://github.com/huggingface/lerobot)** — the standard v3 parquet+mp4 layout
+2. **[lerobot-lancedb](https://lancedb.github.io/lerobot-lancedb/)** — the same mp4 bytes in the Lance
+   **video format** (a [blob v2](https://lancedb.github.io/lance/format/) column, bit-exact pixels, same size on disk)
 
 Same model, same hyperparameters, same 4×H100 box, multi-GPU via `accelerate`. We compare
 dataloader throughput, GPU utilization, wall-clock, and final policy success rates in the
 LIBERO simulator — then go beyond training and use the *same* Lance table for semantic
 search and dataset curation, which parquet+mp4 cannot do.
 
-**Headline:** both backends reach **~81–82% average LIBERO success** (statistically
-identical, as they must be — same pixels), but the Lance run finishes in **2h17m vs
-6h05m**, at **half the energy**, from a dataset **17× smaller** than the one LeRobot
-ships — and the table it trains from also answers semantic queries in 13 ms.
+**Headline:** identical ACT trainings on DROID finish **2.31× faster end-to-end** with
+the Lance video format at a 4-vCPU/GPU cloud budget (1.83× at 8 vCPU/GPU) — same mp4
+bytes, bit-identical loss, statistically tied sim success. A 450M VLA (SmolVLA on LIBERO)
+reaches **~81–82% success from both backends**, and the table it trains from also answers
+semantic queries in 13 ms.
 
+## 0. Robot data wants to be video — training reads don't
 
+The LeRobot v3 format stores a dataset as two systems glued together: parquet for the
+tabular columns, chunked mp4 files for pixels, and bookkeeping metadata linking them.
+Video is the right container for robot camera streams — but a shuffled training read
+(a random frame per camera plus a 50-step action window) pays a seek-and-decode cost
+into those mp4s on every sample, and nothing about parquet+mp4 can answer a query like
+*"find frames where the gripper is above the stove."*
 
-## 0. The storage dilemma robotics teams face today
+`lerobot-lancedb` keeps the mp4 bytes **verbatim** in a Lance blob v2 column: the dataset
+stays video-sized, decoded pixels are bit-exact vs the source videos, and the Lance format
+supplies what the glue can't — fast frame-level random access, S3 byte-range streaming,
+and vector/full-text/scalar indexes on the same table the trainer reads.
 
-`HuggingFaceVLA/libero` — the dataset LeRobot's own docs recommend for LIBERO finetuning —
-ships camera frames as **PNG bytes inside parquet**: **33 GB** for 273k frames of 256×256×2 cameras.
-The same pixels encoded as standard mp4 video: **1.9 GB**.
-
-Why would anyone publish a 17× larger dataset? Because with parquet+mp4, *training reads*
-(shuffled, random-access, windowed) are brutally slow — every sample means seeking into a
-video file and decoding a GOP. Storing raw frames in parquet trades 17× storage for
-tolerable throughput. Our measurements below show that even that trade-off caps out at
-**~70 samples/s** on a 104-core machine.
-
-The LeRobot v3 format itself acknowledges the tension: it's *two* storage systems glued
-together — parquet for tabular data, chunked mp4 files for pixels — with bookkeeping
-metadata linking them. Lance collapses this into one table with a blob column, keeping
-video-grade compression *and* frame-level random access.
-
-| | official parquet (image dtype) | parquet + mp4 | **Lance video format** |
-|---|---|---|---|
-| size | 33 GB | 1.9 GB | **1.9 GB** |
-| pixels | original PNG | AV1 | **bit-exact = mp4** |
-| random-access throughput (16 wkr) | 70 smp/s | 2,547 smp/s | **6,121 smp/s** |
-| stream from S3 | ✗ (download first) | ✗ (download first) | **✓ 2,458 smp/s** |
-| vector / FTS / btree index | ✗ | ✗ | **✓ same table** |
+| | LeRobot parquet + mp4 | **Lance video format** |
+|---|---|---|
+| size (LIBERO: 273k frames, 2 cams) | 1.9 GB | **1.9 GB** |
+| pixels | mp4 | **bit-exact = same mp4 bytes** |
+| random-access throughput (16 wkr) | 2,547 smp/s | **6,121 smp/s** |
+| stream from S3 | ✗ (download first) | **✓ 2,458 smp/s** |
+| vector / FTS / btree index | ✗ | **✓ same table** |
 
 ## 1. Setup
 
@@ -62,9 +57,10 @@ package, e.g. `libnvidia-gl-<driver>-server`.)
 
 ### Dataset prep
 
-`HuggingFaceVLA/libero` ships image-dtype parquet, so we first materialize the standard
-video-format variant every real recorded dataset has (lerobot's own writer + default
-AV1 encoder; sharded across cores, ~5 min on 104 cores):
+The published `HuggingFaceVLA/libero` stores frames with the image dtype, so we first
+materialize the standard v3 video-format dataset (the layout every recorded LeRobot
+dataset has) with lerobot's own writer and default encoder — sharded across cores,
+~5 min on 104 cores:
 
 ```bash
 hf download HuggingFaceVLA/libero --repo-type dataset --local-dir ./libero_src
@@ -83,7 +79,6 @@ lerobot-convert-to-lance-video --repo-id=local/libero_video \
 
 | artifact | size |
 |---|---|
-| `libero_src` (official image-parquet) | 33 GB |
 | `libero_video` (parquet + mp4) | 1.9 GB |
 | `libero_lance_video` (Lance: 18 MB tabular + video blobs) | 1.9 GB |
 
@@ -118,65 +113,52 @@ if __name__ == "__main__":
 `isinstance(ds, LeRobotDataset)` still holds, `EpisodeAwareSampler` still works, the
 language-aware collate still sees `task` strings — SmolVLA doesn't know anything changed.
 
-## 3. Performance
+## 3. Performance: end-to-end training speed
 
-### 3.1 Dataloader throughput (local NVMe)
+The speed benchmark pairs a fast policy (ACT, ~50M params) with real-robot data
+([`lerobot/droid_100`](https://huggingface.co/datasets/lerobot/droid_100) — DROID as
+published for LeRobot: 3 cameras, 180×320). Identical 4×H100 trainings, same seed, same
+mp4 bytes, batch 64/rank, 8 workers/GPU; the CPU budget is pinned per run (both backends
+identically) to emulate real machines:
 
-Read pattern = exactly what `lerobot-train` resolves for SmolVLA on a 10 fps dataset:
-2 camera frames + `observation.state` at t, plus a **50-step action chunk** (delta_timestamps).
-Batch 64, steady-state over 400 batches.
+| vCPU per GPU (instance class) | base smp/s | Lance smp/s | e2e speedup |
+|---|---|---|---|
+| 3 | 453 | 1,293 | **2.85×** |
+| 4 (g4dn / g5.xlarge / Colab) | 655 | 1,684 | **2.57×** |
+| 8 (p3-class) | 1,348 | 2,585 | **1.92×** |
+| 26 (p5-class — this box, no cap) | 2,460 | 3,108 | **1.26×** |
 
-![Dataloader throughput](assets/throughput_local.png)
+Full 20k-step wall-clock confirmation runs:
 
-| workers | official parquet | parquet+mp4 | Lance video | Lance vs mp4 |
-|---|---|---|---|---|
-| 4  | 16.0  | 645   | **1,561** | 2.4× |
-| 8  | 31.2  | 1,271 | **3,111** | 2.4× |
-| 16 | 69.5  | 2,547 | **6,121** | 2.4× |
+| run | base | Lance | speedup |
+|---|---|---|---|
+| DROID @ 4 vCPU/GPU | 1h55m37s | **50m04s** | **2.31×** |
+| DROID @ 8 vCPU/GPU | 60m37s | **33m06s** | **1.83×** |
+| ALOHA-sim @ 4 vCPU/GPU | 1h38m42s | **53m13s** | **1.85×** |
 
-### 3.2 GPU utilization & wall-clock (the number that pays for GPUs)
+Training loss is bit-identical at every logged step (DROID final: 0.225 vs 0.225) — same
+bytes, same model, same result; one just waits on its dataloader. On ALOHA-sim the sweep
+gives 2.47×/2.31×/1.29×/1.06× at 3/4/8/26 vCPU/GPU, and even **lerobot's stock defaults
+on the full 104-thread box show 1.46×** (nw=4, no CPU cap anywhere).
 
-Identical 20,000-step SmolVLA finetunes (batch 16/GPU → effective 64, 8 workers/rank):
+The trained checkpoints prove quality parity in simulation (gym-aloha transfer-cube,
+50 episodes each): **0% before training → 60% (base) vs 58% (Lance)** — a statistical
+tie from checkpoints trained in 99 vs 53 minutes. Before/after videos:
+`assets/act_before_*.mp4` → `assets/act_after_*.mp4`.
 
-| | base LeRobot (official parquet) | lerobot-lancedb (video) |
-|---|---|---|
-| wall-clock | 2 h 44 min | **44 min (3.7×)** |
-| steady steps/s | ~2.0 | **7.9** |
-| time waiting on data per step | 0.34–0.37 s (+ DDP straggler sync) | **0.003 s** |
-| mean GPU power (util is misleading under NCCL spin) | 183 W (starved) | **355 W (working)** |
-| energy for the same 1.28M samples | 2.01 kWh | **1.04 kWh** |
-| final loss | 0.302 | 0.307 |
+### Why faster GPUs make this gap bigger
 
-![GPU power during training](assets/gpu_util.png)
+Sample demand rises with every accelerator generation while CPU-per-GPU stays roughly
+flat (DGX H100 and DGX B200 ship ~14 cores/GPU). We measured the mechanism: raising
+demand at fixed CPU (bs32→bs64) moved the delta from 1.98× to 2.31×. An H200/B300 does
+to demand what a bigger batch does — the budget-tier column above is a preview of where
+faster GPUs take every configuration, converging on the dataloader-cost ceiling
+(~2.4–2.9× on these read patterns). See [`H200_RUNBOOK.md`](./H200_RUNBOOK.md) to verify
+on newer silicon.
 
-![Data wait fraction](assets/data_wait.png)
-
-![Loss parity](assets/loss_parity.png)
-
-At step 30 both runs report **identical loss (1.115) and near-identical grad norms** —
-it is the same data in a different container.
-
-### 3.3 Streaming from S3
-
-Base LeRobot has no S3 read path: you `aws s3 sync` the dataset (or pull from the Hub),
-*then* start training. The Lance reader takes an `s3://` URI directly — byte-range reads
-against the blob column, no local copy ever created.
-
-To be fair about when this matters: on this box's in-region pipe, syncing the 1.9 GB video
-dataset takes ~9 s (the 33 GB parquet ~2.5 min), so for LIBERO-sized data "skip the
-download" is not the argument. The argument is scale and selectivity: a real fleet corpus
-is TBs, doesn't fit on the training node, and — because Lance is random-access — you can
-train directly on a *curated slice* of it (an episode list from a table query) without
-materializing the rest. Throughput straight from S3 is training-grade:
-
-| | time to first batch | steady throughput |
-|---|---|---|
-| Lance video @ S3, 8 workers | 68 s | 1,445 smp/s |
-| Lance video @ S3, 16 workers | 108 s | 2,458 smp/s |
-| base LeRobot @ S3 | 33 GB download first | — |
-
-2,458 smp/s is ~5× more than the 4-GPU training run consumes — you can train straight
-from the bucket.
+Loader-only microbenchmarks (single process, mechanism behind the numbers): DROID
+pattern 722 vs 1,709 smp/s at 8 workers (2.37×); ALOHA-sim 817 vs 2,296 (2.81×);
+heavy 4-cam 480×640 real data converges (1.25×) — decode dominates both formats there.
 
 ## 4. Same data, same policy: LIBERO success rates
 
@@ -195,9 +177,9 @@ same seed, evaluated with `lerobot-eval` closed-loop (`n_action_steps=1`),
 | **average** | **0.0** | **80.8** | **82.0** |
 
 Per-suite differences flip direction randomly — binomial noise at n=100, on top of
-bit-for-bit identical loss curves (final 0.081 vs 0.080). The data layer is invisible
-to learning; it changed only how long you wait (6h05m vs 2h17m) and what else the
-table can do (next section).
+bit-for-bit identical loss curves (final 0.081 vs 0.080). No speed claims here: at 450M
+parameters the GPU is the bottleneck and both formats keep it fed — the speed story is
+section 3's fast-policy regime.
 
 **An eval gotcha worth a paragraph:** `--policy.n_action_steps` (how much of the 50-step
 action chunk executes open-loop before re-planning) dominates measured success. The same
