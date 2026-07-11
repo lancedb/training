@@ -82,36 +82,37 @@ lerobot-convert-to-lance-video --repo-id=local/libero_video \
 | `libero_video` (parquet + mp4) | 1.9 GB |
 | `libero_lance_video` (Lance: 18 MB tabular + video blobs) | 1.9 GB |
 
-## 2. Migration: what actually changes in your training code
+## 2. Integration
 
-LeRobot's `make_dataset` factory hardcodes the `LeRobotDataset` class, and the plugin's
-dataset classes are drop-in constructor-compatible subclasses (lerobot-lancedb ≥ 0.2) — so
-the **entire migration** is pointing the factory at the Lance class and handing control
-back to stock `lerobot-train`. Policy, processors, sampler, optimizer, and the
-`accelerate` multi-GPU path are all untouched upstream code:
+The dataset classes are drop-in `LeRobotDataset` subclasses — `isinstance` passes,
+`EpisodeAwareSampler` works, the language collate sees task strings. The standard
+integration is to construct the dataset wherever your code builds one:
 
 ```python
-# train_lance.py — the whole migration
+from lerobot_lancedb import LeRobotLanceVideoDataset
+
+dataset = LeRobotLanceVideoDataset(
+    "lerobot/droid_100", root="./droid100_lance",
+    delta_timestamps=delta_timestamps,  # resolved from your policy config as usual
+    return_uint8=True,
+)
+# everything downstream unchanged: sampler, DataLoader, your train loop
+```
+
+Prefer the stock `lerobot-train` CLI unchanged? lerobot's factory has no dataset-class
+hook, so [`scripts/train_lance.py`](./scripts/train_lance.py) points the factory at the
+Lance class — a pragmatic 7-line patch, clearly labeled as one:
+
+```python
 import lerobot.datasets.factory as factory
 from lerobot_lancedb import LeRobotLanceVideoDataset
 
-factory.LeRobotDataset = LeRobotLanceVideoDataset  # <-- the switch
+factory.LeRobotDataset = LeRobotLanceVideoDataset
 
 if __name__ == "__main__":
     from lerobot.scripts.lerobot_train import main
     main()
 ```
-
-```diff
-- accelerate launch --multi_gpu --num_processes=4 $(which lerobot-train) \
--   --dataset.repo_id=HuggingFaceVLA/libero \
-+ accelerate launch --multi_gpu --num_processes=4 train_lance.py \
-+   --dataset.repo_id=local/libero_video --dataset.root=./libero_lance_video \
-    --policy.path=lerobot/smolvla_base ... # everything else identical
-```
-
-`isinstance(ds, LeRobotDataset)` still holds, `EpisodeAwareSampler` still works, the
-language-aware collate still sees `task` strings — SmolVLA doesn't know anything changed.
 
 ## 3. Performance: end-to-end training speed
 
