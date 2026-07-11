@@ -76,6 +76,28 @@ def chart_throughput():
     return svg_wrap("".join(out), W, H, "Dataloader throughput by worker count, log scale: Lance 6121 samples/s at 16 workers vs 2547 for parquet plus mp4")
 
 
+# ── chart: curated-split finetune outcome ────────────────────────────
+def chart_curated():
+    rows = [
+        ("smolvla_base (before)", 0, "var(--c-img)"),
+        ("curated split, 10k steps", 77, "var(--c-lance)"),
+        ("curated split, 20k steps", 76, "var(--c-lance)"),
+        ("curated split, 30k steps", 72, "var(--c-lance)"),
+        ("40-task generalist, 40k", 89, "var(--c-mp4)"),
+    ]
+    W, H, LX = 660, 224, 250
+    PW = W - LX - 70
+    out = []
+    for i, (name, v, c) in enumerate(rows):
+        y = 14 + i * 40
+        bw = max(v / 100 * PW, 3)
+        out.append(f'<text x="{LX-10}" y="{y+13}" text-anchor="end" fill="{INK}" font-size="12.5">{name}</text>')
+        out.append(hbar(LX, y, bw, 18, c, f"{tip(name)}: {v}% success on libero_object (100 episodes)"))
+        out.append(f'<text x="{LX+bw+8:.1f}" y="{y+13}" fill="{INK}" font-size="12.5" font-weight="600" style="{MONO}">{v}%</text>')
+    return svg_wrap("".join(out), W, H,
+        "Curated-split finetune: 0 to 77 percent in 10k steps; later checkpoints overfit to 76 and 72; the 40-task generalist reaches 89")
+
+
 # ── chart: e2e training throughput vs CPU budget ─────────────────────
 def chart_cpubudget():
     budgets = ["3 vCPU/GPU", "4 vCPU/GPU\n(g4dn/g5.xl)", "8 vCPU/GPU\n(p3-class)", "26 vCPU/GPU\n(p5-class)"]
@@ -503,10 +525,19 @@ column becomes an episode list becomes a finetune — zero bytes copied:</p>
 <pre><code>eps = tbl.search().where(f"task IN ({{object_tasks}})") \\
          .select(["episode_index"]).to_pandas()["episode_index"].unique()
 # → 454 episodes, 66,984 frames; feed straight into --dataset.episodes</code></pre>
-<p>That curated finetune took smolvla_base from 0% to <b>77%</b> on its suite in ~35
-minutes of training per 10k steps. (Fun, honest footnote: the 40-task generalist
-checkpoint still beats it on that suite, 89% — at this scale multi-task transfer wins.
-The workflow is the point: a table query became a reproducible training split.)</p>
+<h3>What the curated split actually trained</h3>
+<p>We ran the finetune. From 0% to <b>77% on its suite in 10k steps</b> (~35 minutes of
+training) — the entire "dataset" was a SQL query. The table's honesty keeps paying: the
+20k and 30k checkpoints <em>decline</em> to 76% and 72% — 454 episodes overfit fast, and
+you catch it because every checkpoint pairs with a versioned, reproducible split. The
+40-task generalist still wins the suite at 89%: at this scale multi-task transfer beats a
+narrow finetune, and learning that costs exactly one query and one training run when
+curation lives in the data layer.</p>
+
+<figure class="chart"><div class="ttl">libero_object success: one SQL query vs the generalist</div>
+{chart_curated()}
+<figcaption>Curated split = the 454 libero_object episodes selected by the task-text
+query above. All checkpoints evaluated closed-loop, 100 episodes each.</figcaption></figure>
 
 <h2>Why this works: blob v2, in one paragraph</h2>
 <p>The video table stores each mp4's raw bytes in a <code>large_binary</code> column whose

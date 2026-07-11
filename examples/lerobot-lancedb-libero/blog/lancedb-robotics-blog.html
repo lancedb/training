@@ -323,10 +323,19 @@ column becomes an episode list becomes a finetune — zero bytes copied:</p>
 <pre><code>eps = tbl.search().where(f"task IN ({object_tasks})") \
          .select(["episode_index"]).to_pandas()["episode_index"].unique()
 # → 454 episodes, 66,984 frames; feed straight into --dataset.episodes</code></pre>
-<p>That curated finetune took smolvla_base from 0% to <b>77%</b> on its suite in ~35
-minutes of training per 10k steps. (Fun, honest footnote: the 40-task generalist
-checkpoint still beats it on that suite, 89% — at this scale multi-task transfer wins.
-The workflow is the point: a table query became a reproducible training split.)</p>
+<h3>What the curated split actually trained</h3>
+<p>We ran the finetune. From 0% to <b>77% on its suite in 10k steps</b> (~35 minutes of
+training) — the entire "dataset" was a SQL query. The table's honesty keeps paying: the
+20k and 30k checkpoints <em>decline</em> to 76% and 72% — 454 episodes overfit fast, and
+you catch it because every checkpoint pairs with a versioned, reproducible split. The
+40-task generalist still wins the suite at 89%: at this scale multi-task transfer beats a
+narrow finetune, and learning that costs exactly one query and one training run when
+curation lives in the data layer.</p>
+
+<figure class="chart"><div class="ttl">libero_object success: one SQL query vs the generalist</div>
+<svg viewBox="0 0 660 224" role="img" aria-label="Curated-split finetune: 0 to 77 percent in 10k steps; later checkpoints overfit to 76 and 72; the 40-task generalist reaches 89" style="width:100%;height:auto;display:block"><text x="240" y="27" text-anchor="end" fill="var(--ink)" font-size="12.5">smolvla_base (before)</text><path d="M250,14 h1.0 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-1.0 z" fill="var(--c-img)" data-tip="smolvla_base (before): 0% success on libero_object (100 episodes)"/><text x="261.0" y="27" fill="var(--ink)" font-size="12.5" font-weight="600" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace">0%</text><text x="240" y="67" text-anchor="end" fill="var(--ink)" font-size="12.5">curated split, 10k steps</text><path d="M250,54 h257.8 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-257.8 z" fill="var(--c-lance)" data-tip="curated split, 10k steps: 77% success on libero_object (100 episodes)"/><text x="519.8" y="67" fill="var(--ink)" font-size="12.5" font-weight="600" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace">77%</text><text x="240" y="107" text-anchor="end" fill="var(--ink)" font-size="12.5">curated split, 20k steps</text><path d="M250,94 h254.4 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-254.4 z" fill="var(--c-lance)" data-tip="curated split, 20k steps: 76% success on libero_object (100 episodes)"/><text x="516.4" y="107" fill="var(--ink)" font-size="12.5" font-weight="600" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace">76%</text><text x="240" y="147" text-anchor="end" fill="var(--ink)" font-size="12.5">curated split, 30k steps</text><path d="M250,134 h240.8 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-240.8 z" fill="var(--c-lance)" data-tip="curated split, 30k steps: 72% success on libero_object (100 episodes)"/><text x="502.8" y="147" fill="var(--ink)" font-size="12.5" font-weight="600" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace">72%</text><text x="240" y="187" text-anchor="end" fill="var(--ink)" font-size="12.5">40-task generalist, 40k</text><path d="M250,174 h298.6 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-298.6 z" fill="var(--c-mp4)" data-tip="40-task generalist, 40k: 89% success on libero_object (100 episodes)"/><text x="560.6" y="187" fill="var(--ink)" font-size="12.5" font-weight="600" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace">89%</text></svg>
+<figcaption>Curated split = the 454 libero_object episodes selected by the task-text
+query above. All checkpoints evaluated closed-loop, 100 episodes each.</figcaption></figure>
 
 <h2>Why this works: blob v2, in one paragraph</h2>
 <p>The video table stores each mp4's raw bytes in a <code>large_binary</code> column whose
