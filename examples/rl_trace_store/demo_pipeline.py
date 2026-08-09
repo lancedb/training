@@ -167,7 +167,9 @@ def main() -> None:
     shutil.rmtree(args.root, ignore_errors=True)
     os.makedirs(os.path.join(args.root, "reports"), exist_ok=True)
     uri = os.path.join(args.root, "rollouts.lance")
-    lance.write_dataset(LANCE_SCHEMA.empty_table(), uri, schema=LANCE_SCHEMA)
+    lance.write_dataset(
+        LANCE_SCHEMA.empty_table(), uri, schema=LANCE_SCHEMA, data_storage_version="2.2"
+    )
     lance.write_dataset(
         VERDICT_SCHEMA.empty_table(), os.path.join(args.root, "verdicts.lance"), schema=VERDICT_SCHEMA
     )

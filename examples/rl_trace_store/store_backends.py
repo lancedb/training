@@ -61,18 +61,17 @@ ARROW_SCHEMA = pa.schema(
     ]
 )
 
-# Same schema, but the blob column is stored with Lance's blob encoding:
-# values live out-of-line and reads are lazy file-like handles (take_blobs).
+# Same schema, but the blob column uses Lance Blob v2 (format 2.2): payloads
+# live out-of-line (dedicated .blob files above ~2 MiB), scans skip them, and
+# reads are lazy file-like handles (take_blobs / read_blobs).
 LANCE_SCHEMA = pa.schema(
-    [
-        f if f.name != "trace_blob"
-        else pa.field("trace_blob", pa.large_binary(), metadata={"lance-encoding:blob": "true"})
-        for f in ARROW_SCHEMA
-    ]
-)
+    [f if f.name != "trace_blob" else lance.blob_field("trace_blob") for f in ARROW_SCHEMA]
+) if lance is not None else None
 
 
 def rollouts_to_table(rollouts: list[Rollout], schema: pa.Schema) -> pa.Table:
+    blobs = [r.trace_blob for r in rollouts]
+    is_blob_v2 = schema.field("trace_blob").type != pa.large_binary()
     return pa.table(
         {
             "rollout_id": [r.rollout_id for r in rollouts],
@@ -87,7 +86,8 @@ def rollouts_to_table(rollouts: list[Rollout], schema: pa.Schema) -> pa.Table:
             "messages": pa.array([r.messages for r in rollouts], pa.large_string()),
             "completion_ids": [r.completion_ids for r in rollouts],
             "logprobs": [r.logprobs for r in rollouts],
-            "trace_blob": pa.array([r.trace_blob for r in rollouts], pa.large_binary()),
+            "trace_blob": lance.blob_array(blobs) if is_blob_v2
+            else pa.array(blobs, pa.large_binary()),
         },
         schema=schema,
     )
@@ -301,7 +301,10 @@ class LanceBackend(Backend):
     def write_step(self, step: int, rollouts: list[Rollout]) -> None:
         table = rollouts_to_table(rollouts, LANCE_SCHEMA)
         if self.ds is None and not os.path.exists(self.uri):
-            self.ds = lance.write_dataset(table, self.uri, schema=LANCE_SCHEMA)
+            # Blob v2 needs format 2.2 (the default is still 2.1)
+            self.ds = lance.write_dataset(
+                table, self.uri, schema=LANCE_SCHEMA, data_storage_version="2.2"
+            )
         else:
             self.ds = lance.write_dataset(table, self.uri, mode="append")
 
