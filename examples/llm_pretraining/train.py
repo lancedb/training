@@ -70,7 +70,17 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     p.add_argument("--seq-len", type=int, default=512)
     p.add_argument(
-        "--batch-size", type=int, default=8, help="docs per rank per micro-step"
+        "--batch-size",
+        type=int,
+        default=8,
+        help="docs (or packed blocks, with --pack) per rank per micro-step",
+    )
+    p.add_argument(
+        "--pack",
+        action="store_true",
+        help="sequence packing: concat docs with EOS and slice into full "
+        "seq_len blocks — zero padding waste. Resume requires the same "
+        "world_size (see packing.py)",
     )
     p.add_argument("--grad-accum", type=int, default=1)
     p.add_argument("--epochs", type=int, default=1)
@@ -161,12 +171,13 @@ def make_dataset(
     split_filter: str,
     epoch: int,
     shuffle: bool,
-    pad_id: int,
+    tok,
     num_splits: int,
-) -> StreamingDataset:
+    packed: bool = False,
+):
     tbl = connect_table(args.db, args.table)
     filt = f"NOT is_dup AND score >= {args.min_score} AND ({split_filter})"
-    return StreamingDataset(
+    ds = StreamingDataset(
         tbl,
         columns=["input_ids"],
         filter=filt,
@@ -177,11 +188,18 @@ def make_dataset(
         rank=rank,
         world_size=world_size,
         read_batch_size=args.read_batch_size,
-        transform=make_transform(args.seq_len, pad_id),
+        # Packed mode consumes raw rows (default transform); otherwise
+        # pad/truncate per document on the transform thread pool.
+        transform=None if packed else make_transform(args.seq_len, tok.pad_token_id),
     )
+    if packed:
+        from packing import PackedTokenDataset
+
+        return PackedTokenDataset(ds, args.seq_len, tok.eos_token_id)
+    return ds
 
 
-def evaluate(model, args, rank, world_size, device, pad_id, num_splits) -> float:
+def evaluate(model, args, rank, world_size, device, tok, num_splits) -> float:
     ds = make_dataset(
         args,
         rank,
@@ -189,7 +207,7 @@ def evaluate(model, args, rank, world_size, device, pad_id, num_splits) -> float
         split_filter=VAL_FILTER,
         epoch=0,
         shuffle=False,
-        pad_id=pad_id,
+        tok=tok,
         num_splits=num_splits,
     )
     loader = DataLoader(ds, batch_size=args.batch_size, num_workers=0)
@@ -225,7 +243,7 @@ def main(argv=None) -> None:
     # Elastic determinism holds when the global batch is a multiple of
     # num_splits.  Default: one split per global-batch slot.
     num_splits = args.num_splits or global_batch
-    if global_batch % num_splits != 0:
+    if not args.pack and global_batch % num_splits != 0:
         raise SystemExit(
             f"global batch ({global_batch} = {args.batch_size} x {world_size} ranks) "
             f"must be a multiple of num_splits ({num_splits}); otherwise global "
@@ -272,7 +290,21 @@ def main(argv=None) -> None:
     train_rows = tbl.count_rows(
         f"NOT is_dup AND score >= {args.min_score} AND ({TRAIN_FILTER})"
     )
-    micro_steps_per_epoch = train_rows // num_splits
+    if args.pack:
+        # Packed blocks per epoch ~= (corpus tokens + one EOS per doc) / seq_len.
+        toks = (
+            tbl.search()
+            .select(["n_tokens"])
+            .where(f"NOT is_dup AND score >= {args.min_score} AND ({TRAIN_FILTER})")
+            .limit(train_rows)
+            .to_arrow()
+        )
+        import pyarrow.compute as pc
+
+        total_tokens = pc.sum(toks.column("n_tokens")).as_py() + train_rows
+        micro_steps_per_epoch = total_tokens // args.seq_len // global_batch
+    else:
+        micro_steps_per_epoch = train_rows // num_splits
     steps_per_epoch = micro_steps_per_epoch // args.grad_accum
     total_steps = args.lr_total_steps or args.steps or steps_per_epoch * args.epochs
     if is_main:
@@ -285,7 +317,7 @@ def main(argv=None) -> None:
     tokens_seen = 0
     t_last, step_last = time.perf_counter(), opt_step
 
-    def save_ckpt(epoch: int, ds: StreamingDataset) -> None:
+    def save_ckpt(epoch: int, ds) -> None:
         if not is_main:
             return
         payload = {
@@ -311,8 +343,9 @@ def main(argv=None) -> None:
             split_filter=TRAIN_FILTER,
             epoch=epoch,
             shuffle=True,
-            pad_id=tok.pad_token_id,
+            tok=tok,
             num_splits=num_splits,
+            packed=args.pack,
         )
         if loader_state is not None:
             ds.load_state_dict(loader_state)
@@ -348,11 +381,12 @@ def main(argv=None) -> None:
                 )
                 # Queue depths tell you where the bottleneck is:
                 # unscanned/raw/cooked/consumed (see the dataloading guide).
-                q = f"{ds.unscanned_rows}/{ds.raw_queue_depth}/{ds.prefetch_queue_depth}/{ds.consumed_rows}"
+                sds = ds.inner if args.pack else ds
+                q = f"{sds.unscanned_rows}/{sds.raw_queue_depth}/{sds.prefetch_queue_depth}/{sds.consumed_rows}"
                 print(
                     f"epoch {epoch} step {opt_step}/{total_steps} | "
                     f"loss {loss.item():.4f} | {tps:,.0f} tok/s | q {q} | "
-                    f"fetch {ds.fetch_time:.1f}s tx {ds.transform_time:.1f}s"
+                    f"fetch {sds.fetch_time:.1f}s tx {sds.transform_time:.1f}s"
                 )
                 t_last, step_last = time.perf_counter(), opt_step
 
@@ -360,13 +394,7 @@ def main(argv=None) -> None:
                 save_ckpt(epoch, ds)
             if args.eval_every and opt_step % args.eval_every == 0:
                 val = evaluate(
-                    trainable,
-                    args,
-                    rank,
-                    world_size,
-                    device,
-                    tok.pad_token_id,
-                    num_splits,
+                    trainable, args, rank, world_size, device, tok, num_splits
                 )
                 if is_main:
                     print(f"  val loss @ step {opt_step}: {val:.4f}")
@@ -378,9 +406,7 @@ def main(argv=None) -> None:
                 save_ckpt(epoch, ds)
             break
 
-    val = evaluate(
-        trainable, args, rank, world_size, device, tok.pad_token_id, num_splits
-    )
+    val = evaluate(trainable, args, rank, world_size, device, tok, num_splits)
     if is_main:
         print(
             f"final: opt_step={opt_step} tokens_seen(rank0)={tokens_seen:,} val_loss={val:.4f}"

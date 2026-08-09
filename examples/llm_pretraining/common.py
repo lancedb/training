@@ -67,6 +67,7 @@ class ByteTokenizer:
 
     vocab_size = 259
     pad_token_id = PAD
+    eos_token_id = EOS
 
     def encode(self, text: str) -> list[int]:
         return [self.BOS, *text.encode("utf-8"), self.EOS]
@@ -86,6 +87,7 @@ def load_tokenizer(spec: str):
         class _HFAdapter:
             vocab_size = len(tok)
             pad_token_id = tok.pad_token_id
+            eos_token_id = tok.eos_token_id
 
             @staticmethod
             def encode(text: str) -> list[int]:

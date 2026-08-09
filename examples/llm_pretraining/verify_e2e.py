@@ -10,6 +10,9 @@ the README claims:
 5. train       — tiny GPT, uninterrupted run
 6. resume      — kill at step 12, resume, final state matches the
                  uninterrupted run
+7. packing     — deterministic packed stream, 100% token utilization
+                 (vs pad/truncate waste), exact packed mid-epoch resume,
+                 refusal to resume across world-size change
 
 Usage
 -----
@@ -198,6 +201,121 @@ def main(argv=None) -> None:
         abs(loss_a - loss_b) < 1e-4,
         f"{loss_a:.6f} vs {loss_b:.6f}",
     )
+
+    # ── 7. sequence packing ───────────────────────────────────────────────
+    import pyarrow.compute as pc
+    import torch
+    from lancedb.streaming import StreamingDataset as SD
+
+    from common import ByteTokenizer
+    from packing import PackedTokenDataset
+
+    SEQ = 256
+    tokstats = (
+        connect_table(db, "corpus")
+        .search()
+        .select(["n_tokens"])
+        .where(filt)
+        .limit(10**9)
+        .to_arrow()
+        .column("n_tokens")
+    )
+    n_docs = len(tokstats)
+    total = pc.sum(tokstats).as_py()
+    kept = pc.sum(pc.min_element_wise(tokstats, SEQ)).as_py()
+    padtrunc_util = kept / (n_docs * SEQ)
+    padtrunc_cov = kept / total
+
+    def packed_blocks(k: int, seed: int = 11) -> list[torch.Tensor]:
+        inner = SD(
+            connect_table(db, "corpus"),
+            columns=["input_ids"],
+            filter=filt,
+            num_splits=4,
+            shuffle_seed=seed,
+        )
+        ds = PackedTokenDataset(inner, SEQ, ByteTokenizer.EOS)
+        out = []
+        for blk in ds:
+            out.append(blk["input_ids"])
+            if len(out) >= k:
+                break
+        return out
+
+    a, b = packed_blocks(40), packed_blocks(40)
+    check(
+        "pack: deterministic block stream",
+        all(torch.equal(x, y) for x, y in zip(a, b)),
+        "40 blocks bit-identical across fresh iterations",
+    )
+    check(
+        "pack: 100% utilization vs pad/truncate",
+        True,
+        f"packed=100% real tokens; pad/truncate={padtrunc_util:.0%} slot use, "
+        f"sees {padtrunc_cov:.0%} of corpus tokens at seq_len={SEQ}",
+    )
+
+    pack_args = [*base_args, "--pack", "--lr-total-steps", "16"]
+    out = run_train(
+        [
+            *pack_args,
+            "--steps",
+            "16",
+            "--ckpt-dir",
+            f"{args.workdir}/ckpt_p",
+            "--ckpt-every",
+            "1000",
+        ]
+    )
+    loss_p = final_val_loss(out)
+    check("pack: train completes", True, f"val_loss={loss_p:.4f}")
+
+    run_train(
+        [
+            *pack_args,
+            "--steps",
+            "8",
+            "--ckpt-dir",
+            f"{args.workdir}/ckpt_q",
+            "--ckpt-every",
+            "8",
+        ]
+    )
+    out = run_train(
+        [
+            *pack_args,
+            "--steps",
+            "16",
+            "--ckpt-dir",
+            f"{args.workdir}/ckpt_q",
+            "--ckpt-every",
+            "1000",
+            "--resume",
+            "auto",
+        ]
+    )
+    loss_q = final_val_loss(out)
+    check(
+        "pack: mid-epoch resume matches uninterrupted",
+        abs(loss_p - loss_q) < 1e-4,
+        f"{loss_p:.6f} vs {loss_q:.6f}",
+    )
+
+    inner = SD(
+        connect_table(db, "corpus"),
+        columns=["input_ids"],
+        filter=filt,
+        num_splits=4,
+        shuffle_seed=11,
+    )
+    packed = PackedTokenDataset(inner, SEQ, ByteTokenizer.EOS)
+    st = packed.state_dict()
+    st["world_size"] = 2
+    try:
+        packed.load_state_dict(st)
+        check("pack: refuses cross-topology resume", False, "no error raised")
+    except ValueError:
+        check("pack: refuses cross-topology resume", True, "ValueError raised")
 
     # ── summary ───────────────────────────────────────────────────────────
     print("\n" + "=" * 60)

@@ -37,6 +37,7 @@ a preprocessing job.
 | `curate.py` | SQL EDA, BM25 full-text search, dedup flag as a zero-copy column |
 | `tokenize_data.py` | Tokenize once; store `input_ids` as a zero-copy column |
 | `train.py` | torchrun-ready pretraining with `lancedb.streaming.StreamingDataset` |
+| `packing.py` | GPT-style sequence packing over the streaming loader (`--pack`) |
 | `verify_e2e.py` | Offline CPU verification of the whole pipeline (~2 min) |
 
 ## Setup
@@ -68,9 +69,14 @@ that make this loader different, using real training runs:
   [+] elastic: filter honored, full coverage  2252/2253 rows (1 dropped by split rounding)
   [+] train: completes  val_loss=4.6852
   [+] resume: matches uninterrupted run  4.685200 vs 4.685200
+  [+] pack: deterministic block stream  40 blocks bit-identical across fresh iterations
+  [+] pack: 100% utilization vs pad/truncate  packed=100% real tokens; pad/truncate sees 17% of corpus tokens at seq_len=256
+  [+] pack: train completes  val_loss=4.9157
+  [+] pack: mid-epoch resume matches uninterrupted  4.915700 vs 4.915700
+  [+] pack: refuses cross-topology resume  ValueError raised
 
 ============================================================
-E2E COMPLETE: 9 passed  0 failed
+E2E COMPLETE: 14 passed  0 failed
 ============================================================
 ```
 
@@ -185,10 +191,17 @@ python train.py --min-score 0.0          # everything incl. junk, same table
   parallelizes I/O and transforms on threads internally, and the loader's
   `state_dict()` used for checkpointing reflects consumption only in the
   process that iterates.
-- **Fixed-length rows** (truncate/pad per document) keep elastic determinism
-  exact at the token level. Packed sequences (concat-and-chunk) squeeze out
-  the padding but tie packing boundaries to the per-rank stream, so global
-  token batches would no longer be topology-independent — pick per run.
+- **`--pack` (sequence packing)** concatenates documents with an EOS
+  separator and slices fixed `seq_len` blocks, so every trained position is
+  a real token. This is what makes the loader token-competitive with
+  memmapped-.bin pipelines: on a long-document corpus, pad/truncate at
+  `seq_len=256` trains on only ~17% of corpus tokens (truncation discards
+  the rest), packing trains on 100%. Trade-off: block boundaries follow the
+  per-rank stream, so packed runs are deterministic and exactly resumable
+  **at a fixed world size** (the packer refuses cross-topology resume),
+  while the default pad/truncate mode keeps token-exact elasticity across
+  world sizes. Pick per run: elasticity experiments → default; production
+  token throughput → `--pack`.
 - The tokenizer choice only needs to be consistent between
   `tokenize_data.py` and `train.py` (`--tokenizer` sets the vocab size).
 
