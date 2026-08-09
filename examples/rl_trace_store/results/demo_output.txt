@@ -1,10 +1,11 @@
-
-=== pipeline complete in 6.7s ===
+=== pipeline complete in 8.0s ===
 rollouts committed : 144 (expected 144)
 dataset versions   : 19 (every append is a recoverable snapshot)
 curated for SFT    : 66 rollouts via filter, zero copies
-  producer-0: {'produced_mb': 200.0, 'append_p50_ms': 196.9, 'append_p95_ms': 550.9, 'peak_rss_mb': 516.0}
-  producer-1: {'produced_mb': 194.7, 'append_p50_ms': 114.1, 'append_p95_ms': 688.4, 'peak_rss_mb': 551.2}
-  producer-2: {'produced_mb': 186.4, 'append_p50_ms': 188.4, 'append_p95_ms': 448.9, 'peak_rss_mb': 505.6}
-     trainer: {'train_steps': 12, 'trained_rollouts': 65, 'tokens_consumed': 410674, 'batch_fetch_p50_ms': 8.1, 'peak_rss_mb': 256.6}
-    verifier: {'verified_rollouts': 144, 'verified_mb': 565.4, 'fetch_per_rollout_p50_ms': 4.4, 'fetch_per_rollout_p95_ms': 34.2, 'peak_rss_mb': 432.2}
+  producer-0: {'produced_mb': 200.0, 'append_p50_ms': 299.1, 'append_p95_ms': 686.5, 'peak_rss_mb': 519.0}
+  producer-1: {'produced_mb': 194.7, 'append_p50_ms': 277.4, 'append_p95_ms': 597.6, 'peak_rss_mb': 538.1}
+  producer-2: {'produced_mb': 186.4, 'append_p50_ms': 293.7, 'append_p95_ms': 552.6, 'peak_rss_mb': 465.9}
+     trainer: {'train_steps': 15, 'trained_rollouts': 65, 'tokens_consumed': 410674, 'batch_fetch_p50_ms': 3.1, 'peak_rss_mb': 256.0}
+    verifier: {'verified_rollouts': 144, 'verified_mb': 565.4, 'fetch_per_rollout_p50_ms': 5.4, 'fetch_per_rollout_p95_ms': 60.1, 'peak_rss_mb': 467.9}
+
+(run: demo_pipeline.py --producers 3 --batches 6 --batch-size 8, Lance Blob v2 / format 2.2)
