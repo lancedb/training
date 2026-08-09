@@ -106,6 +106,12 @@ exact data version it saw (`db.open_table(name).checkout(v)`), and the raw
 `text` column is still right there for FTS/vector retrieval, data forensics,
 and eval-set inspection after training.
 
+This example backfills columns with `tbl.to_lance().add_columns(udf)` to
+stay zero-extra-dependency and offline-runnable. For real feature
+engineering — GPU UDFs, checkpointed distributed backfills, laptop-Ray to
+KubeRay with the same code — use [Geneva](https://github.com/lancedb/geneva);
+the [object-detection example](../../object-detection/) shows that flow.
+
 ## Training
 
 Single GPU / debug:
