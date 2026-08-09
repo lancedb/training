@@ -1,0 +1,4 @@
+bench_data/
+demo_data/
+tiny_*/
+.venv/
