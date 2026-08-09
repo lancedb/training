@@ -27,7 +27,7 @@ One LanceDB table for the entire training loop
 | VLA (Vision-Language-Action) | [examples/lerobot_ray_lance/](./examples/lerobot_ray_lance/) |
 | World Model / Video Generation |  🚧 |
 | VLM | 🚧  |
-| LLM | 🚧  |
+| LLM (elastic pretraining on one table) | [examples/llm_pretraining/](./examples/llm_pretraining/) |
 
 ## Repository layout
 
@@ -36,6 +36,7 @@ object-detection/                 # AV perception — BDD100K + Geneva + Faster 
 examples/
   ViT/                            # MFU benchmark: LanceDB vs S3 vs Parquet
   lerobot_ray_lance/              # VLA: Ray + LeRobot Diffusion Policy
+  llm_pretraining/                # LLM: elastic StreamingDataset pretraining
   leWorldModel/                   # CogVideo / world model fine-tuning
 ```
 

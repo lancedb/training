@@ -1,0 +1,19 @@
+[project]
+name = "llm-pretraining-lance"
+version = "0.1.0"
+description = "LLM pretraining on a single LanceDB table with the elastic StreamingDataset"
+requires-python = ">=3.10"
+dependencies = [
+    "lancedb>=0.36.0",
+    "pylance>=0.20.0",
+    "torch>=2.2.0",
+    "pyarrow>=16.0.0",
+    "numpy>=1.26.0",
+]
+
+[project.optional-dependencies]
+# Real-corpus runs: streaming FineWeb-Edu and HF tokenizers.
+hf = [
+    "datasets>=2.19.0",
+    "transformers>=4.40.0",
+]

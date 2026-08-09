@@ -210,3 +210,8 @@ __marimo__/
 
 
 data/
+
+# llm_pretraining example artifacts
+lance_pretrain_db/
+verify_workdir/
+checkpoints/
