@@ -36,8 +36,10 @@ a preprocessing job.
 | `ingest.py` | Stream a corpus (FineWeb-Edu or synthetic) into a Lance table |
 | `curate.py` | SQL EDA, BM25 full-text search, dedup flag as a zero-copy column |
 | `tokenize_data.py` | Tokenize once; store `input_ids` as a zero-copy column |
+| `geneva_backfill.py` | Distributed, checkpointed tokenization via Geneva (Ray) |
 | `train.py` | torchrun-ready pretraining with `lancedb.streaming.StreamingDataset` |
-| `packing.py` | GPT-style sequence packing over the streaming loader (`--pack`) |
+| `bench_loader.py` | Loader-only throughput probe (tune `read_batch_size`/splits) |
+| `sample.py` | Generate text from a trained checkpoint |
 | `verify_e2e.py` | Offline CPU verification of the whole pipeline (~2 min) |
 
 ## Setup
@@ -117,6 +119,63 @@ stay zero-extra-dependency and offline-runnable. For real feature
 engineering — GPU UDFs, checkpointed distributed backfills, laptop-Ray to
 KubeRay with the same code — use [Geneva](https://github.com/lancedb/geneva);
 the [object-detection example](../../object-detection/) shows that flow.
+
+
+## Results: GPT-2 124M, Chinchilla-scale, 4x H100
+
+One epoch over FineWeb-Edu with everything — corpus, curation, tokens,
+training, retrieval — on a single Lance table. `--pack` (loader-native
+sequence packing from the `ayush/seq-packing` branch) + `--compile`.
+
+| Stage | Wall time | What happened |
+|---|---|---|
+| Ingest 2.4M docs (11.4B chars) | **3m 00s** | HF stream -> 4.8GB Lance table |
+| Curate: EDA + FTS + dedup | **3m 02s** | 22,558 dups flagged; `is_dup` col = +306KB on a 5.1GB table, nothing rewritten |
+| Geneva tokenize (32 Ray workers) | **4m 53s** | 2.43B GPT-2 tokens as a zero-copy column (+`n_tokens` 1m 24s) |
+| Train 124M, 1 epoch = 2.43B tokens | **~50 min** | 4x H100, 1.6M tok/s sustained, 35% MFU |
+
+Raw text to training-ready: **~12 minutes**. Total to a Chinchilla-optimal
+GPT-2: about an hour.
+
+```
+epoch 0 step 1500/4635 | loss 3.7020 | 1,602,377 tok/s | mfu 34.8% | q 0/0/397844/190572
+  val loss @ step 1500: 3.5902
+  val loss @ step 3000: 3.3134
+  val loss @ step 4500: 3.2295
+```
+
+- **Packing vs pad/truncate at seq 1024**: pad/truncate trains on only
+  **62.1%** of corpus tokens (truncation discards the rest); packed blocks
+  are ~100% real tokens.
+- **Kill -9 at step 1500, resume from step-1000 checkpoint**: per-rank
+  loader states restore exactly (`resumed from ... opt step 1000`), loss
+  rejoins the curve, same topology.
+- **Loader tuning matters**: `read_batch_size` 64 -> 8 took one loader
+  process from 102k to 419k tok/s on local NVMe (per-take cost grows
+  super-linearly with rows per take). `bench_loader.py` finds this in a
+  minute; 4 ranks at rb=8 gave a ~1.7M tok/s ceiling, ahead of the model.
+- **Data forensics on the same table**: after training, FTS-query the
+  corpus for what the model actually saw (`curate.py`-built index), or
+  `checkout` any earlier table version (ingest was v1; this run trained
+  against v13).
+
+Sample from the final checkpoint (temperature 0.8):
+
+> Photosynthesis is the process by which plants produce energy, the
+> process by which they convert it into energy. [...] The carbon dioxide
+> present in the atmosphere is released into the atmosphere, which is why
+> it is referred to as the "Carbon Cycle."
+
+124M-grade prose: fluent, on-topic, confidently wrong — exactly on spec.
+
+### Known rough edges (upstream notes)
+- geneva 0.14 needs `lancedb==0.34.x` in its own venv (its `>=0.34.0b4`
+  pin admits incompatible newer versions).
+- A shutdown-time `PyGILState_Release`/SIGABRT can fire at process exit
+  after successful completion (mixed Rust-runtime + torch teardown); data
+  and checkpoints are unaffected.
+- Packed resume requires the same world_size (padding and checkpoint
+  state are per-rank); per-rank checkpoint files handle multi-GPU.
 
 ## Training
 
