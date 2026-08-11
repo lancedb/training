@@ -202,15 +202,26 @@ def main(argv=None) -> None:
         f"{loss_a:.6f} vs {loss_b:.6f}",
     )
 
-    # ── 7. sequence packing ───────────────────────────────────────────────
+    # ── 7. sequence packing (native pack_sequences) ───────────────────────
     import pyarrow.compute as pc
     import torch
     from lancedb.streaming import StreamingDataset as SD
 
     from common import ByteTokenizer
-    from packing import PackedTokenDataset
 
     SEQ = 256
+
+    def packed_ds():
+        return SD(
+            connect_table(db, "corpus"),
+            columns=["input_ids"],
+            filter=filt,
+            num_splits=4,
+            shuffle_seed=11,
+            pack_sequences=SEQ,
+            eos_id=ByteTokenizer.EOS,
+            pad_id=ByteTokenizer.PAD,
+        )
     tokstats = (
         connect_table(db, "corpus")
         .search()
@@ -220,23 +231,13 @@ def main(argv=None) -> None:
         .to_arrow()
         .column("n_tokens")
     )
-    n_docs = len(tokstats)
     total = pc.sum(tokstats).as_py()
-    kept = pc.sum(pc.min_element_wise(tokstats, SEQ)).as_py()
-    padtrunc_util = kept / (n_docs * SEQ)
+    kept = pc.sum(pc.min_element_wise(tokstats, SEQ)).as_py()  # tokens pad/truncate can see
     padtrunc_cov = kept / total
 
-    def packed_blocks(k: int, seed: int = 11) -> list[torch.Tensor]:
-        inner = SD(
-            connect_table(db, "corpus"),
-            columns=["input_ids"],
-            filter=filt,
-            num_splits=4,
-            shuffle_seed=seed,
-        )
-        ds = PackedTokenDataset(inner, SEQ, ByteTokenizer.EOS)
+    def packed_blocks(k: int) -> list[torch.Tensor]:
         out = []
-        for blk in ds:
+        for blk in packed_ds():
             out.append(blk["input_ids"])
             if len(out) >= k:
                 break
@@ -248,10 +249,15 @@ def main(argv=None) -> None:
         all(torch.equal(x, y) for x, y in zip(a, b)),
         "40 blocks bit-identical across fresh iterations",
     )
+    # Full-epoch utilization: pads appear only when a split drains.
+    all_ids = torch.cat([blk["input_ids"] for blk in packed_ds()])
+    real = (all_ids != ByteTokenizer.PAD).float().mean().item()
+    # Pads only appear while the longest split drains; on this tiny corpus
+    # split token-sums are high-variance, at real scale padding is <<1%.
     check(
-        "pack: 100% utilization vs pad/truncate",
-        True,
-        f"packed=100% real tokens; pad/truncate={padtrunc_util:.0%} slot use, "
+        "pack: token utilization vs pad/truncate",
+        real > 0.95,
+        f"packed={real:.1%} real tokens over a full epoch; pad/truncate "
         f"sees {padtrunc_cov:.0%} of corpus tokens at seq_len={SEQ}",
     )
 
@@ -301,21 +307,15 @@ def main(argv=None) -> None:
         f"{loss_p:.6f} vs {loss_q:.6f}",
     )
 
-    inner = SD(
-        connect_table(db, "corpus"),
-        columns=["input_ids"],
-        filter=filt,
-        num_splits=4,
-        shuffle_seed=11,
-    )
-    packed = PackedTokenDataset(inner, SEQ, ByteTokenizer.EOS)
+    packed = packed_ds()
+    next(iter(packed))
     st = packed.state_dict()
-    st["world_size"] = 2
+    st["pad_id"] = ByteTokenizer.PAD + 1
     try:
-        packed.load_state_dict(st)
-        check("pack: refuses cross-topology resume", False, "no error raised")
+        packed_ds().load_state_dict(st)
+        check("pack: checkpoint pins pad/eos/epoch", False, "no error raised")
     except ValueError:
-        check("pack: refuses cross-topology resume", True, "ValueError raised")
+        check("pack: checkpoint pins pad/eos/epoch", True, "pad_id mismatch raised")
 
     # ── summary ───────────────────────────────────────────────────────────
     print("\n" + "=" * 60)

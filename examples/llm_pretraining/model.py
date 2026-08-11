@@ -1,14 +1,15 @@
 """A compact GPT-style causal LM in plain PyTorch.
 
-Self-contained so the example has no model-hub dependency; swap in any
-HuggingFace model if you prefer — the data pipeline does not care.
+nanoGPT-flavored: fused QKV, F.scaled_dot_product_attention (flash kernels
+on H100), pre-norm, weight tying, no biases.  Self-contained so the example
+has no model-hub dependency.
 
-Presets (parameters exclude embeddings-tying savings):
+Presets (params at GPT-2 vocab, excluding tied head):
 
-- tiny   :   4L /  128d /  4h  — CPU smoke tests (~1M params w/ byte vocab)
-- small  :  12L /  768d / 12h  — ~124M params, single-GPU sanity runs
-- medium :  24L / 1024d / 16h  — ~350M params
-- large  :  24L / 2048d / 16h  — ~1.3B params, multi-node H200 territory
+- tiny   :   4L /  4H /  128d — CPU smoke tests
+- small  :  12L / 12H /  768d — GPT-2 124M, the nanoGPT classic
+- medium :  24L / 16H / 1024d — ~350M
+- large  :  24L / 16H / 2048d — ~1.3B
 """
 
 from __future__ import annotations
@@ -44,20 +45,24 @@ class GPTConfig:
 class Block(nn.Module):
     def __init__(self, cfg: GPTConfig):
         super().__init__()
-        self.ln1 = nn.LayerNorm(cfg.d_model)
-        self.attn = nn.MultiheadAttention(cfg.d_model, cfg.n_head, batch_first=True)
-        self.ln2 = nn.LayerNorm(cfg.d_model)
-        self.mlp = nn.Sequential(
-            nn.Linear(cfg.d_model, 4 * cfg.d_model),
-            nn.GELU(),
-            nn.Linear(4 * cfg.d_model, cfg.d_model),
-        )
+        self.n_head = cfg.n_head
+        self.ln1 = nn.LayerNorm(cfg.d_model, bias=False)
+        self.qkv = nn.Linear(cfg.d_model, 3 * cfg.d_model, bias=False)
+        self.proj = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
+        self.ln2 = nn.LayerNorm(cfg.d_model, bias=False)
+        self.mlp_up = nn.Linear(cfg.d_model, 4 * cfg.d_model, bias=False)
+        self.mlp_down = nn.Linear(4 * cfg.d_model, cfg.d_model, bias=False)
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        h = self.ln1(x)
-        a, _ = self.attn(h, h, h, attn_mask=mask, need_weights=False)
-        x = x + a
-        return x + self.mlp(self.ln2(x))
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, t, d = x.shape
+        q, k, v = self.qkv(self.ln1(x)).chunk(3, dim=-1)
+        q, k, v = (
+            y.view(b, t, self.n_head, d // self.n_head).transpose(1, 2)
+            for y in (q, k, v)
+        )
+        a = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        x = x + self.proj(a.transpose(1, 2).reshape(b, t, d))
+        return x + self.mlp_down(F.gelu(self.mlp_up(self.ln2(x))))
 
 
 class GPT(nn.Module):
@@ -67,11 +72,9 @@ class GPT(nn.Module):
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.pos_emb = nn.Embedding(cfg.seq_len, cfg.d_model)
         self.blocks = nn.ModuleList(Block(cfg) for _ in range(cfg.n_layer))
-        self.ln_f = nn.LayerNorm(cfg.d_model)
+        self.ln_f = nn.LayerNorm(cfg.d_model, bias=False)
         self.head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.head.weight = self.tok_emb.weight  # weight tying
-        mask = torch.full((cfg.seq_len, cfg.seq_len), float("-inf")).triu(1)
-        self.register_buffer("causal_mask", mask, persistent=False)
 
     def num_params(self) -> int:
         return sum(p.numel() for p in self.parameters())
@@ -83,15 +86,13 @@ class GPT(nn.Module):
         b, t = input_ids.shape
         pos = torch.arange(t, device=input_ids.device)
         x = self.tok_emb(input_ids) + self.pos_emb(pos)
-        mask = self.causal_mask[:t, :t]
         for block in self.blocks:
-            x = block(x, mask)
+            x = block(x)
         logits = self.head(self.ln_f(x))
 
         targets = input_ids[:, 1:]
-        logits = logits[:, :-1]
         loss = F.cross_entropy(
-            logits.reshape(-1, self.cfg.vocab_size),
+            logits[:, :-1].reshape(-1, self.cfg.vocab_size),
             targets.reshape(-1),
             reduction="none",
         ).view(b, t - 1)
@@ -104,7 +105,10 @@ class GPT(nn.Module):
 def make_model(preset: str, vocab_size: int, seq_len: int, seed: int = 1234) -> GPT:
     torch.manual_seed(seed)
     model = GPT(GPTConfig.preset(preset, vocab_size, seq_len))
-    for p in model.parameters():
+    for name, p in model.named_parameters():
         if p.dim() >= 2:
-            nn.init.normal_(p, std=0.02 / math.sqrt(2 * model.cfg.n_layer))
+            std = 0.02
+            if name.endswith(("proj.weight", "mlp_down.weight")):
+                std = 0.02 / math.sqrt(2 * model.cfg.n_layer)
+            nn.init.normal_(p, std=std)
     return model

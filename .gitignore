@@ -215,3 +215,8 @@ data/
 lance_pretrain_db/
 verify_workdir/
 checkpoints/
+
+# nested working clones and env
+lancedb/
+.venv*/
+*.pt

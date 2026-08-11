@@ -2,40 +2,29 @@
 
 The table is the dataset: no webdataset shards, no tokenized parquet copies,
 no manifest files.  Training reads only the `input_ids` column, prefiltered
-by SQL, streamed in a deterministic elastic order.
-
-Key properties demonstrated (see README for the full story):
-
-- **Elastic determinism** — the samples that form each global step depend
-  only on (num_splits, shuffle_seed, epoch), not on world size or worker
-  count.  Scale from 8 to 64 GPUs and step N still trains on the same data.
-- **Mid-epoch resume** — `state_dict`/`load_state_dict` checkpoint the
-  loader; kill the job at any step and resume exactly, even on a different
-  number of GPUs.
-- **Prefiltered streaming** — `filter=` pushes curation predicates
-  (dedup flag, quality score, holdout split) into the scan; rejected rows
-  are never read from storage.
+by SQL, streamed in a deterministic order — optionally sequence-packed by
+the loader itself (``pack_sequences``), so every trained position is a real
+token.
 
 Usage
 -----
 # Single process (debug / CPU smoke):
 python train.py --model tiny --steps 40
 
-# One 8x GPU node:
-torchrun --nproc-per-node 8 train.py --model medium --batch-size 8
+# The blog run — GPT-2 124M, Chinchilla-ish 2.5B tokens, 4x H100:
+torchrun --nproc-per-node 4 train.py --model small --tokenizer hf:gpt2 \
+    --pack --compile --batch-size 32 --grad-accum 4 --seq-len 1024 \
+    --epochs 1 --ckpt-every 1000
 
-# 4 or 8 H200 nodes (set MASTER_ADDR on all nodes):
-torchrun --nnodes 4 --nproc-per-node 8 --rdzv-backend c10d \
-    --rdzv-endpoint $MASTER_ADDR:29500 \
-    train.py --model large --batch-size 4 --num-splits 256
-
-# Kill it mid-run, then resume (works with a different node count too):
-torchrun --nnodes 3 --nproc-per-node 8 ... train.py ... --resume auto
+# Kill it mid-run, then resume (same topology when --pack):
+torchrun --nproc-per-node 4 train.py ... --resume auto
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import glob
 import math
 import os
 import time
@@ -57,13 +46,15 @@ from common import (
 )
 from model import make_model
 
+H100_BF16_FLOPS = 989e12  # dense peak, SXM
+
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--db", default=DEFAULT_DB)
     p.add_argument("--table", default=DEFAULT_TABLE)
     p.add_argument(
-        "--tokenizer", default="byte", help="'byte' or 'hf:<model>' (vocab size only)"
+        "--tokenizer", default="byte", help="'byte' or 'hf:<model>' (vocab/pad/eos ids)"
     )
     p.add_argument(
         "--model", default="tiny", choices=["tiny", "small", "medium", "large"]
@@ -78,10 +69,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument(
         "--pack",
         action="store_true",
-        help="sequence packing: concat docs with EOS and slice into full "
-        "seq_len blocks — zero padding waste. Resume requires the same "
-        "world_size (see packing.py)",
+        help="sequence packing in the loader (pack_sequences): EOS-joined "
+        "fixed-length blocks, no padding waste. Resume packed runs at the "
+        "same world_size",
     )
+    p.add_argument("--compile", action="store_true", help="torch.compile the model")
     p.add_argument("--grad-accum", type=int, default=1)
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument(
@@ -90,8 +82,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=0,
         help="stop after N optimizer steps (0 = full epochs)",
     )
-    p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--warmup-steps", type=int, default=20)
+    p.add_argument("--lr", type=float, default=6e-4)
+    p.add_argument("--warmup-steps", type=int, default=200)
     p.add_argument(
         "--lr-total-steps",
         type=int,
@@ -139,14 +131,7 @@ def setup_distributed() -> tuple[int, int, torch.device]:
 
 
 def make_transform(seq_len: int, pad_id: int):
-    """RecordBatch -> per-row dicts of fixed-length tensors.
-
-    Runs on StreamingDataset's transform thread pool, overlapped with I/O.
-    Each document is truncated/padded to seq_len; the loss mask covers real
-    tokens only.  (Fixed-length rows keep elastic determinism exact at the
-    token level; see README for the packed-sequence variant and its
-    trade-off.)
-    """
+    """Row mode: RecordBatch -> per-row dicts, pad/truncate to seq_len."""
 
     def transform(batch: pa.RecordBatch) -> list[dict]:
         rows = []
@@ -174,11 +159,10 @@ def make_dataset(
     tok,
     num_splits: int,
     packed: bool = False,
-):
+) -> StreamingDataset:
     tbl = connect_table(args.db, args.table)
     filt = f"NOT is_dup AND score >= {args.min_score} AND ({split_filter})"
-    ds = StreamingDataset(
-        tbl,
+    kwargs = dict(
         columns=["input_ids"],
         filter=filt,
         num_splits=num_splits,
@@ -188,18 +172,31 @@ def make_dataset(
         rank=rank,
         world_size=world_size,
         read_batch_size=args.read_batch_size,
-        # Packed mode consumes raw rows (default transform); otherwise
-        # pad/truncate per document on the transform thread pool.
-        transform=None if packed else make_transform(args.seq_len, tok.pad_token_id),
     )
     if packed:
-        from packing import PackedTokenDataset
+        # Packing lives in the loader now: EOS-joined blocks, pad only when a
+        # split runs dry.  Pads are masked from the loss in the train step.
+        kwargs.update(
+            pack_sequences=args.seq_len,
+            eos_id=tok.eos_token_id,
+            pad_id=tok.pad_token_id,
+        )
+    else:
+        kwargs.update(transform=make_transform(args.seq_len, tok.pad_token_id))
+    return StreamingDataset(tbl, **kwargs)
 
-        return PackedTokenDataset(ds, args.seq_len, tok.eos_token_id)
-    return ds
+
+def batch_loss(trainable, batch, device, pad_id):
+    input_ids = batch["input_ids"].to(device, non_blocking=True)
+    if "loss_mask" in batch:
+        mask = batch["loss_mask"].to(device, non_blocking=True)
+    else:  # packed blocks carry doc_ids; pads are identified by id
+        mask = input_ids != pad_id
+    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
+        return trainable(input_ids, mask), int(mask.sum())
 
 
-def evaluate(model, args, rank, world_size, device, tok, num_splits) -> float:
+def evaluate(trainable, args, rank, world_size, device, tok, num_splits) -> float:
     ds = make_dataset(
         args,
         rank,
@@ -211,15 +208,15 @@ def evaluate(model, args, rank, world_size, device, tok, num_splits) -> float:
         num_splits=num_splits,
     )
     loader = DataLoader(ds, batch_size=args.batch_size, num_workers=0)
-    model.eval()
+    trainable.eval()
     losses = []
     with torch.no_grad():
         for i, batch in enumerate(loader):
             if i >= args.eval_batches:
                 break
-            loss = model(batch["input_ids"].to(device), batch["loss_mask"].to(device))
+            loss, _ = batch_loss(trainable, batch, device, tok.pad_token_id)
             losses.append(loss)
-    model.train()
+    trainable.train()
     val = torch.stack(losses).mean() if losses else torch.tensor(0.0, device=device)
     if world_size > 1:
         dist.all_reduce(val, op=dist.ReduceOp.AVG)
@@ -233,69 +230,78 @@ def lr_at(step: int, total: int, args) -> float:
     return args.lr * 0.5 * (1 + math.cos(math.pi * min(t, 1.0)))
 
 
+def flops_per_token(model) -> float:
+    """nanoGPT-style estimate: 6N + 12 * n_layer * d_model * seq_len."""
+    cfg = model.cfg
+    return 6 * model.num_params() + 12 * cfg.n_layer * cfg.d_model * cfg.seq_len
+
+
 def main(argv=None) -> None:
     args = parse_args(argv)
     rank, world_size, device = setup_distributed()
     is_main = rank == 0
+    torch.set_float32_matmul_precision("high")
 
     tok = load_tokenizer(args.tokenizer)
     global_batch = args.batch_size * world_size
-    # Elastic determinism holds when the global batch is a multiple of
-    # num_splits.  Default: one split per global-batch slot.
     num_splits = args.num_splits or global_batch
-    if not args.pack and global_batch % num_splits != 0:
+    if global_batch % num_splits != 0:
         raise SystemExit(
             f"global batch ({global_batch} = {args.batch_size} x {world_size} ranks) "
-            f"must be a multiple of num_splits ({num_splits}); otherwise global "
-            f"steps are not reproducible across world sizes."
+            f"must be a multiple of num_splits ({num_splits}) so optimizer steps "
+            f"align with loader cycles."
         )
 
     torch.manual_seed(1234)
     model = make_model(args.model, tok.vocab_size, args.seq_len).to(device)
+    fpt = flops_per_token(model)
     if is_main:
         print(
-            f"model={args.model} params={model.num_params():,} "
-            f"world_size={world_size} global_batch={global_batch} num_splits={num_splits}"
+            f"model={args.model} params={model.num_params():,} pack={args.pack} "
+            f"world_size={world_size} global_batch={global_batch} "
+            f"num_splits={num_splits} compile={args.compile}"
         )
+    if args.compile:
+        model = torch.compile(model)
     trainable = model
     if world_size > 1:
         trainable = DDP(
             model, device_ids=[device.index] if device.type == "cuda" else None
         )
-    opt = torch.optim.AdamW(trainable.parameters(), lr=args.lr, weight_decay=0.1)
+    opt = torch.optim.AdamW(
+        trainable.parameters(), lr=args.lr, weight_decay=0.1, betas=(0.9, 0.95)
+    )
 
-    # ── Resume ────────────────────────────────────────────────────────────
+    # ── Resume (per-rank loader state: packed state covers owned splits) ──
     start_epoch, opt_step, loader_state = 0, 0, None
     if args.resume:
         path = args.resume
         if path == "auto":
             os.makedirs(args.ckpt_dir, exist_ok=True)
-            ckpts = sorted(os.listdir(args.ckpt_dir))
-            if not ckpts:
+            mains = sorted(glob.glob(os.path.join(args.ckpt_dir, "step_*[0-9].pt")))
+            if not mains:
                 raise SystemExit(f"--resume auto: no checkpoints in {args.ckpt_dir}")
-            path = os.path.join(args.ckpt_dir, ckpts[-1])
+            path = mains[-1]
         ckpt = torch.load(path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
         opt.load_state_dict(ckpt["optimizer"])
-        # The loader state pins (num_splits, shuffle_seed) and the position
-        # inside the epoch.  The epoch itself must be passed back to the
-        # StreamingDataset constructor — it selects the permutation.
         start_epoch = ckpt["epoch"]
         opt_step = ckpt["opt_step"]
-        loader_state = ckpt["dataset"]
+        rank_path = path.replace(".pt", f"_dsrank{rank}.pt") if rank else path
+        loader_state = torch.load(rank_path, map_location="cpu", weights_only=False)[
+            "dataset"
+        ]
         if is_main:
             print(f"resumed from {path} (epoch {start_epoch}, opt step {opt_step})")
 
     tbl = connect_table(args.db, args.table)
-    train_rows = tbl.count_rows(
-        f"NOT is_dup AND score >= {args.min_score} AND ({TRAIN_FILTER})"
-    )
+    base_filter = f"NOT is_dup AND score >= {args.min_score} AND ({TRAIN_FILTER})"
+    train_rows = tbl.count_rows(base_filter)
     if args.pack:
-        # Packed blocks per epoch ~= (corpus tokens + one EOS per doc) / seq_len.
         toks = (
             tbl.search()
             .select(["n_tokens"])
-            .where(f"NOT is_dup AND score >= {args.min_score} AND ({TRAIN_FILTER})")
+            .where(base_filter)
             .limit(train_rows)
             .to_arrow()
         )
@@ -305,37 +311,38 @@ def main(argv=None) -> None:
         micro_steps_per_epoch = total_tokens // args.seq_len // global_batch
     else:
         micro_steps_per_epoch = train_rows // num_splits
-    steps_per_epoch = micro_steps_per_epoch // args.grad_accum
+    steps_per_epoch = max(micro_steps_per_epoch // args.grad_accum, 1)
     total_steps = args.lr_total_steps or args.steps or steps_per_epoch * args.epochs
     if is_main:
         print(
-            f"train rows (post-filter): {train_rows}  steps/epoch: {steps_per_epoch}  "
-            f"target steps: {total_steps}"
+            f"train rows (post-filter): {train_rows:,}  ~steps/epoch: "
+            f"{steps_per_epoch:,}  target steps: {total_steps:,}"
         )
 
     os.makedirs(args.ckpt_dir, exist_ok=True)
     tokens_seen = 0
     t_last, step_last = time.perf_counter(), opt_step
 
-    def save_ckpt(epoch: int, ds) -> None:
-        if not is_main:
-            return
-        payload = {
-            "model": model.state_dict(),
-            "optimizer": opt.state_dict(),
-            "dataset": ds.state_dict(),
-            "epoch": epoch,
-            "opt_step": opt_step,
-        }
-        path = os.path.join(args.ckpt_dir, f"step_{opt_step:08d}.pt")
-        torch.save(payload, path)
-        print(f"  saved {path}")
+    def save_ckpt(epoch: int, ds: StreamingDataset) -> None:
+        # Every rank persists its own loader state: packed checkpoints cover
+        # only the splits an iterator owns.  Rank 0 also saves model/optim.
+        rank_payload = {"dataset": ds.state_dict(), "epoch": epoch, "opt_step": opt_step}
+        base = os.path.join(args.ckpt_dir, f"step_{opt_step:08d}")
+        if is_main:
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "optimizer": opt.state_dict(),
+                    **rank_payload,
+                },
+                base + ".pt",
+            )
+            print(f"  saved {base}.pt")
+        else:
+            torch.save(rank_payload, f"{base}_dsrank{rank}.pt")
 
     done = False
     for epoch in range(start_epoch, args.epochs):
-        # New epoch = new permutation: the dataset is reconstructed with the
-        # epoch number (there is no set_epoch), which reshuffles rows into
-        # the SAME splits so cross-epoch caching stays valid.
         ds = make_dataset(
             args,
             rank,
@@ -354,13 +361,20 @@ def main(argv=None) -> None:
 
         micro = 0
         for batch in loader:
-            loss = trainable(
-                batch["input_ids"].to(device), batch["loss_mask"].to(device)
+            is_sync = (micro + 1) % args.grad_accum == 0
+            ctx = (
+                trainable.no_sync()
+                if (world_size > 1 and not is_sync)
+                else contextlib.nullcontext()
             )
-            (loss / args.grad_accum).backward()
+            with ctx:
+                loss, real_tokens = batch_loss(
+                    trainable, batch, device, tok.pad_token_id
+                )
+                (loss / args.grad_accum).backward()
             micro += 1
-            tokens_seen += int(batch["loss_mask"].sum())
-            if micro % args.grad_accum:
+            tokens_seen += real_tokens
+            if not is_sync:
                 continue
 
             for g in opt.param_groups:
@@ -371,6 +385,8 @@ def main(argv=None) -> None:
             opt_step += 1
 
             if is_main and opt_step % args.log_every == 0:
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
                 dt = time.perf_counter() - t_last
                 tps = (
                     (opt_step - step_last)
@@ -379,14 +395,12 @@ def main(argv=None) -> None:
                     * args.seq_len
                     / dt
                 )
-                # Queue depths tell you where the bottleneck is:
-                # unscanned/raw/cooked/consumed (see the dataloading guide).
-                sds = ds.inner if args.pack else ds
-                q = f"{sds.unscanned_rows}/{sds.raw_queue_depth}/{sds.prefetch_queue_depth}/{sds.consumed_rows}"
+                mfu = fpt * tps / (world_size * H100_BF16_FLOPS)
+                q = f"{ds.unscanned_rows}/{ds.raw_queue_depth}/{ds.prefetch_queue_depth}/{ds.consumed_rows}"
                 print(
                     f"epoch {epoch} step {opt_step}/{total_steps} | "
-                    f"loss {loss.item():.4f} | {tps:,.0f} tok/s | q {q} | "
-                    f"fetch {sds.fetch_time:.1f}s tx {sds.transform_time:.1f}s"
+                    f"loss {loss.item():.4f} | {tps:,.0f} tok/s | mfu {mfu:.1%} | "
+                    f"q {q} | fetch {ds.fetch_time:.1f}s tx {ds.transform_time:.1f}s"
                 )
                 t_last, step_last = time.perf_counter(), opt_step
 
@@ -409,7 +423,8 @@ def main(argv=None) -> None:
     val = evaluate(trainable, args, rank, world_size, device, tok, num_splits)
     if is_main:
         print(
-            f"final: opt_step={opt_step} tokens_seen(rank0)={tokens_seen:,} val_loss={val:.4f}"
+            f"final: opt_step={opt_step} tokens_seen(rank0)={tokens_seen:,} "
+            f"val_loss={val:.4f}"
         )
     if world_size > 1:
         dist.destroy_process_group()

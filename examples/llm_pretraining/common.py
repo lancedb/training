@@ -81,12 +81,13 @@ def load_tokenizer(spec: str):
         from transformers import AutoTokenizer
 
         tok = AutoTokenizer.from_pretrained(spec[3:])
-        if tok.pad_token_id is None:
-            tok.pad_token = tok.eos_token
 
         class _HFAdapter:
-            vocab_size = len(tok)
-            pad_token_id = tok.pad_token_id
+            # Packing needs a pad id that is NOT a real token (pads are
+            # masked from the loss; EOS must stay learnable), so allocate a
+            # fresh id one past the tokenizer vocabulary.
+            vocab_size = len(tok) + 1
+            pad_token_id = len(tok)
             eos_token_id = tok.eos_token_id
 
             @staticmethod
