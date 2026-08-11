@@ -278,7 +278,11 @@ def main(argv=None) -> None:
         path = args.resume
         if path == "auto":
             os.makedirs(args.ckpt_dir, exist_ok=True)
-            mains = sorted(glob.glob(os.path.join(args.ckpt_dir, "step_*[0-9].pt")))
+            mains = sorted(
+                p
+                for p in glob.glob(os.path.join(args.ckpt_dir, "step_*.pt"))
+                if "_dsrank" not in p
+            )
             if not mains:
                 raise SystemExit(f"--resume auto: no checkpoints in {args.ckpt_dir}")
             path = mains[-1]
