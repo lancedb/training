@@ -128,6 +128,8 @@ def cmd_bench_random(args) -> None:
         cache = getattr(tls, "handles", None)
         if cache is None:
             cache = tls.handles = {}
+        if args.no_footer_reuse:
+            return pq.ParquetFile(file_paths[fi], filesystem=fs)
         if fi not in cache:
             cache[fi] = pq.ParquetFile(file_paths[fi], filesystem=fs)
         return cache[fi]
@@ -190,6 +192,12 @@ def main(argv=None) -> None:
     p.add_argument("--shuffle", action="store_true")
     p.add_argument("--seconds", type=float, default=30.0)
     p.add_argument("--batch", type=int, default=8)
+    p.add_argument(
+        "--no-footer-reuse",
+        action="store_true",
+        help="open the ParquetFile (footer fetch + parse) on every request "
+        "instead of once per file at startup",
+    )
     args = p.parse_args(argv)
     {"export": cmd_export, "bench-random": cmd_bench_random, "bench-seq": cmd_bench_seq}[
         args.cmd
