@@ -41,6 +41,7 @@ a preprocessing job.
 | `bench_loader.py` | Loader-only throughput probe (tune `read_batch_size`/splits) |
 | `sample.py` | Generate text from a trained checkpoint |
 | `forensics.py` | Vector index, hybrid search, generation attribution, near-dups |
+| `bench_parquet.py` | The standard-workflow control: Parquet export + S3 read benches |
 | `verify_e2e.py` | Offline CPU verification of the whole pipeline (~2 min) |
 
 ## Setup
@@ -136,6 +137,7 @@ sequence packing from the `ayush/seq-packing` branch) + `--compile`.
 | Train 124M, 1 epoch = 2.43B tokens | **~50 min** | 4x H100, 1.6M tok/s sustained, 35% MFU |
 | Upload table to S3 + train from s3:// | 33s upload | **same 1.60M tok/s / 34.7% MFU streaming over WAN** |
 | Geneva GPU embeddings (4 workers) + IVF-PQ index | 11m 10s + 13s | 2.4M x 384-d; hybrid search + generation attribution |
+| Parquet control (bench_parquet.py) | 30s export + 145s pre-shuffle copy | random S3 reads: 46k tok/s, 474x amplification vs Lance 660k tok/s, 0 extra copies |
 
 Raw text to training-ready: **~12 minutes**. Total to a Chinchilla-optimal
 GPT-2: about an hour.
