@@ -74,6 +74,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         "same world_size",
     )
     p.add_argument("--compile", action="store_true", help="torch.compile the model")
+    p.add_argument("--compile-mode", default="default", help="torch.compile mode, e.g. max-autotune")
     p.add_argument("--grad-accum", type=int, default=1)
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument(
@@ -193,7 +194,7 @@ def batch_loss(trainable, batch, device, pad_id):
     else:  # packed blocks carry doc_ids; pads are identified by id
         mask = input_ids != pad_id
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
-        return trainable(input_ids, mask), int(mask.sum())
+        return trainable(input_ids, mask), mask.sum()
 
 
 def evaluate(trainable, args, rank, world_size, device, tok, num_splits) -> float:
@@ -262,15 +263,21 @@ def main(argv=None) -> None:
             f"num_splits={num_splits} compile={args.compile}"
         )
     if args.compile:
-        model = torch.compile(model)
+        model = torch.compile(model, mode=args.compile_mode)
     trainable = model
     if world_size > 1:
         trainable = DDP(
             model, device_ids=[device.index] if device.type == "cuda" else None
         )
-    opt = torch.optim.AdamW(
-        trainable.parameters(), lr=args.lr, weight_decay=0.1, betas=(0.9, 0.95)
-    )
+    try:
+        opt = torch.optim.AdamW(
+            trainable.parameters(), lr=args.lr, weight_decay=0.1,
+            betas=(0.9, 0.95), fused=device.type == "cuda",
+        )
+    except (RuntimeError, TypeError):
+        opt = torch.optim.AdamW(
+            trainable.parameters(), lr=args.lr, weight_decay=0.1, betas=(0.9, 0.95)
+        )
 
     # ── Resume (per-rank loader state: packed state covers owned splits) ──
     start_epoch, opt_step, loader_state = 0, 0, None
@@ -324,7 +331,7 @@ def main(argv=None) -> None:
         )
 
     os.makedirs(args.ckpt_dir, exist_ok=True)
-    tokens_seen = 0
+    tokens_seen = torch.zeros((), dtype=torch.int64, device=device)
     t_last, step_last = time.perf_counter(), opt_step
 
     def save_ckpt(epoch: int, ds: StreamingDataset) -> None:
@@ -377,7 +384,7 @@ def main(argv=None) -> None:
                 )
                 (loss / args.grad_accum).backward()
             micro += 1
-            tokens_seen += real_tokens
+            tokens_seen += real_tokens  # GPU accumulator: no per-step sync
             if not is_sync:
                 continue
 
@@ -427,7 +434,7 @@ def main(argv=None) -> None:
     val = evaluate(trainable, args, rank, world_size, device, tok, num_splits)
     if is_main:
         print(
-            f"final: opt_step={opt_step} tokens_seen(rank0)={tokens_seen:,} "
+            f"final: opt_step={opt_step} tokens_seen(rank0)={int(tokens_seen):,} "
             f"val_loss={val:.4f}"
         )
     if world_size > 1:

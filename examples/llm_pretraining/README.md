@@ -138,6 +138,8 @@ sequence packing from the `ayush/seq-packing` branch) + `--compile`.
 | Upload table to S3 + train from s3:// | 33s upload | **same 1.60M tok/s / 34.7% MFU streaming over WAN** |
 | Geneva GPU embeddings (4 workers) + IVF-PQ index | 11m 10s + 13s | 2.4M x 384-d; hybrid search + generation attribution |
 | Parquet control (bench_parquet.py) | 30s export + 145s pre-shuffle copy | random S3 reads: 46k tok/s, 474x amplification vs Lance 660k tok/s, 0 extra copies |
+| Scale run: full 10BT sample, GPT-2 medium 354M | prep 51m; train **3h06m** | 9.67M docs (4.2% dups), 7.0B tokens, **684k tok/s / 42.0% MFU flat**, val 2.840 |
+| Loader-knob MFU sweep (354M, trainer frozen) | - | read_batch_size 64/16/8 -> 17% / 40% / 42% MFU; identical losses (determinism) |
 
 Raw text to training-ready: **~12 minutes**. Total to a Chinchilla-optimal
 GPT-2: about an hour.
