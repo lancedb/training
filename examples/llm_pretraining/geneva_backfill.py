@@ -61,6 +61,35 @@ def _n_tokens(input_ids: pa.Array) -> pa.Array:
     return pc.cast(pc.list_value_length(input_ids), pa.int32())
 
 
+@udf(
+    data_type=pa.list_(pa.float32(), 384),
+    input_columns=["text"],
+    cuda=True,
+    num_gpus=1,
+    batch_size=1024,
+)
+class _EmbedGPU:
+    """384-d MiniLM sentence embedding; model loads once per GPU worker."""
+
+    def __init__(self):
+        self._model = None
+
+    def __call__(self, text: pa.Array) -> pa.Array:
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+
+            self._model = SentenceTransformer(
+                "sentence-transformers/all-MiniLM-L6-v2", device="cuda"
+            )
+        vecs = self._model.encode(
+            text.to_pylist(),
+            batch_size=256,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        return pa.array(vecs.tolist(), type=pa.list_(pa.float32(), 384))
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default=DEFAULT_DB)
@@ -68,6 +97,12 @@ def main(argv=None) -> None:
     parser.add_argument("--tokenizer", default="hf:gpt2", help="'byte' or 'hf:<model>'")
     parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--task-size", type=int, default=4096)
+    parser.add_argument(
+        "--columns",
+        nargs="+",
+        default=["input_ids", "n_tokens"],
+        help="which columns to backfill (input_ids, n_tokens, embedding)",
+    )
     args = parser.parse_args(argv)
 
     if args.tokenizer == "byte":
@@ -81,7 +116,8 @@ def main(argv=None) -> None:
     tbl = conn.open_table(args.table)
     print(f"table '{args.table}': {tbl.count_rows():,} rows, v{tbl.version}")
 
-    registry = {"input_ids": tokenize_udf, "n_tokens": _n_tokens}
+    registry = {"input_ids": tokenize_udf, "n_tokens": _n_tokens, "embedding": _EmbedGPU()}
+    registry = {c: registry[c] for c in args.columns}
     missing = {c: u for c, u in registry.items() if c not in set(tbl.schema.names)}
     if missing:
         print(f"registering columns: {list(missing)}")
