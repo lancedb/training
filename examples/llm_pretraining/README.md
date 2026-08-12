@@ -42,6 +42,8 @@ a preprocessing job.
 | `sample.py` | Generate text from a trained checkpoint |
 | `forensics.py` | Vector index, hybrid search, generation attribution, near-dups |
 | `bench_parquet.py` | The standard-workflow control: Parquet export + S3 read benches |
+| `build_packed_datasets.py` | Identical pre-packed blocks -> MDS shards + Lance table |
+| `mosaic_compare.py` | MosaicML Streaming A/B: elastic, resume, throughput |
 | `verify_e2e.py` | Offline CPU verification of the whole pipeline (~2 min) |
 
 ## Setup
@@ -140,6 +142,7 @@ sequence packing from the `ayush/seq-packing` branch) + `--compile`.
 | Parquet control (bench_parquet.py) | 30s export + 145s pre-shuffle copy | random S3 reads: 46k tok/s, 474x amplification vs Lance 660k tok/s, 0 extra copies |
 | Scale run: full 10BT sample, GPT-2 medium 354M | prep 51m; train **3h06m** | 9.67M docs (4.2% dups), 7.0B tokens, **684k tok/s / 42.0% MFU flat**, val 2.840 |
 | Loader-knob MFU sweep (354M, trainer frozen) | - | read_batch_size 64/16/8 -> 17% / 40% / 42% MFU; identical losses (determinism) |
+| Mosaic Streaming A/B (identical 2.37M packed blocks) | 33m pre-pack (required by MDS flow) | elastic ws1/2/4 + ws4->ws2 resume: both pass; GPU training: lance 1.619M tok/s / 35.2% vs mosaic 1.618M / 35.1% |
 
 Raw text to training-ready: **~12 minutes**. Total to a Chinchilla-optimal
 GPT-2: about an hour.

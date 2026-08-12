@@ -114,6 +114,14 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--ckpt-every", type=int, default=100)
     p.add_argument("--ckpt-dir", default="./checkpoints")
     p.add_argument("--resume", default="", help="checkpoint path, or 'auto' for latest")
+    p.add_argument(
+        "--blocks-mode",
+        default="off",
+        choices=["off", "lance", "mosaic"],
+        help="A/B harness: train on pre-packed 1024-token blocks via the "
+        "lance loader or MosaicML streaming (see mosaic_compare.py)",
+    )
+    p.add_argument("--blocks-path", default="", help="blocks db dir / MDS dir or s3://")
     return p.parse_args(argv)
 
 
@@ -188,7 +196,7 @@ def make_dataset(
 
 
 def batch_loss(trainable, batch, device, pad_id):
-    input_ids = batch["input_ids"].to(device, non_blocking=True)
+    input_ids = batch["input_ids"].to(device, non_blocking=True).long()
     if "loss_mask" in batch:
         mask = batch["loss_mask"].to(device, non_blocking=True)
     else:  # packed blocks carry doc_ids; pads are identified by id
@@ -235,6 +243,100 @@ def flops_per_token(model) -> float:
     """nanoGPT-style estimate: 6N + 12 * n_layer * d_model * seq_len."""
     cfg = model.cfg
     return 6 * model.num_params() + 12 * cfg.n_layer * cfg.d_model * cfg.seq_len
+
+
+def run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok) -> None:
+    """Identical-samples A/B: same trainer, loader swapped (see mosaic_compare)."""
+    import contextlib as _ctx
+
+    global_batch = args.batch_size * world_size
+    fpt = flops_per_token(model.module if hasattr(model, "module") else model)
+    if args.blocks_mode == "lance":
+        import lancedb
+
+        btbl = lancedb.connect(args.blocks_path).open_table("blocks")
+
+        def to_rows(b: pa.RecordBatch):
+            import numpy as np
+
+            mat = b.column("input_ids").values.to_numpy().reshape(-1, args.seq_len)
+            return [{"input_ids": torch.from_numpy(r.copy())} for r in mat]
+
+        ds = StreamingDataset(
+            btbl,
+            columns=["input_ids"],
+            num_splits=args.num_splits or global_batch,
+            shuffle_seed=args.shuffle_seed,
+            rank=rank,
+            world_size=world_size,
+            read_batch_size=args.read_batch_size,
+            transform=to_rows,
+        )
+        loader = DataLoader(ds, batch_size=args.batch_size, num_workers=0)
+    else:
+        from streaming import StreamingDataset as MosaicSD
+        from streaming import StreamingDataLoader
+
+        kwargs = dict(
+            batch_size=args.batch_size,
+            shuffle=True,
+            shuffle_seed=args.shuffle_seed,
+            num_canonical_nodes=8,
+        )
+        if args.blocks_path.startswith("s3://"):
+            mds = MosaicSD(
+                remote=args.blocks_path,
+                local=os.path.expanduser(f"~/mosaic_cache/rank{rank}"),
+                **kwargs,
+            )
+        else:
+            mds = MosaicSD(local=args.blocks_path, **kwargs)
+        loader = StreamingDataLoader(mds, batch_size=args.batch_size, num_workers=8)
+        ds = None
+
+    trainable.train()
+    opt_step, tokens = 0, 0
+    t_last, step_last = time.perf_counter(), 0
+    micro = 0
+    for batch in loader:
+        is_sync = (micro + 1) % args.grad_accum == 0
+        ctx = (
+            trainable.no_sync()
+            if (world_size > 1 and not is_sync)
+            else _ctx.nullcontext()
+        )
+        with ctx:
+            loss, real = batch_loss(trainable, batch, device, tok.pad_token_id)
+            (loss / args.grad_accum).backward()
+        micro += 1
+        if not is_sync:
+            continue
+        for g in opt.param_groups:
+            g["lr"] = args.lr
+        torch.nn.utils.clip_grad_norm_(trainable.parameters(), 1.0)
+        opt.step()
+        opt.zero_grad(set_to_none=True)
+        opt_step += 1
+        if rank == 0 and opt_step % args.log_every == 0:
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            dt = time.perf_counter() - t_last
+            tps = (opt_step - step_last) * global_batch * args.grad_accum * args.seq_len / dt
+            mfu = fpt * tps / (world_size * H100_BF16_FLOPS)
+            q = ""
+            if ds is not None:
+                q = f" | q {ds.unscanned_rows}/{ds.raw_queue_depth}/{ds.prefetch_queue_depth}/{ds.consumed_rows}"
+            print(
+                f"[{args.blocks_mode}] step {opt_step}/{args.steps} | "
+                f"loss {loss.item():.4f} | {tps:,.0f} tok/s | mfu {mfu:.1%}{q}"
+            )
+            t_last, step_last = time.perf_counter(), opt_step
+        if args.steps and opt_step >= args.steps:
+            break
+    if rank == 0:
+        print(f"[{args.blocks_mode}] final: opt_step={opt_step}")
+    if world_size > 1:
+        dist.destroy_process_group()
 
 
 def main(argv=None) -> None:
@@ -304,6 +406,10 @@ def main(argv=None) -> None:
         ]
         if is_main:
             print(f"resumed from {path} (epoch {start_epoch}, opt step {opt_step})")
+
+    if args.blocks_mode != "off":
+        run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok)
+        return
 
     tbl = connect_table(args.db, args.table)
     base_filter = f"NOT is_dup AND score >= {args.min_score} AND ({TRAIN_FILTER})"
