@@ -8,8 +8,9 @@ Presets (params at GPT-2 vocab, excluding tied head):
 
 - tiny   :   4L /  4H /  128d — CPU smoke tests
 - small  :  12L / 12H /  768d — GPT-2 124M, the nanoGPT classic
-- medium :  24L / 16H / 1024d — ~350M
-- large  :  24L / 16H / 2048d — ~1.3B
+- medium :  24L / 16H / 1024d — GPT-2 medium, ~350M
+- large  :  36L / 20H / 1280d — GPT-2 large, ~774M
+- xl     :  24L / 16H / 2048d — ~1.3B
 """
 
 from __future__ import annotations
@@ -36,7 +37,8 @@ class GPTConfig:
             "tiny": (4, 4, 128),
             "small": (12, 12, 768),
             "medium": (24, 16, 1024),
-            "large": (24, 16, 2048),
+            "large": (36, 20, 1280),
+            "xl": (24, 16, 2048),
         }
         n_layer, n_head, d_model = shapes[name]
         return cls(vocab_size, seq_len, n_layer, n_head, d_model)

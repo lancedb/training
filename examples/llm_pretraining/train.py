@@ -57,7 +57,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--tokenizer", default="byte", help="'byte' or 'hf:<model>' (vocab/pad/eos ids)"
     )
     p.add_argument(
-        "--model", default="tiny", choices=["tiny", "small", "medium", "large"]
+        "--model", default="tiny", choices=["tiny", "small", "medium", "large", "xl"]
     )
     p.add_argument("--seq-len", type=int, default=512)
     p.add_argument(
