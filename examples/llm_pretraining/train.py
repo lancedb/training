@@ -122,6 +122,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         "lance loader or MosaicML streaming (see mosaic_compare.py)",
     )
     p.add_argument("--blocks-path", default="", help="blocks db dir / MDS dir or s3://")
+    p.add_argument(
+        "--blocks-per-epoch",
+        default="",
+        help="packed block budget; default: exact value computed from the "
+        "n_tokens column (production path). 'auto' uses the loader's sampler",
+    )
     return p.parse_args(argv)
 
 
@@ -168,6 +174,7 @@ def make_dataset(
     tok,
     num_splits: int,
     packed: bool = False,
+    blocks_per_epoch=None,
 ) -> StreamingDataset:
     tbl = connect_table(args.db, args.table)
     filt = f"NOT is_dup AND score >= {args.min_score} AND ({split_filter})"
@@ -189,6 +196,7 @@ def make_dataset(
             pack_sequences=args.seq_len,
             eos_id=tok.eos_token_id,
             pad_id=tok.pad_token_id,
+            blocks_per_epoch=blocks_per_epoch,
         )
     else:
         kwargs.update(transform=make_transform(args.seq_len, tok.pad_token_id))
@@ -400,10 +408,21 @@ def main(argv=None) -> None:
         opt.load_state_dict(ckpt["optimizer"])
         start_epoch = ckpt["epoch"]
         opt_step = ckpt["opt_step"]
-        rank_path = path.replace(".pt", f"_dsrank{rank}.pt") if rank else path
-        loader_state = torch.load(rank_path, map_location="cpu", weights_only=False)[
-            "dataset"
+        state_files = [path] + sorted(glob.glob(path.replace(".pt", "_dsrank*.pt")))
+        states = [
+            torch.load(f, map_location="cpu", weights_only=False)["dataset"]
+            for f in state_files
         ]
+        if args.pack and len(states) > 1:
+            # Packed state is per logical split; merging every rank's state
+            # yields a topology-independent checkpoint (resume on any
+            # compatible world size).
+            loader_state = StreamingDataset.merge_state_dicts(states)
+        else:
+            rank_path = path.replace(".pt", f"_dsrank{rank}.pt") if rank else path
+            loader_state = torch.load(
+                rank_path, map_location="cpu", weights_only=False
+            )["dataset"]
         if is_main:
             print(f"resumed from {path} (epoch {start_epoch}, opt step {opt_step})")
 
@@ -425,8 +444,18 @@ def main(argv=None) -> None:
         import pyarrow.compute as pc
 
         total_tokens = pc.sum(toks.column("n_tokens")).as_py() + train_rows
+        if args.blocks_per_epoch == "auto":
+            blocks_per_epoch = "auto"
+        elif args.blocks_per_epoch:
+            blocks_per_epoch = int(args.blocks_per_epoch)
+        else:  # exact budget from the materialized token counts
+            b = total_tokens // args.seq_len
+            blocks_per_epoch = b - b % num_splits
+        if is_main:
+            print(f"blocks_per_epoch: {blocks_per_epoch}")
         micro_steps_per_epoch = total_tokens // args.seq_len // global_batch
     else:
+        blocks_per_epoch = None
         micro_steps_per_epoch = train_rows // num_splits
     steps_per_epoch = max(micro_steps_per_epoch // args.grad_accum, 1)
     total_steps = args.lr_total_steps or args.steps or steps_per_epoch * args.epochs
@@ -470,6 +499,7 @@ def main(argv=None) -> None:
             tok=tok,
             num_splits=num_splits,
             packed=args.pack,
+            blocks_per_epoch=blocks_per_epoch,
         )
         if loader_state is not None:
             ds.load_state_dict(loader_state)

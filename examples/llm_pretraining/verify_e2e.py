@@ -10,9 +10,10 @@ the README claims:
 5. train       — tiny GPT, uninterrupted run
 6. resume      — kill at step 12, resume, final state matches the
                  uninterrupted run
-7. packing     — deterministic packed stream, 100% token utilization
+7. packing     — deterministic packed stream, high token utilization
                  (vs pad/truncate waste), exact packed mid-epoch resume,
-                 refusal to resume across world-size change
+                 elastic packed batches across world sizes, and
+                 cross-topology resume via merge_state_dicts
 
 Usage
 -----
@@ -211,17 +212,24 @@ def main(argv=None) -> None:
 
     SEQ = 256
 
-    def packed_ds():
-        return SD(
-            connect_table(db, "corpus"),
-            columns=["input_ids"],
-            filter=filt,
-            num_splits=4,
-            shuffle_seed=11,
-            pack_sequences=SEQ,
-            eos_id=ByteTokenizer.EOS,
-            pad_id=ByteTokenizer.PAD,
-        )
+    def packed_ds(rank=0, world_size=1, blocks="auto"):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return SD(
+                connect_table(db, "corpus"),
+                columns=["input_ids"],
+                filter=filt,
+                num_splits=4,
+                shuffle_seed=11,
+                rank=rank,
+                world_size=world_size,
+                pack_sequences=SEQ,
+                eos_id=ByteTokenizer.EOS,
+                pad_id=ByteTokenizer.PAD,
+                blocks_per_epoch=blocks,
+            )
     tokstats = (
         connect_table(db, "corpus")
         .search()
@@ -308,6 +316,7 @@ def main(argv=None) -> None:
     )
 
     packed = packed_ds()
+    budget = packed._blocks_per_epoch
     next(iter(packed))
     st = packed.state_dict()
     st["pad_id"] = ByteTokenizer.PAD + 1
@@ -316,6 +325,37 @@ def main(argv=None) -> None:
         check("pack: checkpoint pins pad/eos/epoch", False, "no error raised")
     except ValueError:
         check("pack: checkpoint pins pad/eos/epoch", True, "pad_id mismatch raised")
+
+    # ── 8. packed elasticity (blocks_per_epoch design) ────────────────────
+    def packed_steps(world, k, state=None):
+        dss = [packed_ds(rank=r, world_size=world, blocks=budget) for r in range(world)]
+        if state is not None:
+            for d in dss:
+                d.load_state_dict(state)
+        iters = [iter(d) for d in dss]
+        steps = []
+        for _ in range(k):
+            group = []
+            for it in iters:
+                for _ in range(4 // world):
+                    group.append(tuple(next(it)["input_ids"][:8].tolist()))
+            steps.append(sorted(group))
+        return steps, dss
+
+    K = 30
+    a, _ = packed_steps(1, K)
+    b, _ = packed_steps(2, K)
+    check("pack: elastic ws=1 == ws=2 global blocks", a == b, f"{K} steps")
+
+    ref, _ = packed_steps(1, K)
+    _, dss2 = packed_steps(2, 12)
+    merged = SD.merge_state_dicts([d.state_dict() for d in dss2])
+    rest, _ = packed_steps(1, K - 12, state=merged)
+    check(
+        "pack: cross-topology merge resume ws2 -> ws1",
+        ref[12:] == rest,
+        "merged rank states continue exactly",
+    )
 
     # ── summary ───────────────────────────────────────────────────────────
     print("\n" + "=" * 60)

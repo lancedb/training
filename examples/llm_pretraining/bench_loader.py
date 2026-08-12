@@ -25,6 +25,7 @@ def main(argv=None) -> None:
     p.add_argument("--read-batch-size", type=int, default=64)
     p.add_argument("--clump-size", type=int, default=0)
     p.add_argument("--seconds", type=float, default=30.0)
+    p.add_argument("--blocks-per-epoch", default="auto")
     p.add_argument("--min-score", type=float, default=1.0)
     args = p.parse_args(argv)
 
@@ -41,6 +42,9 @@ def main(argv=None) -> None:
         pack_sequences=args.seq_len,
         eos_id=tok.eos_token_id,
         pad_id=tok.pad_token_id,
+        blocks_per_epoch=(
+            "auto" if args.blocks_per_epoch == "auto" else int(args.blocks_per_epoch)
+        ),
     )
     it = iter(ds)
     next(it)  # warm the pipeline
