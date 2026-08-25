@@ -1,0 +1,603 @@
+From b8d5297c274625c66908dc675d4667547c9104ff Mon Sep 17 00:00:00 2001
+From: Ayush Chaurasia <ayush@lancedb.com>
+Date: Mon, 24 Aug 2026 21:44:01 +0000
+Subject: [PATCH] feat(v1): durable artifact sink for collected outputs (#2189)
+
+collect() retains every tar archive on trace.state.artifacts, which is
+excluded from serialization -- so artifacts cost host RAM for the life of
+the trace and cannot be inspected after a run. This adds an optional sink
+that moves each archive to durable storage as it is collected and leaves a
+self-describing ArtifactRef in its place; restore() fetches referenced
+archives back on demand, digest-verified.
+
+- new verifiers/v1/utils/artifact_sink.py: ArtifactRef, ArtifactSink ABC
+  (async put/get), DirectorySink (per-trace tars + manifest.json, atomic
+  writes, sha256 verification), load_sink(spec) (directory path, or a
+  pkg.module:factory?args plugin returning a custom sink)
+- collect() gains optional sink/trace_id kwargs; with a sink, values are
+  ArtifactRefs and nothing is retained in memory. Default path (no sink) is
+  byte-for-byte unchanged. Writes shielded like episode output.
+- restore() dereferences ArtifactRefs before extraction
+- State.artifacts widens to dict[str, bytes | ArtifactRef | None]
+- TaskConfig.artifact_sink knob (--env.taskset.task.artifact-sink)
+- docs/v1/harbor.md documents the option
+
+Addresses the follow-up scope of #2189: a host-side artifact sink with a
+manifest and per-source status, streaming to storage instead of retaining
+payloads in Trace.state, inspectable after eval. External stores (e.g. a
+columnar/object-store backend) plug in via load_sink without further changes.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LfeqFpM64WM4zkm6dTj5zJ
+---
+ docs/v1/harbor.md                       |   2 +
+ tests/v1/test_artifact_sink.py          | 169 ++++++++++++++++++++++++
+ verifiers/v1/__init__.py                |  10 ++
+ verifiers/v1/configs/task.py            |   6 +
+ verifiers/v1/envs/agentic_judge/env.py  |   2 +-
+ verifiers/v1/state.py                   |   3 +-
+ verifiers/v1/tasksets/harbor/taskset.py |   6 +-
+ verifiers/v1/utils/artifact_sink.py     | 150 +++++++++++++++++++++
+ verifiers/v1/utils/artifacts.py         |  48 ++++++-
+ 9 files changed, 387 insertions(+), 9 deletions(-)
+ create mode 100644 tests/v1/test_artifact_sink.py
+ create mode 100644 verifiers/v1/utils/artifact_sink.py
+
+diff --git a/docs/v1/harbor.md b/docs/v1/harbor.md
+index aaa0c0c1..c961b611 100644
+--- a/docs/v1/harbor.md
++++ b/docs/v1/harbor.md
+@@ -114,6 +114,8 @@ Two deliberate differences from `harbor run`:
+ - **A failing collect hook fails the rollout.** Harbor logs it and carries on, because there the output is observability; here it is a grading input, and a silently absent file makes the verifier score a stale state.
+ - **`destination` has no effect.** It positions a file in Harbor's host trial directory; verifiers has no trial directory (the trace is the record), and Harbor never lets `destination` affect verifier-side placement.
+ 
++By default the collected archives are grading transport only: they ride `trace.state.artifacts` in host memory, are excluded from serialization, and vanish with the trace. `--env.taskset.task.artifact-sink <dir>` stores them durably instead — each trace gets `<dir>/<trace id>/` with one tar per source and a `manifest.json` recording per-source status (`collected` with size and sha256, or `missing` for absent optional sources) — and grading fetches archives back from the sink on demand, so nothing stays resident and outputs remain inspectable after the run. A `pkg.module:factory` value (optionally `?args`) plugs a custom `ArtifactSink` for other stores.
++
+ ## Separate verifier environments
+ 
+ `[verifier].environment_mode = "separate"` grades in a second box the agent never touched, instead of the one it worked in ([Harbor Docs](https://www.harborframework.com/docs/tasks/verifier)). The harbor env — this taskset's default — grades such tasks in `finalize`: the solver plays the task as usual, its declared artifacts and the `/logs/artifacts/` convention directory are collected while its box is alive, the box is torn down, and the env then provisions a fresh box, restores those artifacts, stages `tests/` fresh, and grades there, recording the verifier's rewards and metrics onto the solver's trace. The grading box derives from the solver's runtime policy unless `--env.verifier-runtime.*` names its own (a network-restricted verifier on Prime needs `vm true`); infrastructure failures around it retry per `--env.verifier-retries` before the episode fails — a grading box that can't be reached never reads as reward 0. The score is read from `/logs/verifier/reward.json` — a finite number, or an object of finite numbers: with a `reward` key that key is the score and the rest are recorded as metrics; without one every key is recorded as a separate reward. Missing or invalid, it falls back to `reward.txt`.
+diff --git a/tests/v1/test_artifact_sink.py b/tests/v1/test_artifact_sink.py
+new file mode 100644
+index 00000000..9775faa1
+--- /dev/null
++++ b/tests/v1/test_artifact_sink.py
+@@ -0,0 +1,169 @@
++"""Durable artifact sinks: collect() runs real tars on the host runtime and the
++DirectorySink round-trips them behind ArtifactRefs; restore() dereferences refs
++before extraction, unit-checked against a recording box (it refuses the host
++runtime by design). Default behavior — bytes on `trace.state` — stays byte-equal."""
++
++import hashlib
++import io
++import json
++import tarfile
++from types import SimpleNamespace
++
++import pytest
++
++import verifiers.v1 as vf
++from verifiers.v1.runtimes import make_runtime
++from verifiers.v1.runtimes.base import ProgramResult
++from verifiers.v1.runtimes.subprocess import SubprocessConfig
++from verifiers.v1.utils.artifact_sink import DirectorySink, load_sink
++from verifiers.v1.utils.artifacts import collect, restore
++
++
++@pytest.fixture
++async def host_runtime():
++    runtime = make_runtime(SubprocessConfig())
++    await runtime.start()
++    yield runtime
++    await runtime.teardown()
++
++
++@pytest.fixture
++def payload(tmp_path):
++    src = tmp_path / "out"
++    src.mkdir()
++    (src / "answer.txt").write_bytes(b"the-answer\n" * 512)
++    return src
++
++
++def tar_members(archive: bytes) -> list[str]:
++    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
++        return tar.getnames()
++
++
++async def test_collect_without_sink_keeps_bytes(host_runtime, payload):
++    collected = await collect(host_runtime, [vf.Artifact(source=str(payload))])
++    archive = collected[str(payload)]
++    assert isinstance(archive, bytes)
++    assert any(name.endswith("answer.txt") for name in tar_members(archive))
++
++
++async def test_collect_into_directory_sink(host_runtime, payload, tmp_path):
++    sink = DirectorySink(tmp_path / "store")
++    collected = await collect(
++        host_runtime, [vf.Artifact(source=str(payload))], sink=sink, trace_id="t1"
++    )
++
++    ref = collected[str(payload)]
++    assert isinstance(ref, vf.ArtifactRef)
++    assert ref.source == str(payload)
++
++    # the archive round-trips, digest-verified, and is a readable tar
++    archive = await sink.get(ref)
++    assert hashlib.sha256(archive).hexdigest() == ref.sha256
++    assert len(archive) == ref.size
++    assert any(name.endswith("answer.txt") for name in tar_members(archive))
++
++    # the manifest records per-source status, including the absent convention
++    # sweep (`/logs/artifacts` does not exist on the host runtime)
++    manifest = json.loads((tmp_path / "store" / "t1" / "manifest.json").read_text())
++    assert manifest[str(payload)]["status"] == "collected"
++    assert manifest[str(payload)]["sha256"] == ref.sha256
++    assert collected[vf.ARTIFACTS_DIR] is None
++    assert manifest[vf.ARTIFACTS_DIR]["status"] == "missing"
++
++
++async def test_restore_dereferences_refs(host_runtime, payload, tmp_path):
++    sink = DirectorySink(tmp_path / "store")
++    collected = await collect(
++        host_runtime, [vf.Artifact(source=str(payload))], sink=sink, trace_id="t1"
++    )
++    ref = collected[str(payload)]
++    original = await sink.get(ref)
++
++    class RecordingBox:
++        """The runtime surface restore() touches, recording uploads."""
++
++        config = SimpleNamespace(type="docker")
++
++        def __init__(self) -> None:
++            self.writes: dict[str, bytes] = {}
++
++        async def run(self, argv, env):
++            return ProgramResult(exit_code=0, stdout="", stderr="")
++
++        async def write(self, path, data):
++            self.writes[path] = data
++
++    box = RecordingBox()
++    await restore(box, {str(payload): ref})
++    assert list(box.writes.values()) == [original]
++
++
++async def test_restore_builds_each_sink_once(
++    host_runtime, payload, tmp_path, monkeypatch
++):
++    """A task's artifacts share one sink spec; restore must open it once, not
++    once per ref (an external sink opens storage in __init__)."""
++    sink = DirectorySink(tmp_path / "store")
++    collected = await collect(
++        host_runtime,
++        [
++            vf.Artifact(source=str(payload)),
++            vf.Artifact(source=str(payload / "answer.txt")),
++        ],
++        sink=sink,
++        trace_id="t1",
++    )
++    refs = {k: v for k, v in collected.items() if isinstance(v, vf.ArtifactRef)}
++    assert len(refs) >= 2 and len({r.sink for r in refs.values()}) == 1
++
++    import verifiers.v1.utils.artifacts as artifacts_mod
++
++    calls = []
++    real = artifacts_mod.load_sink
++    monkeypatch.setattr(
++        artifacts_mod, "load_sink", lambda spec: calls.append(spec) or real(spec)
++    )
++
++    class NoopBox:
++        config = SimpleNamespace(type="docker")
++
++        async def run(self, argv, env):
++            return ProgramResult(exit_code=0, stdout="", stderr="")
++
++        async def write(self, path, data):
++            pass
++
++    await restore(NoopBox(), refs)
++    assert len(calls) == 1  # one build for the shared spec, not one per ref
++
++
++async def test_get_refuses_tampered_archive(host_runtime, payload, tmp_path):
++    sink = DirectorySink(tmp_path / "store")
++    collected = await collect(
++        host_runtime, [vf.Artifact(source=str(payload))], sink=sink, trace_id="t1"
++    )
++    ref = collected[str(payload)]
++    stored = tmp_path / "store" / ref.key
++    stored.write_bytes(stored.read_bytes() + b"garbage")
++    with pytest.raises(RuntimeError, match="does not match its manifest digest"):
++        await sink.get(ref)
++
++
++def make_sink(args: str) -> DirectorySink:
++    """Factory for the plugged-spec test below."""
++    return DirectorySink(args)
++
++
++async def test_load_sink_specs(tmp_path):
++    assert isinstance(load_sink(str(tmp_path)), DirectorySink)
++
++    spec = f"{__file__}:make_sink?{tmp_path}"
++    sink = load_sink(spec)
++    assert isinstance(sink, DirectorySink)
++    assert sink.root == tmp_path
++    # the stamped spec makes refs self-describing across processes
++    assert sink.spec == spec
++    ref = await sink.put("t1", "/x", b"data")
++    assert ref.sink == spec
++    assert await load_sink(ref.sink).get(ref) == b"data"
+diff --git a/verifiers/v1/__init__.py b/verifiers/v1/__init__.py
+index a43ab774..6153bbf4 100644
+--- a/verifiers/v1/__init__.py
++++ b/verifiers/v1/__init__.py
+@@ -126,6 +126,12 @@ from verifiers.v1.types import (
+     Usage,
+     UserMessage,
+ )
++from verifiers.v1.utils.artifact_sink import (
++    ArtifactRef,
++    ArtifactSink,
++    DirectorySink,
++    load_sink,
++)
+ from verifiers.v1.utils.artifacts import (
+     ARTIFACTS_DIR,
+     Artifact,
+@@ -341,7 +347,11 @@ __all__ = [  # noqa: RUF022 - grouped by public API area
+     # grading artifacts
+     "ARTIFACTS_DIR",
+     "Artifact",
++    "ArtifactRef",
++    "ArtifactSink",
++    "DirectorySink",
+     "collect",
++    "load_sink",
+     "restore",
+     # scoring
+     "compare_stdout_results",
+diff --git a/verifiers/v1/configs/task.py b/verifiers/v1/configs/task.py
+index 17f1b68d..10514203 100644
+--- a/verifiers/v1/configs/task.py
++++ b/verifiers/v1/configs/task.py
+@@ -50,6 +50,12 @@ class TaskConfig(BaseConfig):
+     """Weighted rewards `(task, trace, runtime) -> float` plugged by name, merged with
+     the task's `@vf.reward` methods."""
+ 
++    artifact_sink: str | None = None
++    """Durable store for collected artifacts. A directory path keeps archives plus a
++    per-trace `manifest.json` there; `pkg.module:factory` (optionally `?args`) plugs
++    an external `ArtifactSink`. Unset retains archive bytes on `trace.state.artifacts`
++    (grading transport only, nothing persisted)."""
++
+     @model_validator(mode="before")
+     @classmethod
+     def _resolve_judges(cls, data):
+diff --git a/verifiers/v1/envs/agentic_judge/env.py b/verifiers/v1/envs/agentic_judge/env.py
+index e16bfe4f..c8ec2f50 100644
+--- a/verifiers/v1/envs/agentic_judge/env.py
++++ b/verifiers/v1/envs/agentic_judge/env.py
+@@ -125,7 +125,7 @@ class JudgeTask(vf.Task):
+         self,
+         data: vf.TaskData,
+         files: dict[str, bytes],
+-        artifacts: dict[str, bytes | None],
++        artifacts: dict[str, bytes | vf.ArtifactRef | None],
+     ) -> None:
+         super().__init__(data)
+         self.files = files
+diff --git a/verifiers/v1/state.py b/verifiers/v1/state.py
+index fa5fe2b2..55353806 100644
+--- a/verifiers/v1/state.py
++++ b/verifiers/v1/state.py
+@@ -3,13 +3,14 @@
+ from pydantic import BaseModel, ConfigDict, Field
+ from typing_extensions import TypeVar
+ 
++from verifiers.v1.utils.artifact_sink import ArtifactRef
+ from verifiers.v1.utils.generic import concrete_type
+ 
+ 
+ class State(BaseModel):
+     model_config = ConfigDict(ser_json_inf_nan="constants")
+ 
+-    artifacts: dict[str, bytes | None] = Field(default_factory=dict)
++    artifacts: dict[str, bytes | ArtifactRef | None] = Field(default_factory=dict)
+ 
+ 
+ StateT = TypeVar("StateT", bound=State, default=State)
+diff --git a/verifiers/v1/tasksets/harbor/taskset.py b/verifiers/v1/tasksets/harbor/taskset.py
+index ff64b85e..3f6833c8 100644
+--- a/verifiers/v1/tasksets/harbor/taskset.py
++++ b/verifiers/v1/tasksets/harbor/taskset.py
+@@ -39,6 +39,7 @@ from verifiers.v1.runtimes import Runtime
+ from verifiers.v1.task import Task, TaskData, TaskResources, TaskTimeout
+ from verifiers.v1.taskset import Taskset
+ from verifiers.v1.trace import Trace
++from verifiers.v1.utils.artifact_sink import load_sink
+ from verifiers.v1.utils.artifacts import Artifact, collect
+ from verifiers.v1.utils.decorators import reward
+ 
+@@ -246,7 +247,10 @@ class HarborTask(Task[HarborData]):
+                     f"collect hook failed (exit {result.exit_code}): "
+                     f"{hook.command}\n{detail}"
+                 )
+-        trace.state.artifacts = await collect(runtime, self.data.artifacts)
++        sink = load_sink(spec) if (spec := self.config.artifact_sink) else None
++        trace.state.artifacts = await collect(
++            runtime, self.data.artifacts, sink=sink, trace_id=trace.id
++        )
+ 
+     def graded_elsewhere(self) -> "HarborTask":
+         """A copy whose `solved` records nothing here: the harbor env grades this
+diff --git a/verifiers/v1/utils/artifact_sink.py b/verifiers/v1/utils/artifact_sink.py
+new file mode 100644
+index 00000000..e98cea25
+--- /dev/null
++++ b/verifiers/v1/utils/artifact_sink.py
+@@ -0,0 +1,150 @@
++"""Durable storage for collected artifacts, addressing the transport-only gap.
++
++`collect()` keeps every tar archive on `trace.state.artifacts` — host memory that
++is excluded from serialization, so artifacts cost RAM for the life of the trace
++and cannot be inspected after the run. A sink moves each archive to durable
++storage as it is collected and leaves an `ArtifactRef` in its place; `restore()`
++fetches referenced archives back on demand. Refs are self-describing (they carry
++the spec that reopens their sink), so grading topologies need no sink plumbing.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++import re
++from abc import ABC, abstractmethod
++from asyncio import to_thread
++from pathlib import Path
++
++from pydantic import BaseModel
++
++
++class ArtifactRef(BaseModel):
++    """Locator for one collected archive that lives in a sink, not in memory."""
++
++    sink: str
++    """Spec that reopens the sink (`load_sink(ref.sink)`), stamped by the sink."""
++    key: str
++    """Sink-internal storage key for the archive."""
++    source: str
++    """Original absolute source path — `restore`'s extraction root."""
++    size: int
++    """Archive size in bytes."""
++    sha256: str
++    """Digest of the archive; `get` verifies it before returning bytes."""
++
++
++class ArtifactSink(ABC):
++    """Where collected archives go instead of `trace.state`."""
++
++    spec: str
++    """The string `load_sink()` rebuilds this sink from. Set by the sink itself
++    (built-ins) or stamped by `load_sink` (plugged factories); recorded on every
++    ref this sink returns."""
++
++    @abstractmethod
++    async def put(
++        self, trace_id: str, source: str, data: bytes | None
++    ) -> ArtifactRef | None:
++        """Store one archive (or record an absent optional source when `data` is
++        `None`) under `trace_id` and return its ref (`None` for absences)."""
++
++    @abstractmethod
++    async def get(self, ref: ArtifactRef) -> bytes:
++        """Fetch an archive back, verifying size and digest. Fails loudly on any
++        mismatch: a tampered or truncated archive must not reach a grading box."""
++
++
++class DirectorySink(ArtifactSink):
++    """Archives and a per-trace `manifest.json` under a host directory.
++
++    Layout mirrors Harbor's durable trial outputs: `<root>/<trace_id>/` holds one
++    numbered tar per collected source plus a manifest recording per-source status
++    (`collected` with file/size/sha256, or `missing` for absent optional sources).
++    Writes are tmp+rename, so a reader never sees a torn archive or manifest.
++    """
++
++    def __init__(self, root: str | Path) -> None:
++        self.root = Path(root)
++        self.spec = str(root)
++
++    async def put(
++        self, trace_id: str, source: str, data: bytes | None
++    ) -> ArtifactRef | None:
++        return await to_thread(self._put_sync, trace_id, source, data)
++
++    async def get(self, ref: ArtifactRef) -> bytes:
++        return await to_thread(self._get_sync, ref)
++
++    def _put_sync(
++        self, trace_id: str, source: str, data: bytes | None
++    ) -> ArtifactRef | None:
++        trace_dir = self.root / trace_id
++        trace_dir.mkdir(parents=True, exist_ok=True)
++        manifest_path = trace_dir / "manifest.json"
++        manifest: dict[str, dict] = (
++            json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
++        )
++        if data is None:
++            entry = {"file": None, "size": None, "sha256": None, "status": "missing"}
++            ref = None
++        else:
++            slug = re.sub(r"[^A-Za-z0-9._-]+", "-", source.strip("/"))[:80] or "root"
++            filename = f"{len(manifest):04d}-{slug}.tar"
++            digest = hashlib.sha256(data).hexdigest()
++            self._write_atomic(trace_dir / filename, data)
++            entry = {
++                "file": filename,
++                "size": len(data),
++                "sha256": digest,
++                "status": "collected",
++            }
++            ref = ArtifactRef(
++                sink=self.spec,
++                key=f"{trace_id}/{filename}",
++                source=source,
++                size=len(data),
++                sha256=digest,
++            )
++        manifest[source] = entry
++        self._write_atomic(manifest_path, json.dumps(manifest, indent=2).encode())
++        return ref
++
++    def _get_sync(self, ref: ArtifactRef) -> bytes:
++        data = (self.root / ref.key).read_bytes()
++        if len(data) != ref.size or hashlib.sha256(data).hexdigest() != ref.sha256:
++            raise RuntimeError(
++                f"artifact {ref.key!r} does not match its manifest digest — refusing "
++                "to restore a tampered or truncated archive"
++            )
++        return data
++
++    @staticmethod
++    def _write_atomic(path: Path, data: bytes) -> None:
++        tmp = path.with_name(path.name + ".tmp")
++        tmp.write_bytes(data)
++        os.replace(tmp, path)
++
++
++def load_sink(spec: str) -> ArtifactSink:
++    """Build a sink from its config string.
++
++    A plain directory path builds a `DirectorySink`. A plugged factory uses the
++    task-fn grammar (`pkg.module:factory` or `path/to/file.py:factory`), with an
++    optional `?args` tail passed to the factory as a single string; the factory
++    must return an `ArtifactSink`.
++    """
++    target, _, args = spec.partition("?")
++    if ":" not in target:
++        return DirectorySink(target)
++    # Deferred: loaders pulls in the env tree, which imports this module's users.
++    from verifiers.v1.utils.loaders import plugged_fn
++
++    factory = plugged_fn(target)
++    sink = factory(args) if args else factory()
++    if not isinstance(sink, ArtifactSink):
++        raise TypeError(f"artifact sink factory {target!r} returned {sink!r}")
++    sink.spec = spec
++    return sink
+diff --git a/verifiers/v1/utils/artifacts.py b/verifiers/v1/utils/artifacts.py
+index 334ad417..872e86eb 100644
+--- a/verifiers/v1/utils/artifacts.py
++++ b/verifiers/v1/utils/artifacts.py
+@@ -10,6 +10,9 @@ from typing import TYPE_CHECKING
+ 
+ from pydantic import BaseModel, Field
+ 
++from verifiers.v1.utils.aio import run_shielded
++from verifiers.v1.utils.artifact_sink import ArtifactRef, ArtifactSink, load_sink
++
+ if TYPE_CHECKING:
+     from verifiers.v1.runtimes import Runtime
+ 
+@@ -33,8 +36,12 @@ class Artifact(BaseModel):
+ 
+ 
+ async def collect(
+-    runtime: Runtime, artifacts: list[Artifact] | None = None
+-) -> dict[str, bytes | None]:
++    runtime: Runtime,
++    artifacts: list[Artifact] | None = None,
++    *,
++    sink: ArtifactSink | None = None,
++    trace_id: str | None = None,
++) -> dict[str, bytes | ArtifactRef | None]:
+     """Tar the convention dir and every declared path out of `runtime`.
+ 
+     Keyed by source path; the values are tar archives. Insertion order is the order
+@@ -45,6 +52,11 @@ async def collect(
+     implicit convention sweep is exempt — most tasks never write there.
+ 
+     Each source is archived separately so its exclude patterns stay local.
++
++    With a `sink`, each archive is stored durably under `trace_id` as it is read
++    and the value is its `ArtifactRef` instead of the bytes, so nothing is
++    retained in memory and outputs stay inspectable after the run; absent optional
++    sources are recorded in the sink's manifest and stay `None`.
+     """
+     # Resolve relative sources against the runtime workdir. Joining also normalises
+     # `/work/` to `/work`, so one tree cannot key two entries (the source is both the
+@@ -83,13 +95,18 @@ async def collect(
+                 )
+             entries.append(artifact)
+ 
+-    collected: dict[str, bytes | None] = {}
++    if sink is not None and trace_id is None:
++        trace_id = uuid.uuid4().hex
++
++    collected: dict[str, bytes | ArtifactRef | None] = {}
+     budget = MAX_ARTIFACT_BYTES
+     for artifact in entries:
+         source = artifact.source
+         exists = f"test -e {shlex.quote(source)} || test -L {shlex.quote(source)}"
+         if (await runtime.run(["sh", "-c", exists], {})).exit_code != 0:
+             if not artifact.required:
++                if sink is not None:
++                    await run_shielded(sink.put(trace_id, source, None))
+                 collected[source] = None
+                 continue
+             raise RuntimeError(
+@@ -97,14 +114,25 @@ async def collect(
+             )
+         archive = await _tar_out(runtime, artifact, budget)
+         budget -= len(archive)
+-        collected[source] = archive
++        if sink is None:
++            collected[source] = archive
++        else:
++            # Shielded like episode output: a cancelled rollout must not leave a
++            # torn archive behind a manifest entry.
++            collected[source] = await run_shielded(sink.put(trace_id, source, archive))
+ 
+     logger.debug("collected artifact roots: %s", list(collected))
+     return collected
+ 
+ 
+-async def restore(runtime: Runtime, collected: dict[str, bytes | None]) -> None:
+-    """Extract `collected` in `runtime` at the original absolute paths."""
++async def restore(
++    runtime: Runtime, collected: dict[str, bytes | ArtifactRef | None]
++) -> None:
++    """Extract `collected` in `runtime` at the original absolute paths.
++
++    Values are raw tar bytes or `ArtifactRef`s; refs are fetched back from their
++    sink (verified against the recorded digest) just before extraction.
++    """
+     if not collected:
+         return
+     # Restoring into the subprocess runtime would extract absolute paths onto the
+@@ -119,9 +147,17 @@ async def restore(runtime: Runtime, collected: dict[str, bytes | None]) -> None:
+     # symlink the image left at the target.
+     roots = " ".join(shlex.quote(root) for root in collected)
+     await _run(runtime, f"rm -rf -- {roots}", "clear artifact roots")
++    sinks: dict[str, ArtifactSink] = {}
+     for root, archive in collected.items():
+         if archive is None:
+             continue
++        if isinstance(archive, ArtifactRef):
++            # Build each distinct sink once: setdefault would evaluate load_sink
++            # eagerly per ref, re-opening an external store (e.g. a dataset) every
++            # time.
++            if (sink := sinks.get(archive.sink)) is None:
++                sink = sinks[archive.sink] = load_sink(archive.sink)
++            archive = await sink.get(archive)
+         path = f"/tmp/vf-artifact-{uuid.uuid4().hex}.tar"
+         await runtime.write(path, archive)
+         await _run(
+-- 
+2.43.0
+
