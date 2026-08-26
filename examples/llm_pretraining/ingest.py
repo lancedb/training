@@ -167,7 +167,13 @@ def main(argv=None) -> None:
         choices=["synthetic", "fineweb", "fineweb-parquet"],
         default="synthetic",
     )
-    parser.add_argument("--rows", type=int, default=5000)
+    parser.add_argument(
+        "--rows",
+        type=int,
+        default=None,
+        help="row cap (synthetic default 5000, fineweb 2M, fineweb-parquet: all rows "
+        "of the selected shards)",
+    )
     parser.add_argument(
         "--files", type=int, default=4, help="fineweb-parquet: shards to ingest"
     )
@@ -180,12 +186,12 @@ def main(argv=None) -> None:
     banner(f"INGEST  {args.source} -> {args.db}/{args.table}")
     t0 = time.perf_counter()
     if args.source == "fineweb-parquet":
-        batches = fineweb_parquet_batches(args.files, args.rows, sample=args.sample)
+        batches = fineweb_parquet_batches(args.files, args.rows or 0, sample=args.sample)
     else:
         docs = (
-            synthetic_docs(args.rows, seed=args.seed)
+            synthetic_docs(args.rows or 5000, seed=args.seed)
             if args.source == "synthetic"
-            else fineweb_docs(args.rows)
+            else fineweb_docs(args.rows or 2_000_000)
         )
         batches = record_batches(docs)
     reader = pa.RecordBatchReader.from_batches(SCHEMA, batches)

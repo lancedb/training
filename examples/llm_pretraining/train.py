@@ -305,9 +305,19 @@ def flops_per_token(model) -> float:
     return 6 * model.num_params() + 12 * cfg.n_layer * cfg.d_model * cfg.seq_len
 
 
+def blocks_to_rows(batch: pa.RecordBatch, seq_len: int) -> list[dict]:
+    """Row transform for the pre-packed Lance blocks table (module-level so it
+    pickles into DataLoader worker processes)."""
+    import numpy as np
+
+    mat = batch.column("input_ids").values.to_numpy().reshape(-1, seq_len)
+    return [{"input_ids": torch.from_numpy(r.astype(np.int64))} for r in mat]
+
+
 def run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok) -> None:
     """Identical-samples A/B: same trainer, loader swapped (see mosaic_compare)."""
     import contextlib as _ctx
+    import functools
 
     global_batch = args.batch_size * world_size
     fpt = flops_per_token(model.module if hasattr(model, "module") else model)
@@ -315,13 +325,7 @@ def run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok) ->
         import lancedb
 
         btbl = lancedb.connect(args.blocks_path).open_table("blocks")
-
-        def to_rows(b: pa.RecordBatch):
-            import numpy as np
-
-            mat = b.column("input_ids").values.to_numpy().reshape(-1, args.seq_len)
-            return [{"input_ids": torch.from_numpy(r.copy())} for r in mat]
-
+        to_rows = functools.partial(blocks_to_rows, seq_len=args.seq_len)
         ds = StreamingDataset(
             btbl,
             columns=["input_ids"],
