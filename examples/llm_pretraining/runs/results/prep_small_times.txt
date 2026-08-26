@@ -1,0 +1,7 @@
+ingested 2400000 rows (checksum af0782c3) in 126.2s
+### STAGE_TIME python ingest.py 128s
+flagged 22558 duplicate rows
+### STAGE_TIME python curate.py 250s
+[backfill] input_ids: 236.1s (job=BackfillJobResult(job_id='370e9c7aae244f5da0afbaeb0047fb02', status='DONE', table_name='corpus', launched_at=None, completed_a
+[backfill] n_tokens: 47.1s (job=BackfillJobResult(job_id='88461fd47e30448f8a410092148ab778', status='DONE', table_name='corpus', launched_at=None, completed_at=
+### STAGE_TIME geneva tokenize 294s

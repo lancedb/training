@@ -1,0 +1,7 @@
+  val loss @ step 2000: 3.4359
+  val loss @ step 4000: 3.1417
+  val loss @ step 6000: 3.0110
+  val loss @ step 8000: 2.9297
+  val loss @ step 10000: 2.8747
+  val loss @ step 12000: 2.8452
+final: opt_step=13351 tokens_seen(rank0)=874,971,136 val_loss=2.8410

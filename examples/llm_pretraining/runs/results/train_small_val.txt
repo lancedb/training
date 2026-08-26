@@ -1,0 +1,4 @@
+  val loss @ step 1500: 3.5971
+  val loss @ step 3000: 3.3201
+  val loss @ step 4500: 3.2363
+final: opt_step=4636 tokens_seen(rank0)=302,999,960 val_loss=3.2361

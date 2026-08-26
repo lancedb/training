@@ -1,0 +1,7 @@
+/home/ubuntu/runs/large_prep_ic.log:ingested 17478000 rows (checksum c4ce33ef) in 846.8s
+/home/ubuntu/runs/large_prep_ic.log:### STAGE_TIME python ingest.py 848s
+/home/ubuntu/runs/large_prep_ic.log:flagged 1140626 duplicate rows
+/home/ubuntu/runs/large_prep_ic.log:### STAGE_TIME python curate.py 1545s
+/home/ubuntu/runs/large_prep_tok.log:[backfill] input_ids: 1,064.1s (job=BackfillJobResult(job_id='1fe6c7b06fd04e7f922b1d33c8672235', status='DONE', table_name=
+/home/ubuntu/runs/large_prep_tok.log:[backfill] n_tokens: 303.0s (job=BackfillJobResult(job_id='4a9af7e833574ad6ab084a20caac5235', status='DONE', table_name='co
+/home/ubuntu/runs/large_prep_tok.log:### STAGE_TIME geneva tokenize 1377s

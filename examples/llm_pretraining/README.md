@@ -272,7 +272,22 @@ pool defaults to 100MB and fails fast with a clear error otherwise).
 final: opt_step=13351 val_loss=2.8410
 ```
 
-TBD_MEDIUM_AB
+The loader A/B, repeated with the 354M model (corpus rows read the 81GB
+table locally and from S3; block rows reuse the small block sets — per-step
+loader work is identical):
+
+| loader (GPT-2 medium 354M, 8x H100) | local disk | S3 us-east-2 from Norway |
+|---|---|---|
+| **Lance corpus table** (81GB) — pack + shuffle on the fly | 1.34M tok/s / 41.2% | **1.34M / 41.2%** |
+| Lance blocks table | 1.34M / 41.0% | 1.34M / 41.0% |
+| MosaicML Streaming | 1.33M / 41.0% | 1.30M / 40.0% (min window 0.93M during shard fetches) |
+| Parquet, pre-shuffled sequential | 1.34M / 41.0% | 1.34M / 41.1% |
+| Parquet, random-take | 1.34M / 41.0% | **73k / 2.2%** |
+
+At 354M the model consumes tokens 2.4x more slowly, so every loader has
+slack — even random-take Parquet from page cache keeps up locally. Only the
+random-take-from-S3 path, which downloads a 4MB row group per sample, cannot.
+
 
 ### Known rough edges (upstream notes)
 - lancedb 0.38 is beta-only at the time of writing: build the wheel from a tag.
