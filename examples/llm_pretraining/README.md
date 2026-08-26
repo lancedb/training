@@ -42,8 +42,11 @@ a preprocessing job.
 | `sample.py` | Generate text from a trained checkpoint |
 | `forensics.py` | Vector index, hybrid search, generation attribution, near-dups |
 | `bench_parquet.py` | The standard-workflow control: Parquet export + S3 read benches |
-| `build_packed_datasets.py` | Identical pre-packed blocks -> MDS shards + Lance table |
+| `build_packed_datasets.py` | Identical pre-packed blocks -> Parquet, pre-shuffled Parquet, MDS shards, Lance table (8 parallel packers) |
+| `blocks_loaders.py` | Parquet random-take and pre-shuffled-sequential block loaders (local + s3://), the A/B controls |
 | `mosaic_compare.py` | MosaicML Streaming A/B: elastic, resume, throughput |
+| `elastic_pack_check.py` | Packed elastic determinism + cross-topology (`merge_state_dicts`) resume on the real table |
+| `LOADER_TUNING.md` | Measured loader knob sweep, profile, and the settings the 8-GPU runs use |
 | `verify_e2e.py` | Offline CPU verification of the whole pipeline (~2 min) |
 
 ## Setup
@@ -54,7 +57,11 @@ uv venv .venv --python 3.11 && source .venv/bin/activate
 uv pip install -e .          # add `-e .[hf]` for FineWeb-Edu + HF tokenizers
 ```
 
-Requires `lancedb >= 0.36` (first release with `lancedb.streaming`).
+Requires `lancedb >= 0.38` — the first release line with loader-native sequence
+packing (`pack_sequences`, lancedb/lancedb#3920) and `StreamingDataLoader`
+(consumer-committed checkpoints for worker processes). Until 0.38.0 is on PyPI,
+build the Python package from a `v0.38.0-beta.*` tag (`rustup`, `protoc`, then
+`cd python && maturin build --release`; ~30 min on 112 cores).
 
 ## Quickstart (offline, CPU)
 
@@ -79,24 +86,29 @@ that make this loader different, using real training runs:
   [+] pack: 100% utilization vs pad/truncate  packed=100% real tokens; pad/truncate sees 17% of corpus tokens at seq_len=256
   [+] pack: train completes  val_loss=4.9157
   [+] pack: mid-epoch resume matches uninterrupted  4.915700 vs 4.915700
-  [+] pack: refuses cross-topology resume  ValueError raised
+  [+] pack: checkpoint pins pad/eos/epoch  pad_id mismatch raised
+  [+] pack: elastic ws=1 == ws=2 global blocks  30 steps
+  [+] pack: cross-topology merge resume ws2 -> ws1  merged rank states continue exactly
 
 ============================================================
-E2E COMPLETE: 14 passed  0 failed
+E2E COMPLETE: 16 passed  0 failed
 ============================================================
 ```
 
-Note the last two lines: a run killed at step 12 and resumed lands on the
-**bit-identical** validation loss as the uninterrupted run, and the samples
-that form each global step are identical whether the job runs on one process
-or two.
+A run killed at step 12 and resumed lands on the **bit-identical** validation
+loss as the uninterrupted run; the samples that form each global step are
+identical whether the job runs on one process or two — and, new with the
+merged packing API, that now holds for *packed* blocks too: per-rank packed
+checkpoints merge (`StreamingDataset.merge_state_dicts`) into a
+topology-independent checkpoint that resumes exactly on a different world size.
 
 ## Real corpus
 
 ```bash
-python ingest.py --source fineweb --rows 2000000        # streams FineWeb-Edu
+python ingest.py --source fineweb --rows 2400000        # streams FineWeb-Edu via `datasets`
+python ingest.py --source fineweb-parquet --sample 10BT --files 4 --rows 2400000   # same docs, ~10x faster: parallel shard download + row-group ingest
 python curate.py
-python tokenize_data.py --tokenizer hf:Qwen/Qwen2.5-0.5B
+python tokenize_data.py --tokenizer hf:gpt2             # or geneva_backfill.py for the distributed version
 ```
 
 Zero-copy evolution in action (synthetic 3K-row corpus shown; the mechanics
@@ -125,67 +137,123 @@ KubeRay with the same code — use [Geneva](https://github.com/lancedb/geneva);
 the [object-detection example](../../object-detection/) shows that flow.
 
 
-## Results: GPT-2 124M, Chinchilla-scale, 4x H100
+## Results: 8x H100, lancedb 0.38 (merged sequence packing)
 
-One epoch over FineWeb-Edu with everything — corpus, curation, tokens,
-training, retrieval — on a single Lance table. `--pack` (loader-native
-sequence packing from the `ayush/seq-packing` branch) + `--compile`.
+The pipeline below was re-run end to end on an 8x H100 node (112 cores, virtio
+disk) with the *released* packing API, replacing the earlier 4x H100 numbers
+that used a pre-merge branch. Same corpus (first 2.4M FineWeb-Edu docs),
+same model, same 512 x 1024-token global batch.
 
 | Stage | Wall time | What happened |
 |---|---|---|
-| Ingest 2.4M docs (11.4B chars) | **3m 00s** | HF stream -> 4.8GB Lance table |
-| Curate: EDA + FTS + dedup | **3m 02s** | 22,558 dups flagged; `is_dup` col = +306KB on a 5.1GB table, nothing rewritten |
-| Geneva tokenize (32 Ray workers) | **4m 53s** | 2.43B GPT-2 tokens as a zero-copy column (+`n_tokens` 1m 24s) |
-| Train 124M, 1 epoch = 2.43B tokens | **~50 min** | 4x H100, 1.6M tok/s sustained, 35% MFU |
-| Upload table to S3 + train from s3:// | 33s upload | **same 1.60M tok/s / 34.7% MFU streaming over WAN** |
-| Geneva GPU embeddings (4 workers) + IVF-PQ index | 11m 10s + 13s | 2.4M x 384-d; hybrid search + generation attribution |
-| Parquet control (bench_parquet.py) | 30s export + 145s pre-shuffle copy | random S3 reads: 46k tok/s, 474x amplification vs Lance 660k tok/s, 0 extra copies |
-| Scale run: full 10BT sample, GPT-2 medium 354M | prep 51m; train **3h06m** | 9.67M docs (4.2% dups), 7.0B tokens, **684k tok/s / 42.0% MFU flat**, val 2.840 |
-| Loader-knob MFU sweep (354M, trainer frozen) | - | read_batch_size 64/16/8 -> 17% / 40% / 42% MFU; identical losses (determinism) |
-| Mosaic Streaming A/B (identical 2.37M packed blocks) | 33m pre-pack (required by MDS flow) | elastic ws1/2/4 + ws4->ws2 resume: both pass; GPU training: lance 1.619M tok/s / 35.2% vs mosaic 1.618M / 35.1% |
+| Ingest 2.4M docs (11.4B chars) | **2m 06s** | 4 parquet shards -> 4.8GB Lance table (was 3m00s via the `datasets` iterator) |
+| Curate: EDA + FTS + dedup | **4m 10s** | 22,558 dups; `is_dup` col = +306,604 bytes on a 5.1GB table, byte-identical to the previous run |
+| Geneva tokenize (32 Ray workers, geneva 0.15) | **4m 54s** | 2.43B GPT-2 tokens + `n_tokens` as zero-copy columns; table 12GB, v13 |
+| **Train GPT-2 124M, 1 epoch = 2.43B tokens** | **14m 08s** | 8x H100, **3.18M tok/s, 34.5% MFU** flat from step 100; val loss 3.236 (4x H100: ~50 min, 1.60M tok/s, 35%, val 3.230) |
+| Upload table to S3 us-east-2 (from Norway) | 1m 47s | 11.9GB, `aws s3 sync` |
+| **Train from `s3://` across the Atlantic** | 500 steps | **3.16M tok/s / 34.4% MFU — identical to local disk** |
+| Pre-pack 2.37M blocks into 4 standard formats | 4m 55s (+2 min derived) | 8 parallel packers; was 33 min single-process |
+| Loader A/B, local + S3 (below) | 300-500 steps each | every loader but Parquet random-take sits at the same 34.5% compute ceiling |
+| Packed elastic + cross-topology resume | 3m 24s (CPU) | ws=8 == ws=4 global steps; 8-rank checkpoint merged and resumed on 4 ranks, bit-identical |
 
-Raw text to training-ready: **~12 minutes**. Total to a Chinchilla-optimal
-GPT-2: about an hour.
+Raw text to training-ready: **11 minutes**. To a Chinchilla-optimal GPT-2 124M:
+**25 minutes** including prep.
 
 ```
-epoch 0 step 1500/4635 | loss 3.7020 | 1,602,377 tok/s | mfu 34.8% | q 0/0/397844/190572
-  val loss @ step 1500: 3.5902
-  val loss @ step 3000: 3.3134
-  val loss @ step 4500: 3.2295
+epoch 0 step 1000/4635 | loss 3.9628 | 3,180,409 tok/s | mfu 34.5% | q 24264/49928/41176/31640 | fetch 168.3s tx 15.1s
+  val loss @ step 1500: 3.5971
+  val loss @ step 3000: 3.3201
+  val loss @ step 4500: 3.2363
+final: opt_step=4636 tokens_seen(rank0)=302,999,960 val_loss=3.2361
 ```
 
-- **Packing vs pad/truncate at seq 1024**: pad/truncate trains on only
-  **62.1%** of corpus tokens (truncation discards the rest); packed blocks
-  are ~100% real tokens.
-- **Kill -9 at step 1500, resume from step-1000 checkpoint**: per-rank
-  loader states restore exactly (`resumed from ... opt step 1000`), loss
-  rejoins the curve, same topology.
-- **Loader tuning matters**: `read_batch_size` 64 -> 8 took one loader
-  process from 102k to 419k tok/s on local NVMe (per-take cost grows
-  super-linearly with rows per take). `bench_loader.py` finds this in a
-  minute; 4 ranks at rb=8 gave a ~1.7M tok/s ceiling, ahead of the model.
-- **Data forensics on the same table**: after training, FTS-query the
-  corpus for what the model actually saw (`curate.py`-built index), or
-  `checkout` any earlier table version (ingest was v1; this run trained
-  against v13).
+### What changed with the merged API — and what we had to tune
 
-Sample from the final checkpoint (temperature 0.8):
+The released packer differs from the pre-merge branch in ways that matter at
+8 ranks. Measured loader-only (one rank's shape, packed, local disk; full sweep
+and profile in [`LOADER_TUNING.md`](LOADER_TUNING.md)):
 
-> Photosynthesis is the process by which plants produce energy, the
-> process by which they convert it into energy. [...] The carbon dioxide
-> present in the atmosphere is released into the atmosphere, which is why
-> it is referred to as the "Carbon Cycle."
+| loader config | tok/s (one rank shape) |
+|---|---|
+| library defaults (`io_queue_depth=4`, `transform_parallelism=cpu_count`) | 158k |
+| `io_queue_depth=1`, `transform_parallelism=2` | 795k |
+| same, 16 splits per rank (`--num-splits 128` on 8 ranks) | 960k |
+| 8 concurrent rank processes, aggregate | ~4.8M |
 
-124M-grade prose: fluent, on-topic, confidently wrong — exactly on spec.
+Two root causes: thread oversubscription (8 ranks x (128 I/O + 112 transform)
+threads on 112 cores, all contending for the GIL) and the packer snapshotting
+every owned split's token buffer after every block (`_commit_pack_state`, 42%
+of main-thread time). `train.py` now exposes `--io-queue-depth` (1),
+`--transform-parallelism` (2) and `--num-splits`.
+
+Even tuned, packing on the training thread costs GPU time: the in-process run
+held **28% MFU while I/O was in flight and 34% after the table was fully read**.
+Moving iteration into worker processes with lancedb's `StreamingDataLoader`
+(`--num-workers 2`, forkserver) gives **34.5% from step 100 onward** — the same
+ceiling as pre-packed blocks (below), i.e. the loader is fully hidden.
+Checkpoints stay exact: the loader commits worker state only for batches the
+trainer has received (a `num_workers=2` run killed and resumed with
+`num_workers=0` reproduces the uninterrupted val loss to 4 decimals).
+
+### Loader A/B: identical blocks, five loaders, local and S3
+
+`build_packed_datasets.py` writes the *same* 2,373,376 packed 1024-token blocks
+as Parquet (stream order), pre-shuffled Parquet, MDS shards and a Lance table.
+`train.py --blocks-mode ...` trains the same GPT-2 124M on them; only the
+loader changes. The Lance corpus row is the on-the-fly path (pack + shuffle
+from the raw table, no pre-pack at all).
+
+| loader (GPT-2 124M, 8x H100, 512 x 1024 tok/step) | local disk | S3 us-east-2 from Norway | extra copies | prep |
+|---|---|---|---|---|
+| **Lance corpus table** — pack + shuffle on the fly | 3.16M tok/s / 34.3% | **3.16M / 34.4%** | 0 | 0 |
+| Lance blocks table (pre-packed) | 3.17M / 34.5% | 3.16M / 34.3% | 1 (9.7GB) | 5 min |
+| MosaicML Streaming (MDS) | 3.17M / 34.5% | 3.17M / 34.5% steady; one stall to 0.7M while a shard downloaded (mean 2.87M / 31.2% over steps 125-500); 8.9GB shard cache per node | 1 (9.7GB) + per-node cache | 5 min |
+| Parquet, pre-shuffled shards read sequentially | 3.17M / 34.4% | 3.18M / 34.5% | 2 (5.0GB + 5.0GB) | 5 min + reshuffle per epoch/filter |
+| Parquet, random-take (global shuffle over row groups) | 2.02M / 21.9% | **74k / 0.8%** (43x slower than the Lance table from the same bucket) | 1 (5.0GB) | 5 min |
+
+GPU utilisation sampled by `nvidia-smi` sits at 93-100% for every row except
+Parquet random-take. Sequential streaming is fast everywhere — that was never
+the problem. The difference is workflow: the Parquet and MDS rows each start
+with a 5-minute materialisation that bakes in the tokenizer, `seq_len`, filter
+and dedup decisions (and, for the pre-shuffled copy, one shuffle order), while
+the Lance corpus row changes any of them by editing a SQL string or a seed.
+
+MosaicML's guarantees tie with Lance on the same blocks
+(`mosaic_compare.py`): elastic determinism ws1==ws2==ws4 and ws4->ws2 resume
+both pass for both loaders.
+
+### Packed runs are now elastic
+
+The pre-merge packer could only resume at the same world size. With
+`blocks_per_epoch` fixed per split (exact budget computed from `n_tokens`),
+the packed stream is topology-independent:
+
+```
+$ python elastic_pack_check.py --db ~/runs/small/db --num-splits 128 --ws 8 4
+elastic: 30 global steps ws=8 == ws=4: True
+resume: ws=8 for 12 steps -> merge 8 rank states -> ws=4: next 18 global steps match: True
+blocks_per_epoch=2,373,376 (18,542 per split)
+```
+
+TBD_RESUME_DEMO
+
+TBD_LARGE
 
 ### Known rough edges (upstream notes)
-- geneva 0.14 needs `lancedb==0.34.x` in its own venv (its `>=0.34.0b4`
-  pin admits incompatible newer versions).
-- A shutdown-time `PyGILState_Release`/SIGABRT can fire at process exit
-  after successful completion (mixed Rust-runtime + torch teardown); data
-  and checkpoints are unaffected.
-- Packed resume requires the same world_size (padding and checkpoint
-  state are per-rank); per-rank checkpoint files handle multi-GPU.
+- lancedb 0.38 is beta-only at the time of writing: build the wheel from a tag.
+- Packed `state_dict()` requires an aligned cycle (every owned split has
+  emitted the same block count); checkpoint on optimizer-step boundaries where
+  `batch_size x grad_accum` is a multiple of the rank's split count (and, with
+  workers, `ckpt_every x grad_accum` a multiple of `num_workers`).
+- `StreamingDataLoader` workers: use `forkserver`/`spawn`, never `fork`, inside
+  CUDA + DDP ranks. If workers die at start-up with
+  `SemLock._rebuild -> FileNotFoundError`, check `systemd-logind RemoveIPC`
+  on the host (see [`ISSUE_streaming_workers.md`](ISSUE_streaming_workers.md)).
+- Interpreter exit can hang after a worker-process run (Rust runtime + torch
+  teardown); `train.py` exits with `os._exit(0)` once checkpoints and the final
+  eval are written.
+- geneva 0.15 installs cleanly with lancedb 0.37 in its own venv (the 0.14
+  `lancedb==0.34` pin is gone).
 
 ## Training
 
@@ -195,10 +263,13 @@ Single GPU / debug:
 python train.py --model small --batch-size 16 --epochs 1
 ```
 
-One 8×GPU node:
+One 8×GPU node (the configuration used for the results above):
 
 ```bash
-torchrun --nproc-per-node 8 train.py --model medium --batch-size 8
+torchrun --nproc-per-node 8 train.py --model small --tokenizer hf:gpt2 \
+    --pack --compile --batch-size 32 --grad-accum 2 --seq-len 1024 --epochs 1 \
+    --num-splits 128 --read-batch-size 8 --io-queue-depth 1 --transform-parallelism 2 \
+    --num-workers 2 --ckpt-every 1000 --eval-every 1500
 ```
 
 4 or 8 H200 nodes (same command on every node; set `MASTER_ADDR`):
@@ -256,21 +327,27 @@ python train.py --min-score 0.0          # everything incl. junk, same table
   and the global batch (`--batch-size × world_size`) must be a multiple of
   it — `train.py` enforces this because elastic determinism silently breaks
   otherwise. Default: one split per global-batch slot.
-- **`num_workers=0`** on the DataLoader is deliberate: the loader
-  parallelizes I/O and transforms on threads internally, and the loader's
-  `state_dict()` used for checkpointing reflects consumption only in the
-  process that iterates.
+- **`num_workers=0`** (the default) keeps everything in-process: the loader
+  parallelizes I/O and transforms on threads internally. It is simplest and
+  exact, but the GIL-bound packer then shares the training thread — use
+  `--num-workers` for the last ~6 MFU points.
 - **`--pack` (sequence packing)** concatenates documents with an EOS
   separator and slices fixed `seq_len` blocks, so every trained position is
   a real token. This is what makes the loader token-competitive with
   memmapped-.bin pipelines: on a long-document corpus, pad/truncate at
   `seq_len=256` trains on only ~17% of corpus tokens (truncation discards
-  the rest), packing trains on 100%. Trade-off: block boundaries follow the
-  per-rank stream, so packed runs are deterministic and exactly resumable
-  **at a fixed world size** (the packer refuses cross-topology resume),
-  while the default pad/truncate mode keeps token-exact elasticity across
-  world sizes. Pick per run: elasticity experiments → default; production
-  token throughput → `--pack`.
+  the rest), packing trains on 100%. Packing happens per logical split with
+  a fixed per-split block budget (`blocks_per_epoch`, computed exactly from
+  the `n_tokens` column), so packed runs are deterministic and resumable
+  **across world sizes**: each rank checkpoints its own splits and
+  `StreamingDataset.merge_state_dicts` combines them on resume.
+- **`--num-workers N`** moves iteration (I/O, transform, packing) into `N`
+  worker processes per rank via lancedb's `StreamingDataLoader`, whose
+  checkpoints are committed only for batches the trainer has received.
+  `num_splits` must be divisible by `world_size x N`; use `--mp-context
+  forkserver` (default) or `spawn`, never fork, inside CUDA ranks.
+- **Loader threads**: `--io-queue-depth 1 --transform-parallelism 2
+  --read-batch-size 8` on local disk; see `LOADER_TUNING.md`.
 - The tokenizer choice only needs to be consistent between
   `tokenize_data.py` and `train.py` (`--tokenizer` sets the vocab size).
 
