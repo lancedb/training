@@ -207,7 +207,7 @@ from the raw table, no pre-pack at all).
 |---|---|---|---|---|
 | **Lance corpus table** — pack + shuffle on the fly | 3.16M tok/s / 34.3% | **3.16M / 34.4%** | 0 | 0 |
 | Lance blocks table (pre-packed) | 3.17M / 34.5% | 3.16M / 34.3% | 1 (9.7GB) | 5 min |
-| MosaicML Streaming (MDS) | 3.17M / 34.5% | 3.17M / 34.5% steady; one stall to 0.7M while a shard downloaded (mean 2.87M / 31.2% over steps 125-500); 8.9GB shard cache per node | 1 (9.7GB) + per-node cache | 5 min |
+| MosaicML Streaming (MDS) | 3.17M / 34.5% | 3.18M / 34.6% between shard fetches, ~0.75M during each (mean 2.87M / 31.2% over steps 125-500); fills an 8.9GB shard cache per node | 1 (9.7GB) + per-node cache | 5 min |
 | Parquet, pre-shuffled shards read sequentially | 3.17M / 34.4% | 3.18M / 34.5% | 2 (5.0GB + 5.0GB) | 5 min + reshuffle per epoch/filter |
 | Parquet, random-take (global shuffle over row groups) | 2.02M / 21.9% | **74k / 0.8%** (43x slower than the Lance table from the same bucket) | 1 (5.0GB) | 5 min |
 
@@ -235,7 +235,18 @@ resume: ws=8 for 12 steps -> merge 8 rank states -> ws=4: next 18 global steps m
 blocks_per_epoch=2,373,376 (18,542 per split)
 ```
 
-TBD_RESUME_DEMO
+And on real GPUs (`runs/resume_demo.sh`): an 8-GPU packed run checkpointed
+at step 200 and `kill -9`'d at step 260 was resumed **on 4 GPUs** (batch 64 x
+accum 2 keeps the 512-sequence global step) from the eight per-rank loader
+states, and finished the 400-step budget at val loss 4.9718 vs 4.9704 for the
+uninterrupted 8-GPU reference (the two runs shard the eval set differently;
+the training batches are provably identical per the check above).
+
+```
+resumed from .../ckpt/step_00000200.pt (epoch 0, opt step 200)
+epoch 0 step 300/400 | loss 5.3989 | 1,639,864 tok/s | mfu 35.6% | ...     # 4 GPUs
+final: opt_step=400 tokens_seen(rank0)=26,214,400 val_loss=4.9718
+```
 
 TBD_LARGE
 
