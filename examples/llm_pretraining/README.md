@@ -284,6 +284,16 @@ loader work is identical):
 | Parquet, pre-shuffled sequential | 1.34M / 41.0% | 1.34M / 41.1% |
 | Parquet, random-take | 1.34M / 41.0% | **73k / 2.2%** |
 
+Sample from the final checkpoints (temperature 0.8, same prompt):
+
+> **124M**: Photosynthesis is the process by which photosynthetic algae, the
+> photosynthetic algae, convert sugars to sugars.
+>
+> **354M**: Photosynthesis is the process by which plants convert light into
+> starch, carbohydrates and lipids. The process of photosynthesis is important
+> to life on Earth and the plants use sunlight and chemical energy to produce
+> the chemical energy required for growth.
+
 At 354M the model consumes tokens 2.4x more slowly, so every loader has
 slack — even random-take Parquet from page cache keeps up locally. Only the
 random-take-from-S3 path, which downloads a 4MB row group per sample, cannot.
