@@ -108,7 +108,7 @@ def build_derived(args) -> None:
     ldb = lancedb.connect(f"{args.out}/blocks_db")
     if "blocks" in ldb.list_tables():
         ldb.drop_table("blocks")
-    lt = ldb.create_table("blocks", tables[0], schema=SCHEMA)
+    lt = ldb.create_table("blocks", tables[0])
     for t in tables[1:]:
         lt.add(t)
     print(f"lance blocks table: {lt.count_rows():,} rows in {time.perf_counter() - t0:.0f}s")
