@@ -284,6 +284,11 @@ loader work is identical):
 | Parquet, pre-shuffled sequential | 1.34M / 41.0% | 1.34M / 41.1% |
 | Parquet, random-take | 1.34M / 41.0% | **73k / 2.2%** |
 
+A GPT-2 large (774M, `--model large`, 15.5B tokens = 29,600 steps at batch
+16 x accum 4) is training on the same table as this is written: **634k tok/s,
+41.7% MFU** at step 300 with `--transform-queue-depth 16`, ETA ~6.7 h
+(`runs/train_large.sh`; log `runs/large/train_large.stdout`).
+
 Sample from the final checkpoints (temperature 0.8, same prompt):
 
 > **124M**: Photosynthesis is the process by which photosynthetic algae, the
