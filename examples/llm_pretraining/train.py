@@ -27,6 +27,7 @@ import contextlib
 import glob
 import math
 import os
+import sys
 import time
 
 import pyarrow as pa
@@ -82,6 +83,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         "thread; checkpoints are committed only for batches the trainer has "
         "received, so state_dict() stays exact. num_splits must be divisible "
         "by world_size * num_workers",
+    )
+    p.add_argument(
+        "--mp-context",
+        default="forkserver",
+        choices=["forkserver", "spawn"],
+        help="multiprocessing start method for --num-workers (fork is unsafe "
+        "with CUDA + lancedb's async runtime; forkserver is faster than spawn)",
     )
     p.add_argument("--compile", action="store_true", help="torch.compile the model")
     p.add_argument("--compile-mode", default="default", help="torch.compile mode, e.g. max-autotune")
@@ -143,9 +151,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument(
         "--blocks-mode",
         default="off",
-        choices=["off", "lance", "mosaic"],
-        help="A/B harness: train on pre-packed 1024-token blocks via the "
-        "lance loader or MosaicML streaming (see mosaic_compare.py)",
+        choices=["off", "lance", "mosaic", "parquet-random", "parquet-seq"],
+        help="A/B harness: train on identical pre-packed 1024-token blocks via "
+        "the lance loader, MosaicML streaming, Parquet random-take, or "
+        "pre-shuffled Parquet shards read sequentially (build_packed_datasets.py)",
     )
     p.add_argument("--blocks-path", default="", help="blocks db dir / MDS dir or s3://")
     p.add_argument(
@@ -235,8 +244,13 @@ def make_loader(ds: StreamingDataset, args):
     """Training loader: in-process (num_workers=0) or lancedb's consumer-
     committed StreamingDataLoader with worker processes."""
     if args.num_workers > 0:
+        # Not fork: ranks have CUDA + lancedb's async runtime initialised, and
+        # forked workers can deadlock (lancedb warns about exactly this).
         return StreamingDataLoader(
-            ds, batch_size=args.batch_size, num_workers=args.num_workers
+            ds,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            multiprocessing_context=args.mp_context,
         )
     return DataLoader(ds, batch_size=args.batch_size, num_workers=0)
 
@@ -320,7 +334,18 @@ def run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok) ->
             transform_parallelism=args.transform_parallelism,
             transform=to_rows,
         )
-        loader = DataLoader(ds, batch_size=args.batch_size, num_workers=0)
+        loader = make_loader(ds, args)
+    elif args.blocks_mode.startswith("parquet"):
+        from blocks_loaders import ParquetRandomBlocks, ParquetSeqBlocks
+
+        if args.blocks_mode == "parquet-random":
+            pds = ParquetRandomBlocks(args.blocks_path, rank, world_size, args.shuffle_seed)
+            workers = args.num_workers or 8  # concurrent readers hide per-row-group latency
+        else:
+            pds = ParquetSeqBlocks(args.blocks_path, rank, world_size)
+            workers = args.num_workers or 2
+        loader = DataLoader(pds, batch_size=args.batch_size, num_workers=workers, prefetch_factor=4)
+        ds = None
     else:
         from streaming import StreamingDataset as MosaicSD
         from streaming import StreamingDataLoader
@@ -385,10 +410,19 @@ def run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok) ->
         print(f"[{args.blocks_mode}] final: opt_step={opt_step}")
     if world_size > 1:
         dist.destroy_process_group()
+    sys.stdout.flush()
+    os._exit(0)  # see main(): worker teardown can hang at exit
 
 
 def main(argv=None) -> None:
     args = parse_args(argv)
+    if args.num_workers:
+        # Before any StreamingDataset exists: its shared-memory stats are
+        # created in the *default* mp context, so make that the same
+        # (non-fork) context the DataLoader workers will use.
+        import multiprocessing as mp
+
+        mp.set_start_method(args.mp_context, force=True)
     rank, world_size, device = setup_distributed()
     is_main = rank == 0
     torch.set_float32_matmul_precision("high")
@@ -621,6 +655,13 @@ def main(argv=None) -> None:
         )
     if world_size > 1:
         dist.destroy_process_group()
+    if args.num_workers:
+        # Worker-process teardown can hang at interpreter exit (mixed Rust
+        # runtime + torch + forkserver finalizers); everything is flushed and
+        # checkpointed by now, so leave without running finalizers.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
 
 
 if __name__ == "__main__":

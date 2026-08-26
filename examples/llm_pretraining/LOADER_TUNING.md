@@ -58,7 +58,17 @@ Upstream suggestions, in order of payoff:
    when `pack_sequences` is set; or at least scale the transform pool by
    `1 / world_size` when `world_size > 1` so 8 ranks don't each spawn
    `cpu_count` threads.
-4. Document that `state_dict()` in packed mode requires an aligned cycle
+4. `StreamingDataLoader` with `num_workers > 0`: use `forkserver` (or `spawn`) —
+   forked workers deadlock inside a CUDA + DDP rank (lancedb's own fork
+   warning). If workers die at start-up with
+   `SemLock._rebuild -> FileNotFoundError`, check the *host*: `systemd-logind`
+   `RemoveIPC=yes` deletes the user's `/dev/shm` semaphores whenever a login
+   session ends (Brev VMs do this every few seconds); fix with
+   `RemoveIPC=no` in `/etc/systemd/logind.conf.d/`. Full write-up and repro:
+   `ISSUE_streaming_workers.md`. Upstream asks: don't pickle the whole
+   permutation table (38 MB for 2.37M rows) into every worker, and document
+   the start method.
+5. Document that `state_dict()` in packed mode requires an aligned cycle
    (every owned split has emitted the same block count) — callers must
    checkpoint on micro-batch boundaries that are multiples of `owned_splits`.
 
