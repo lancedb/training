@@ -1,0 +1,11 @@
+[0]:
+[7]:
+[s_lance_blocks_local] steps 125-300: mean 3,174,371 tok/s  mfu 34.5%  (min 3,169,505)
+[s_lance_blocks_s3] steps 125-500: mean 3,156,492 tok/s  mfu 34.3%  (min 3,012,732)
+[s_lance_corpus_s3] steps 125-500: mean 3,164,557 tok/s  mfu 34.4%  (min 3,072,596)
+[s_mosaic_local] steps 125-300: mean 3,174,316 tok/s  mfu 34.5%  (min 3,171,146)
+[s_mosaic_s3] steps 125-500: mean 2,873,608 tok/s  mfu 31.2%  (min 733,827)
+[s_parquet_random_local] steps 125-300: mean 2,019,950 tok/s  mfu 21.9%  (min 1,990,286)
+[s_parquet_random_s3] steps 125-175: mean 73,946 tok/s  mfu 0.8%  (min 73,140)
+[s_parquet_seq_local] steps 125-300: mean 3,167,182 tok/s  mfu 34.4%  (min 3,160,090)
+[s_parquet_seq_s3] steps 125-500: mean 3,175,423 tok/s  mfu 34.5%  (min 3,169,597)
