@@ -361,11 +361,14 @@ def run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok) ->
             num_canonical_nodes=8,
         )
         if args.blocks_path.startswith("s3://"):
-            mds = MosaicSD(
-                remote=args.blocks_path,
-                local=os.path.expanduser(f"~/mosaic_cache/rank{rank}"),
-                **kwargs,
+            # One shared local cache per node (Mosaic's contract: rank 0 downloads
+            # index.json / shards, the other local ranks wait for the same files).
+            import hashlib
+
+            cache = os.path.expanduser(
+                f"~/mosaic_cache/{hashlib.md5(args.blocks_path.encode()).hexdigest()[:8]}"
             )
+            mds = MosaicSD(remote=args.blocks_path, local=cache, **kwargs)
         else:
             mds = MosaicSD(local=args.blocks_path, **kwargs)
         loader = StreamingDataLoader(mds, batch_size=args.batch_size, num_workers=8)
