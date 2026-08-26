@@ -72,6 +72,29 @@ Upstream suggestions, in order of payoff:
    (every owned split has emitted the same block count) — callers must
    checkpoint on micro-batch boundaries that are multiples of `owned_splits`.
 
+## Memory and GC: cap the post-transform queue on long runs
+
+The 354M run (13,351 steps, 1h37m) showed periodic slow windows — 0.8-1.1M
+tok/s against a 1.34M steady state — growing more frequent as the run went
+on. The loader's `q` column explains it: with no `transform_queue_depth` the
+cooked queue reached ~480k rows per worker (Python lists of ints, ~2GB and
+hundreds of millions of objects), and CPython's cyclic GC walks all of it on
+every gen-2 collection. Mean throughput was 1.26M / 38.6% instead of the
+1.34M / 41.1% median. `train.py --transform-queue-depth 16` caps the cooked
+rows per split at 16 x `read_batch_size`, which is still ~100 blocks of
+headroom per split. Upstream: default `transform_queue_depth` to a small
+number when `pack_sequences` is set (or store cooked tokens as numpy arrays,
+which the GC does not traverse).
+
+## Memory: the I/O stage runs far ahead
+
+With `io_queue_depth=1` the I/O pool still outruns the packer by a wide margin:
+on the 354M run each rank had ~360k raw rows + ~355k cooked rows queued by step
+9,000 (`q` column), i.e. ~3GB per rank held in Python lists. Harmless on a
+944GB host, but on smaller nodes cap it with `transform_queue_depth` (the
+post-transform backpressure knob) — the packer only needs a few thousand rows
+of headroom.
+
 ## How the trainer applies this
 
 `train.py` exposes `--io-queue-depth` (default 1), `--transform-parallelism`

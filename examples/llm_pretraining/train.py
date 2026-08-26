@@ -75,6 +75,15 @@ def parse_args(argv=None) -> argparse.Namespace:
         "same world_size",
     )
     p.add_argument(
+        "--transform-queue-depth",
+        type=int,
+        default=0,
+        help="cap on post-transform rows buffered per split, in read batches "
+        "(loader default: unbounded). Long runs otherwise accumulate hundreds "
+        "of thousands of cooked rows per worker — GBs of Python ints that "
+        "trigger periodic multi-second GC pauses. 16 is plenty of headroom",
+    )
+    p.add_argument(
         "--num-workers",
         type=int,
         default=0,
@@ -225,6 +234,7 @@ def make_dataset(
         read_batch_size=args.read_batch_size,
         io_queue_depth=args.io_queue_depth,
         transform_parallelism=args.transform_parallelism,
+        transform_queue_depth=args.transform_queue_depth or None,
     )
     if packed:
         # Packing lives in the loader now: EOS-joined blocks, pad only when a

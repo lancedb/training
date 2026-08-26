@@ -257,14 +257,22 @@ Same commands, 7x the corpus: 24 shards of FineWeb-Edu `sample-100BT`.
 | Ingest (`--source fineweb-parquet --files 24`) | **14m 08s** | 45GB table, v1 |
 | Curate + dedup | **25m 45s** | 1,140,626 dups (6.5%) flagged as a zero-copy column |
 | Geneva tokenize (64 Ray workers) | **22m 57s** | 18.06B GPT-2 tokens (16.75B post-filter); table 81GB, v13 |
-| Train GPT-2 medium 354M, 7.0B tokens = 13,351 steps | TBD_MEDIUM_WALL | TBD_MEDIUM_TPUT |
+| **Train GPT-2 medium 354M, 7.0B tokens = 13,351 steps** | **1h 37m** | 1.34M tok/s / 41.1% MFU steady (mean 1.26M / 38.6% — see GC note in `LOADER_TUNING.md`); **val loss 2.841** (4x H100: 3h 06m, 684k tok/s, val 2.840) |
 
 Pad/truncate at `seq_len=1024` would see only **61.9%** of this corpus's
 tokens; packing sees all of them. The permutation build over 16.2M filtered
 rows needs `LANCEDB_PERM_BUILDER_MEMORY_LIMIT=8589934592` (the DataFusion sort
 pool defaults to 100MB and fails fast with a clear error otherwise).
 
-TBD_LARGE_AB
+```
+  val loss @ step 2000: 3.4359
+  val loss @ step 4000: 3.1417      <- already below the 124M's final 3.236
+  val loss @ step 8000: 2.9297
+  val loss @ step 12000: 2.8452
+final: opt_step=13351 val_loss=2.8410
+```
+
+TBD_MEDIUM_AB
 
 ### Known rough edges (upstream notes)
 - lancedb 0.38 is beta-only at the time of writing: build the wheel from a tag.
