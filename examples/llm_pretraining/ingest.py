@@ -10,13 +10,20 @@ python ingest.py --source synthetic --rows 5000
 
 # Real corpus (FineWeb-Edu, streamed from HuggingFace — needs network):
 python ingest.py --source fineweb --rows 2000000 --db ./lance_pretrain_db
+
+# Larger corpus: FineWeb-Edu sample-100BT parquet files, downloaded in
+# parallel and ingested file-by-file (~10x faster than the streaming iterator):
+python ingest.py --source fineweb-parquet --files 24 --db ./lance_pretrain_db
+# (`--sample 10BT --rows 2400000` reproduces the streaming ingest's first 2.4M docs)
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import random
+import time
 
 import lancedb
 import pyarrow as pa
@@ -88,6 +95,58 @@ def fineweb_docs(rows: int):
         }
 
 
+def fineweb_parquet_batches(
+    n_files: int, rows: int = 0, workers: int = 8, sample: str = "100BT"
+):
+    """Yield FineWeb-Edu RecordBatches straight from its parquet shards.
+
+    Files are downloaded concurrently (hf_hub_download caches them) and read
+    row-group by row-group with pyarrow, so ingest runs at disk speed rather
+    than at the speed of a Python row iterator.  ``id`` is assigned
+    sequentially across files so the train/val split filters stay stable.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+    from huggingface_hub import HfApi, hf_hub_download
+
+    tree = HfApi().list_repo_tree(
+        "HuggingFaceFW/fineweb-edu", f"sample/{sample}", repo_type="dataset"
+    )
+    names = sorted(f.path for f in tree if f.path.endswith(".parquet"))[:n_files]
+
+    def fetch(name):
+        return hf_hub_download(
+            "HuggingFaceFW/fineweb-edu", name, repo_type="dataset",
+            local_dir=os.environ.get("FINEWEB_LOCAL_DIR", "./fineweb_parquet"),
+        )
+
+    next_id = 0
+    with ThreadPoolExecutor(workers) as ex:
+        for path in ex.map(fetch, names):
+            pf = pq.ParquetFile(path)
+            for rg in range(pf.num_row_groups):
+                if rows and next_id >= rows:
+                    return
+                t = pf.read_row_group(rg, columns=["text", "score"])
+                if rows:
+                    t = t.slice(0, rows - next_id)
+                n = t.num_rows
+                text = t.column("text")
+                yield pa.RecordBatch.from_arrays(
+                    [
+                        pa.array(range(next_id, next_id + n), pa.int64()),
+                        text.combine_chunks(),
+                        pa.array(["fineweb-edu"] * n, pa.string()),
+                        pc.cast(t.column("score"), pa.float32()).combine_chunks(),
+                        pc.cast(pc.utf8_length(text), pa.int32()).combine_chunks(),
+                    ],
+                    schema=SCHEMA,
+                )
+                next_id += n
+
+
 def record_batches(doc_iter):
     rows = []
     for doc in doc_iter:
@@ -104,19 +163,32 @@ def main(argv=None) -> None:
     parser.add_argument("--db", default=DEFAULT_DB)
     parser.add_argument("--table", default=DEFAULT_TABLE)
     parser.add_argument(
-        "--source", choices=["synthetic", "fineweb"], default="synthetic"
+        "--source",
+        choices=["synthetic", "fineweb", "fineweb-parquet"],
+        default="synthetic",
     )
     parser.add_argument("--rows", type=int, default=5000)
+    parser.add_argument(
+        "--files", type=int, default=4, help="fineweb-parquet: shards to ingest"
+    )
+    parser.add_argument(
+        "--sample", default="100BT", help="fineweb-parquet: 10BT or 100BT sample"
+    )
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
 
     banner(f"INGEST  {args.source} -> {args.db}/{args.table}")
-    docs = (
-        synthetic_docs(args.rows, seed=args.seed)
-        if args.source == "synthetic"
-        else fineweb_docs(args.rows)
-    )
-    reader = pa.RecordBatchReader.from_batches(SCHEMA, record_batches(docs))
+    t0 = time.perf_counter()
+    if args.source == "fineweb-parquet":
+        batches = fineweb_parquet_batches(args.files, args.rows, sample=args.sample)
+    else:
+        docs = (
+            synthetic_docs(args.rows, seed=args.seed)
+            if args.source == "synthetic"
+            else fineweb_docs(args.rows)
+        )
+        batches = record_batches(docs)
+    reader = pa.RecordBatchReader.from_batches(SCHEMA, batches)
 
     db = lancedb.connect(args.db)
     if args.table in db.table_names():
@@ -129,7 +201,7 @@ def main(argv=None) -> None:
     )
     n = tbl.count_rows()
     digest = hashlib.md5(str(n).encode()).hexdigest()[:8]
-    print(f"ingested {n} rows (checksum {digest})")
+    print(f"ingested {n} rows (checksum {digest}) in {time.perf_counter() - t0:.1f}s")
     print(f"table version: {tbl.version}")
 
 

@@ -32,7 +32,7 @@ import time
 import pyarrow as pa
 import torch
 import torch.distributed as dist
-from lancedb.streaming import StreamingDataset
+from lancedb.streaming import StreamingDataLoader, StreamingDataset
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
@@ -73,6 +73,16 @@ def parse_args(argv=None) -> argparse.Namespace:
         "fixed-length blocks, no padding waste. Resume packed runs at the "
         "same world_size",
     )
+    p.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader worker processes per rank via lancedb's "
+        "StreamingDataLoader: moves the (GIL-bound) packer off the training "
+        "thread; checkpoints are committed only for batches the trainer has "
+        "received, so state_dict() stays exact. num_splits must be divisible "
+        "by world_size * num_workers",
+    )
     p.add_argument("--compile", action="store_true", help="torch.compile the model")
     p.add_argument("--compile-mode", default="default", help="torch.compile mode, e.g. max-autotune")
     p.add_argument("--grad-accum", type=int, default=1)
@@ -105,7 +115,23 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="elastic splits; 0 = one per global-batch slot",
     )
     p.add_argument("--shuffle-seed", type=int, default=42)
-    p.add_argument("--read-batch-size", type=int, default=64)
+    p.add_argument("--read-batch-size", type=int, default=8)
+    p.add_argument(
+        "--io-queue-depth",
+        type=int,
+        default=1,
+        help="I/O batches in flight per split (loader default 4). Threads = "
+        "splits x depth per rank; oversubscription costs more than latency "
+        "hiding gains on local NVMe",
+    )
+    p.add_argument(
+        "--transform-parallelism",
+        type=int,
+        default=2,
+        help="transform threads per rank (loader default = os.cpu_count()). "
+        "Packing is GIL-bound Python; 8 ranks x 112 threads starves the "
+        "pipeline",
+    )
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument(
         "--eval-every", type=int, default=0, help="eval every N steps (0 = only at end)"
@@ -188,6 +214,8 @@ def make_dataset(
         rank=rank,
         world_size=world_size,
         read_batch_size=args.read_batch_size,
+        io_queue_depth=args.io_queue_depth,
+        transform_parallelism=args.transform_parallelism,
     )
     if packed:
         # Packing lives in the loader now: EOS-joined blocks, pad only when a
@@ -201,6 +229,16 @@ def make_dataset(
     else:
         kwargs.update(transform=make_transform(args.seq_len, tok.pad_token_id))
     return StreamingDataset(tbl, **kwargs)
+
+
+def make_loader(ds: StreamingDataset, args):
+    """Training loader: in-process (num_workers=0) or lancedb's consumer-
+    committed StreamingDataLoader with worker processes."""
+    if args.num_workers > 0:
+        return StreamingDataLoader(
+            ds, batch_size=args.batch_size, num_workers=args.num_workers
+        )
+    return DataLoader(ds, batch_size=args.batch_size, num_workers=0)
 
 
 def batch_loss(trainable, batch, device, pad_id):
@@ -278,6 +316,8 @@ def run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok) ->
             rank=rank,
             world_size=world_size,
             read_batch_size=args.read_batch_size,
+            io_queue_depth=args.io_queue_depth,
+            transform_parallelism=args.transform_parallelism,
             transform=to_rows,
         )
         loader = DataLoader(ds, batch_size=args.batch_size, num_workers=0)
@@ -356,6 +396,11 @@ def main(argv=None) -> None:
     tok = load_tokenizer(args.tokenizer)
     global_batch = args.batch_size * world_size
     num_splits = args.num_splits or global_batch
+    if args.num_workers and num_splits % (world_size * args.num_workers):
+        raise SystemExit(
+            f"num_splits ({num_splits}) must be divisible by world_size x "
+            f"num_workers ({world_size} x {args.num_workers})"
+        )
     if global_batch % num_splits != 0:
         raise SystemExit(
             f"global batch ({global_batch} = {args.batch_size} x {world_size} ranks) "
@@ -370,7 +415,8 @@ def main(argv=None) -> None:
         print(
             f"model={args.model} params={model.num_params():,} pack={args.pack} "
             f"world_size={world_size} global_batch={global_batch} "
-            f"num_splits={num_splits} compile={args.compile}"
+            f"num_splits={num_splits} compile={args.compile} "
+            f"num_workers={args.num_workers}"
         )
     if args.compile:
         model = torch.compile(model, mode=args.compile_mode)
@@ -504,7 +550,7 @@ def main(argv=None) -> None:
         if loader_state is not None:
             ds.load_state_dict(loader_state)
             loader_state = None
-        loader = DataLoader(ds, batch_size=args.batch_size, num_workers=0)
+        loader = make_loader(ds, args)
 
         micro = 0
         for batch in loader:

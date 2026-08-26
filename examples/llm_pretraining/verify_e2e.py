@@ -317,7 +317,9 @@ def main(argv=None) -> None:
 
     packed = packed_ds()
     budget = packed._blocks_per_epoch
-    next(iter(packed))
+    it = iter(packed)
+    for _ in range(4):  # one full cycle: state_dict() requires aligned splits
+        next(it)
     st = packed.state_dict()
     st["pad_id"] = ByteTokenizer.PAD + 1
     try:
