@@ -12,6 +12,7 @@ Four files:
 | `train_e2e.sh` | N steps of SmolVLA on 8 GPUs, two data paths, identical config. |
 | `parse_train_log.py` | Parses `lerobot-train` logs. Use it; the naive regex is wrong (#9). |
 | `shuffle_scope.py` | Isolates shuffle-window width from IO, to test whether coverage matters. |
+| `scope_holdout_random.json` | 200 episodes sampled uniformly — the holdout to use for cross-run comparisons. |
 | **`PITFALLS.md`** | **Read this first.** Eight ways this benchmark has produced wrong numbers. |
 
 ## Setup
@@ -94,15 +95,21 @@ arms use one sampler class; a global shuffle is that sampler with `buffer = len(
 | 15,000 frames | 0.054% | 0.2790 ±0.0034 | **0.4006** ±0.0010 |
 | 1,000 (streaming default) | 0.0036% | 0.2966 ±0.0040 | 0.4371 ±0.0035 |
 
-**The default 1,000-frame window measurably hurts** — 10.7% worse held-out loss, 7.1% worse
-MAE, paired t = 9.1 and 12.5 across seeds. On a dataset whose episodes average ~285 frames, a
-1,000-frame window draws each batch from 3-4 episodes, so its gradients are correlated.
+| step | global | 1,000-frame window | gap |
+|---|---|---|---|
+| 2,500 | 0.3122 ±0.0040 | 0.5218 ±0.0264 | +67.2% |
+| 5,000 | 0.2871 ±0.0023 | 0.4216 ±0.0075 | +46.9% |
+| 7,500 | 0.2721 ±0.0033 | 0.3535 ±0.0004 | +29.9% |
+| 10,000 | 0.2681 ±0.0024 | 0.3099 ±0.0069 | +15.6% |
 
-**But 100% coverage is not required.** At 15,000 frames the gap is small and metric-dependent
-(4.1% worse loss, 1.9% *better* MAE). The benefit saturates around 10^4 frames — four orders of
-magnitude below full coverage. Do not claim "N× the coverage" as a quality result; the
-supportable claim is that the default is too narrow and a wide-enough window costs 117 GB per
-process.
+**The cost is convergence speed, not a quality ceiling.** The gap narrows monotonically, so a
+narrow window does not permanently cap the model. But the windowed run at **10,000** steps has
+still not reached the shuffled run at **2,500** — roughly **4× the steps for the same loss**. At
+a fixed budget that compounds with the 1.38× wall-clock difference above.
+
+**Run it with a proper holdout or the result is meaningless** — see PITFALLS #10. Pass
+`--exclude scope_holdout_random.json` (200 episodes sampled uniformly across the dataset) and
+evaluate on the same file.
 
 Note what lerobot does by default: for every **map-style** dataset it sets `shuffle=False` and
 installs `EpisodeAwareSampler(shuffle=True)`, already a global permutation. Only the streaming

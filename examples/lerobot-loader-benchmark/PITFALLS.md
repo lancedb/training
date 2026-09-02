@@ -92,3 +92,29 @@ per-step grids were right while the 10,000-step summary was not.
 Cross-check every rate against wall clock: `steps x batch x gpus / seconds`. For the runs above
 that gives 487.7 and 354.5 samples/s against steady-state 495 and 361 — the gap is startup and
 checkpointing, and if the two disagree by more than that, the log parse is wrong.
+
+### 10. A localized holdout that is not excluded from training will invent your result
+The first shuffle-scope experiment used a holdout of 100 episodes drawn from indices **7-731** —
+the first 0.76% of DROID's 95,658 episodes — and never passed `--dataset.exclude_episodes`. Both
+mistakes together meant the arms differed in **how much of the eval set they had trained on**,
+because a windowed sampler walks a *contiguous* region while a global shuffle does not:
+
+| arm | region reached in 3,000 steps | eval episodes trained on |
+|---|---|---|
+| 1,000-frame window | frames 0-96,000 ≈ episodes 0-340 | ~40 of 100 |
+| 8-shard window | 8 cursors, one in that region | ~5 |
+| global shuffle | uniform over 27.6M frames | ~1 frame per episode |
+
+This produced a confidently wrong result: with 8 shards — *more* randomness — held-out loss got
+**worse** (0.3467 vs 0.2696), because that arm had less eval contamination. Those numbers were
+withdrawn. Re-run on a uniformly-sampled, properly excluded holdout, the same comparison inverted
+in magnitude and told a different story (4× the steps, not 10% worse quality).
+
+Rules that follow:
+- For comparing **runs that saw different data**, the holdout must be a uniform random sample of
+  episodes AND excluded from training. `scope_holdout_random.json` is that; verify the exclusion
+  landed by checking the frame count drops (27,630,375 → 27,573,884 for 200 episodes).
+- For comparing **two checkpoints of one run**, a localized holdout is fine — both checkpoints
+  face the same eval set, so it shifts both numbers identically.
+- A result that runs *against* the mechanism you expect is the signal to check for a confound,
+  not something to explain away.

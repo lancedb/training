@@ -21,29 +21,65 @@ import torch
 
 
 class ReservoirSampler(torch.utils.data.Sampler):
-    """Reservoir/shuffle-buffer semantics, as tf.data.shuffle and LeRobot streaming implement it.
+    """Faithful emulation of StreamingLeRobotDataset's ordering.
 
-    Walk the index space in order, hold `buffer` indices, and repeatedly emit a random one and
-    refill its slot from the stream. buffer=1 is sequential; buffer>=len is a global shuffle.
+    That reader applies TWO levels of randomness (streaming_dataset.py:430):
+      1. the dataset is split into `num_shards` CONTIGUOUS blocks, each with its own cursor,
+         and every step picks one shard at random;
+      2. the frame it yields goes through a reservoir of `buffer` frames.
+
+    Emulating only (2) with a single sequential cursor is materially more pessimistic than the
+    real reader: with 8 shards over 27.6M frames the cursors start ~3.45M frames apart, so a
+    short run touches eight windows spread across the dataset rather than only its beginning.
+    Getting this wrong overstates the penalty of a narrow buffer.
+
+    buffer >= n is a global shuffle (sharding then makes no difference).
     """
 
-    def __init__(self, n, buffer, seed=0):
+    def __init__(self, n, buffer, seed=0, num_shards=8):
         self.n, self.buffer, self.seed = n, max(1, min(buffer, n)), seed
+        self.num_shards = max(1, min(num_shards, n))
 
     def __len__(self):
         return self.n
 
+    def _shard_bounds(self):
+        # datasets.IterableDataset.shard() gives contiguous blocks (verified empirically).
+        step = self.n // self.num_shards
+        b = [(k * step, (k + 1) * step if k < self.num_shards - 1 else self.n)
+             for k in range(self.num_shards)]
+        return [list(x) for x in b]          # [start_cursor, end)
+
     def __iter__(self):
         rng = np.random.default_rng(self.seed)
-        buf = list(range(self.buffer))
-        nxt = self.buffer
+        cursors = self._shard_bounds()
+        live = list(range(self.num_shards))
+        buf = []
+
+        def next_frame():
+            """One frame from a randomly chosen live shard."""
+            while live:
+                k = live[rng.integers(len(live))]
+                cur, end = cursors[k]
+                if cur < end:
+                    cursors[k][0] = cur + 1
+                    return cur
+                live.remove(k)
+            return None
+
+        while len(buf) < self.buffer:
+            f = next_frame()
+            if f is None:
+                break
+            buf.append(f)
         while buf:
             j = rng.integers(len(buf))
             yield int(buf[j])
-            if nxt < self.n:
-                buf[j] = nxt; nxt += 1
-            else:
+            f = next_frame()
+            if f is None:
                 buf.pop(j)
+            else:
+                buf[j] = f
 
 
 def main():
@@ -53,11 +89,20 @@ def main():
                          "(buffer = len(dataset)), so every arm uses the same sampler class "
                          "and ONLY the window width differs")
     ap.add_argument("--steps", type=int, default=3000)
+    ap.add_argument("--save-freq", type=int, default=0,
+                    help="checkpoint every N steps; 0 = only at the end")
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--root", default=os.environ.get("LANCE_ROOT",
                     "s3://lancedb-lerobot-blog-eu-north-1/droid_1.0.1-lance"))
     ap.add_argument("--seed", type=int, default=100)
+    ap.add_argument("--exclude", default="",
+                    help="JSON file of episode indices to hold out of TRAINING. Without this, "
+                         "every arm can train on the eval episodes -- and because a windowed "
+                         "sampler walks a contiguous region, arms differ in HOW MUCH of the eval "
+                         "set they saw, which confounds the comparison with shuffle width.")
+    ap.add_argument("--num-shards", type=int, default=8,
+                    help="concurrent shard cursors, as StreamingLeRobotDataset uses; DROID has 8")
     a = ap.parse_args()
 
     orig = torch.utils.data.DataLoader.__init__
@@ -71,10 +116,11 @@ def main():
             n = len(dataset)
             buf = a.buffer or n
             was = type(kw["sampler"]).__name__
-            kw["sampler"] = ReservoirSampler(n, buf, seed=a.seed)
+            kw["sampler"] = ReservoirSampler(n, buf, seed=a.seed, num_shards=a.num_shards)
             state["patched"] += 1
             print(f"[shuffle_scope] replaced {was} -> reservoir "
-                  f"buffer={buf:,} over {n:,} frames ({100*min(buf,n)/n:.4f}% of the dataset)",
+                  f"buffer={buf:,} over {n:,} frames, {a.num_shards} shard cursors "
+                  f"({100*min(buf,n)/n:.4f}% resident)",
                   flush=True)
         return orig(self, dataset, *args, **kw)
 
@@ -87,9 +133,13 @@ def main():
                 "--dataloader_multiprocessing_context=fork",
                 "--accelerator.mixed_precision=bf16",
                 f"--batch_size={a.batch_size}", "--num_workers=4", f"--steps={a.steps}",
-                "--log_freq=100", f"--save_freq={a.steps}", "--eval_steps=0",
+                "--log_freq=100", f"--save_freq={a.save_freq or a.steps}", "--eval_steps=0",
                 "--tolerance_s=0.005", f"--seed={a.seed}", "--wandb.enable=false",
                 f"--output_dir={a.out_dir}"]
+    if a.exclude:
+        sys.argv.append(f"--dataset.exclude_episodes={open(a.exclude).read().strip()}")
+        print(f"[shuffle_scope] holding out {len(__import__('json').load(open(a.exclude)))} "
+              f"episodes from training", flush=True)
     runpy.run_module("lerobot.scripts.lerobot_train", run_name="__main__")
     print(f"[shuffle_scope] patched {state['patched']} dataloader(s)", flush=True)
 
