@@ -78,3 +78,17 @@ clean — so do not claim a reader "cannot finish". `toto`, `berkeley_rpt` and
 `berkeley_autolab_ur5` have a worse version: they cannot be shuffled at all, identically on
 both readers. That is a source-data defect, not a format one, and it affected over a third of
 the public datasets tried.
+
+### 9. `lerobot-train` abbreviates step counters, and the naive regex silently drops most lines
+Logs print `step:10K` and `smpl:2M`. A `step:(\d+)` pattern matches the **10** of "10K", so a
+`step >= 500` warmup filter kept 3 of 40 lines and computed "steady state" from steps 500-750 —
+early training, when the loader is still spinning up. That reported 519 samples/s / 1.5% data
+wait where the real steady-state values were 495 / 1.7%.
+
+Use `parse_train_log.py`, which resolves K/M/G suffixes and cuts warmup **by step number**
+rather than by row count. Runs shorter than 1,000 steps are unaffected, which is why the
+per-step grids were right while the 10,000-step summary was not.
+
+Cross-check every rate against wall clock: `steps x batch x gpus / seconds`. For the runs above
+that gives 487.7 and 354.5 samples/s against steady-state 495 and 361 — the gap is startup and
+checkpointing, and if the two disagree by more than that, the log parse is wrong.

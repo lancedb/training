@@ -10,6 +10,7 @@ Four files:
 | `bench_loader.py` | **The measurement.** One process, one backend, one number. |
 | `run_matrix.sh` | Sweeps datasets x backends, one process per cell. |
 | `train_e2e.sh` | N steps of SmolVLA on 8 GPUs, two data paths, identical config. |
+| `parse_train_log.py` | Parses `lerobot-train` logs. Use it; the naive regex is wrong (#9). |
 | **`PITFALLS.md`** | **Read this first.** Eight ways this benchmark has produced wrong numbers. |
 
 ## Setup
@@ -80,15 +81,28 @@ downloads) | `stream` (`StreamingLeRobotDataset`).
 The streaming reader buys shuffle quality with RAM; matching Lance's coverage that way would
 need ~14.3 TB. The buffer is per process, so an 8-GPU job pays it eight times.
 
-End to end, 10,000 steps, 8 GPUs, batch 32/GPU, `num_workers=4`, unpinned:
+End to end, the same 10,000-step job run to completion twice, identical except
+`--dataset.root` (seed 100, batch 32/GPU x 8 GPUs, `num_workers=4`, unpinned, cold page cache,
+no episode filter):
 
-| run | wall clock | steady | data wait | GPU power |
-|---|---|---|---|---|
-| Lance · S3, global shuffle, nothing downloaded | 5,195 s (1 h 26 m) | 519 smp/s | 1.5% | 299 W |
-| upstream · local NVMe | see PITFALLS.md #8 | — | 36.7% | — |
+| | Lance · S3 | upstream · local NVMe |
+|---|---|---|
+| **wall clock** | **5,249 s** (1 h 27 m 29 s) | **7,222 s** (2 h 00 m 22 s) |
+| difference | — | **+1,973 s / +33 min → 1.38x** |
+| steady rate | 495 samples/s | 361 samples/s |
+| step time | 0.519 s | 0.708 s |
+| ...waiting on data | **1.7%** | **37.4%** |
+| GPU power | 297 W | 256 W |
+| final loss @10k | 0.2380 | 0.2380 |
 
-Note the handicap direction when quoting a ratio: upstream reads local NVMe after a 384 GB
-download, Lance streams from object storage with nothing downloaded.
+The loss curves are identical to four decimal places at every logged step — same seed, same
+samples, same order. One job served two ways, which is what makes the wall clock comparable.
+Compute per step matches; the whole 33-minute gap is GPUs waiting on the loader, and the
+*lower* power draw on the upstream side is that same idleness measured again.
+
+Note the handicap direction when quoting the ratio: upstream reads local NVMe **after a 384 GB
+download**, Lance streams from object storage with **nothing downloaded**, doing a global
+shuffle over all 27.6M frames.
 
 ## Known limits
 
