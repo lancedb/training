@@ -8,9 +8,11 @@ self-contained harness with its own pitfalls guide. Nothing here measures throug
 
 ```
 curation/   feature engineering, indexing, search, dataset EDA
+mining/     query-by-example: find every episode containing a given situation
 eval/       held-out loss and action MAE, before/after traces
 viz/        Foxglove servers + headless recorder
-config/     rename map, held-out episode list
+config/     rename map, held-out episode lists
+assets/     figures used in the post
 ```
 
 ## Setup
@@ -64,6 +66,32 @@ The point of the blog section: the embedding, the jerk score and the raw frames 
 table**, so a curation query is a single hybrid vector+SQL call (32.0 / 27.4 / 69.0 ms across
 three cases) rather than a join across a feature store, a vector database and object storage.
 
+## Mining — find the behaviour that has no label
+
+Curation asks which data to keep; **mining asks where else a thing happens**, and that is the
+query that needs an index.
+
+```bash
+python mining/mine_examples.py --k 8      # one frame in, eight other episodes out
+```
+
+![mining results](assets/mining_strip.jpg)
+
+The query above is a frame captioned *"move the bottom right tip of the duvet to the left"*. What
+comes back, on pixels alone in **69 ms** across 610,403 embedded frames, is a pillow on a bed, an
+orange towel, pillows on two different sofas and bedding — five other rooms. **0 of 8 hits share
+the query's task string; 5 of 8 are the same physical behaviour.** There is no
+`fabric_manipulation` column to filter on, and a text search for "duvet" finds none of them,
+because the operators wrote "pillow", "towel", "bedding".
+
+Two implementation notes that matter for an honest demo, both in the script:
+
+- **Frame-level nearest neighbours are dominated by temporal near-duplicates** — the 12 closest
+  frames to any frame are usually its own neighbours a few timesteps later. Mining wants distinct
+  episodes, so over-fetch and keep the best frame per episode.
+- **Query on pixels only.** Whether the returned episodes share the seed's task string is then a
+  real check on the embedding rather than something you asked for.
+
 ## Evaluation
 
 ```bash
@@ -95,6 +123,15 @@ Measured, 80 steps vs 10,000 steps of the same run, held-out episodes only:
 | action-chunk MAE | 0.5130 | 0.3706 | 27.8% lower |
 | next-action MAE | 0.3259 | 0.1004 | 69.2% lower |
 | episodes improved | | 48 / 48 | |
+
+**Use a holdout that is actually a random sample, and actually excluded.** `cur_holdout.json`
+is 100 episodes from indices 7-731 — the first 0.76% of DROID — and it is fine for comparing two
+checkpoints of one run against each other, which is what it is used for here. It is **wrong for
+comparing training runs that saw different data**: a windowed sampler walks a contiguous region,
+so arms differ in how much of the eval set they trained on, and that confound swamped a whole
+experiment before it was caught. `config/scope_holdout_random.json` is 200 episodes sampled
+uniformly across all 95,658 for that case; pass it to training as
+`--dataset.exclude_episodes` and to eval as `--holdout`.
 
 **Pick evaluation episodes by motion, not convenience.** Improvement correlates *negatively*
 with how much the arm moves (r = -0.45): a near-static episode flatters the finetune badly.
