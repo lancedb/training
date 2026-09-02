@@ -11,6 +11,7 @@ Four files:
 | `run_matrix.sh` | Sweeps datasets x backends, one process per cell. |
 | `train_e2e.sh` | N steps of SmolVLA on 8 GPUs, two data paths, identical config. |
 | `parse_train_log.py` | Parses `lerobot-train` logs. Use it; the naive regex is wrong (#9). |
+| `shuffle_scope.py` | Isolates shuffle-window width from IO, to test whether coverage matters. |
 | **`PITFALLS.md`** | **Read this first.** Eight ways this benchmark has produced wrong numbers. |
 
 ## Setup
@@ -78,8 +79,35 @@ downloads) | `stream` (`StreamingLeRobotDataset`).
 | streaming, 15k buffer | 613.4 | 117 GB | 0.054% | 196 s |
 | streaming, 40k buffer | 600.6 | 230 GB | 0.145% | 422 s |
 
-The streaming reader buys shuffle quality with RAM; matching Lance's coverage that way would
-need ~14.3 TB. The buffer is per process, so an 8-GPU job pays it eight times.
+The streaming reader buys shuffle quality with RAM, and the buffer is per process, so an
+8-GPU job pays it eight times.
+
+### Does shuffle width actually matter?
+
+Coverage percentages are not results, so `shuffle_scope.py` measures it: same reader, same
+data, same 3,000 steps, 3 seeds, and the *only* variable is the sampler's window width (all
+arms use one sampler class; a global shuffle is that sampler with `buffer = len(dataset)`).
+
+| sampler window | coverage | held-out loss | action MAE |
+|---|---|---|---|
+| global (27.6M frames) | 100% | **0.2680** ±0.0032 | 0.4082 ±0.0008 |
+| 15,000 frames | 0.054% | 0.2790 ±0.0034 | **0.4006** ±0.0010 |
+| 1,000 (streaming default) | 0.0036% | 0.2966 ±0.0040 | 0.4371 ±0.0035 |
+
+**The default 1,000-frame window measurably hurts** — 10.7% worse held-out loss, 7.1% worse
+MAE, paired t = 9.1 and 12.5 across seeds. On a dataset whose episodes average ~285 frames, a
+1,000-frame window draws each batch from 3-4 episodes, so its gradients are correlated.
+
+**But 100% coverage is not required.** At 15,000 frames the gap is small and metric-dependent
+(4.1% worse loss, 1.9% *better* MAE). The benefit saturates around 10^4 frames — four orders of
+magnitude below full coverage. Do not claim "N× the coverage" as a quality result; the
+supportable claim is that the default is too narrow and a wide-enough window costs 117 GB per
+process.
+
+Note what lerobot does by default: for every **map-style** dataset it sets `shuffle=False` and
+installs `EpisodeAwareSampler(shuffle=True)`, already a global permutation. Only the streaming
+path is windowed. Both arms of the wall-clock run above were globally shuffled, which is why
+their loss curves matched exactly — **that run says nothing about shuffle scope.**
 
 End to end, the same 10,000-step job run to completion twice, identical except
 `--dataset.root` (seed 100, batch 32/GPU x 8 GPUs, `num_workers=4`, unpinned, cold page cache,
