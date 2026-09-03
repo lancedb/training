@@ -17,7 +17,7 @@ torchrun --nproc-per-node="$GPUS" --master_port=29501 "$(which lerobot-train)" \
   --dataset.repo_id=lerobot/droid_1.0.1 --dataset.root="$LANCE_ROOT" \
   --dataset.exclude_episodes="$HOLDOUT" \
   --policy.path=lerobot/smolvla_base --policy.push_to_hub=false --rename_map="$RMAP" \
-  --dataloader_multiprocessing_context=fork --accelerator.mixed_precision=bf16 \
+  --dataloader_multiprocessing_context="${MP_CTX:-spawn}" --accelerator.mixed_precision=bf16 \
   --batch_size="$BATCH" --num_workers="$WORKERS" --steps="$STEPS" --log_freq=100 --save_freq="$SAVE_FREQ" \
   --eval_steps=0 --tolerance_s=0.005 --wandb.enable=false --seed="$SEED" \
   --output_dir="$OUT" 2>&1 | tee "$RUNS/base.log"

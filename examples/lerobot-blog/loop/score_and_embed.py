@@ -18,7 +18,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 
-from common import env_root, load_meta, load_policy, load_rename_map, open_dataset, relative_indices
+from common import MP_CTX, env_root, load_meta, load_policy, load_rename_map, open_dataset, relative_indices
 
 EMB_MODEL = "google/siglip2-base-patch16-224"
 EMB_DIM = 768
@@ -78,7 +78,7 @@ def main():
 
     loader = torch.utils.data.DataLoader(
         ds, batch_size=a.batch_size, sampler=rel, num_workers=a.num_workers,
-        multiprocessing_context="fork", prefetch_factor=4, pin_memory=True)
+        multiprocessing_context=MP_CTX, prefetch_factor=4, pin_memory=True)
     cols = {k: [] for k in ("index", "episode_index", "frame_index",
                             "err_chunk_mae", "err_next_mae", "err_gripper_next")}
     embs = []

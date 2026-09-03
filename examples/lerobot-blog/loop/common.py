@@ -9,6 +9,8 @@ import json
 import os
 import time
 
+MP_CTX = os.environ.get("MP_CTX", "spawn")  # DataLoader worker start method; fork deadlocks with Lance threads
+
 import numpy as np
 import torch
 
@@ -147,7 +149,7 @@ def score_indices(ds, rel_indices: list[int], policy, pre, cfg, rename_map: dict
     scorer = BatchScorer(policy, cfg, device)
     loader = torch.utils.data.DataLoader(
         ds, batch_size=batch_size, sampler=rel_indices, num_workers=num_workers,
-        multiprocessing_context="fork" if num_workers else None, persistent_workers=False,
+        multiprocessing_context=MP_CTX if num_workers else None, persistent_workers=False,
         prefetch_factor=4 if num_workers else None, pin_memory=True, drop_last=False)
     cols = {k: [] for k in ("index", "episode_index", "frame_index",
                             "err_chunk_mae", "err_next_mae", "err_gripper_next")}

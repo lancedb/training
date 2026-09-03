@@ -17,7 +17,7 @@ for arm in $ARMS; do
   CUDA_VISIBLE_DEVICES=$gpu lerobot-train \
     --dataset.repo_id=lerobot/droid_1.0.1 --dataset.root="$LANCE_ROOT" --dataset.episodes="$EPS" \
     --policy.path="$BASE" --policy.push_to_hub=false --rename_map="$RMAP" \
-    --dataloader_multiprocessing_context=fork --accelerator.mixed_precision=bf16 \
+    --dataloader_multiprocessing_context="${MP_CTX:-spawn}" --accelerator.mixed_precision=bf16 \
     --batch_size="$BATCH" --num_workers="$WORKERS" --steps="$STEPS" --log_freq=100 --save_freq="$STEPS" \
     --eval_steps=0 --tolerance_s=0.005 --wandb.enable=false --seed="$SEED" \
     --output_dir="$OUT" > "$RUNS/ft_${arm}_s${SEED}.log" 2>&1 &
