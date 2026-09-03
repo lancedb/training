@@ -7,12 +7,12 @@ set -euo pipefail
 : "${LANCE_ROOT:?}"
 RUNS=${RUNS:-$HOME/runs}; GPUS=${GPUS:-4}; STEPS=${STEPS:-10000}; BATCH=${BATCH:-32}
 WORKERS=${WORKERS:-4}; SEED=${SEED:-100}; SAVE_FREQ=${SAVE_FREQ:-2500}
-SUBSET=${SUBSET:-config/loop_subset.json}
-HOLDOUT=$(python -c "import json;print(json.dumps(json.load(open('$SUBSET'))['holdout']))")
+SUBSET=${SUBSET:-config/loop_subset.json}; EXCLUDE_KEYS=${EXCLUDE_KEYS:-holdout}; RUN_NAME=${RUN_NAME:-base}
+HOLDOUT=$(python -c "import json;s=json.load(open('$SUBSET'));print(json.dumps(sorted({e for k in '$EXCLUDE_KEYS'.split(',') for e in s[k]})))")
 RMAP=$(cat "${RENAME_MAP:-config/rename_map.json}")
 mkdir -p "$RUNS"
-OUT=$RUNS/base
-echo "base run -> $OUT  ($GPUS GPUs, $STEPS steps, batch $BATCH/GPU, excluding $(python -c "print(len($HOLDOUT))") holdout episodes)"
+OUT=$RUNS/$RUN_NAME
+echo "base run -> $OUT  ($GPUS GPUs, $STEPS steps, batch $BATCH/GPU, excluding $(python -c "print(len($HOLDOUT))") episodes [$EXCLUDE_KEYS])"
 torchrun --nproc-per-node="$GPUS" --master_port=29501 "$(which lerobot-train)" \
   --dataset.repo_id=lerobot/droid_1.0.1 --dataset.root="$LANCE_ROOT" \
   --dataset.exclude_episodes="$HOLDOUT" \
@@ -20,4 +20,4 @@ torchrun --nproc-per-node="$GPUS" --master_port=29501 "$(which lerobot-train)" \
   --dataloader_multiprocessing_context="${MP_CTX:-spawn}" --accelerator.mixed_precision=bf16 \
   --batch_size="$BATCH" --num_workers="$WORKERS" --steps="$STEPS" --log_freq=100 --save_freq="$SAVE_FREQ" \
   --eval_steps=0 --tolerance_s=0.005 --wandb.enable=false --seed="$SEED" \
-  --output_dir="$OUT" 2>&1 | tee "$RUNS/base.log"
+  --output_dir="$OUT" 2>&1 | tee "$RUNS/$RUN_NAME.log"

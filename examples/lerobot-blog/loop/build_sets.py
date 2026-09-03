@@ -51,24 +51,26 @@ def main():
     ap.add_argument("--k", type=int, default=300, help="episodes per training arm")
     ap.add_argument("--n-seeds", type=int, default=30)
     ap.add_argument("--slice-size", type=int, default=50)
-    ap.add_argument("--err-col", default="err_chunk_mae_base")
+    ap.add_argument("--suffix", default="_base", help="suffix of the error columns to use")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="config/loop_sets.json")
     ap.add_argument("--root", default=None, help="dataset root to query (default $LANCE_ROOT); may be s3://")
     a = ap.parse_args()
     rng = np.random.default_rng(a.seed)
+    a.err_col = "err_chunk_mae" + a.suffix
+    next_col, grip_col = "err_next_mae" + a.suffix, "err_gripper_next" + a.suffix
 
     sub = json.load(open(a.subset))
     pool, hold = set(sub["pool"]), set(sub["holdout"])
     root = a.root or env_root()
     ds = lance.dataset(f"{root}/frames.lance")
     t0 = time.perf_counter()
-    T = ds.to_table(columns=["index", "episode_index", "frame_index", a.err_col, "err_next_mae_base",
-                             "err_gripper_next_base", "language_instruction", "is_episode_successful"],
+    T = ds.to_table(columns=["index", "episode_index", "frame_index", a.err_col, next_col,
+                             grip_col, "language_instruction", "is_episode_successful"],
                     filter=f"{a.err_col} IS NOT NULL").to_pandas()
     print(f"{len(T):,} scored frames read in {time.perf_counter() - t0:.1f}s (version {ds.version})")
 
-    per_ep = T.groupby("episode_index").agg(err=(a.err_col, "mean"), err_next=("err_next_mae_base", "mean"),
+    per_ep = T.groupby("episode_index").agg(err=(a.err_col, "mean"), err_next=(next_col, "mean"),
                                             frames=("index", "size"),
                                             task=("language_instruction", "first"),
                                             ok=("is_episode_successful", "first"))
