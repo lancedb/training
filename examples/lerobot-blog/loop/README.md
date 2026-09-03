@@ -86,3 +86,35 @@ python loop/report.py                                            # 6
   395 GB). The GPU box was a Lambda instance in Atlanta and the bucket is in us-east-2, so S3
   reads were cross-region and capped at roughly 250 MB/s for the whole box, about a third of
   what four H100s consume. The same-region object-storage numbers are the ones in the blog.
+
+## What happened when we ran it (4xH100, September 2026)
+
+Three rounds, all on the same 200-episode random holdout, all with two seeds. Metric: action-chunk
+MAE of the policy against the teleoperator, lower is better; the base sits around 0.369. Full
+tables are in `results/`.
+
+| round | setup | outcome |
+|---|---|---|
+| 1 | preset schedule (peak LR 1e-4 restarted) on 300 pool episodes the base had already trained on | every arm **worse** than the base by 0.013 to 0.05. Mined beat random on the hard slice (-0.019, CI clear of zero) and was borderline elsewhere. Hard was worst by far. |
+| 2 | same sets, peak LR 1e-5 | nothing moves: every arm within 0.002 of the base, including continuing on all 2,000 pool episodes |
+| 3 | base retrained **without** the pool, arms add 300 *new* episodes at peak LR 3e-5 | mined = random (-0.0001, CI [-0.002, +0.002]) on every slice. Adding all 2,000 new episodes: -0.002 vs random. Hard: **+0.025 worse** than random everywhere. Nothing beat the base. |
+
+So, for this model, budget and metric, *which* 300 episodes you add does not matter, with one
+exception: picking the episodes the model is worst on actively hurts. Those episodes are not bad
+demonstrations (86% success, same as random) but the fastest ones (mean |joint velocity| 1.54 vs
+1.14), and the base's error tracks speed, not quality (AUROC of episode error vs the success
+label: 0.58). That is the same lesson as the smoothness gate in the main post: a single
+trajectory statistic makes a poor curation filter, and it is cheap to find that out.
+
+What the table did make cheap is the loop itself. After the base exists, one full iteration is
+about 45 minutes on 4 GPUs: scoring 218,596 frames with the policy, 8 min; merging the error
+columns, 6 s (62 s when the 768-d embeddings go in too); 60 mining queries, 0.27 s each once the
+vector and scalar indexes exist (7.7 s each without them, 10 min to build); four fine-tuning arms
+in parallel, 6 min per seed; evaluating nine checkpoints on 12,000 held-out frames, 10 min. Every
+number above came out of one table at a pinned version, and the trainer read the same table.
+
+Reasons to treat this as a first pass, not a verdict: open-loop MAE on DROID is a blunt
+instrument (the blog's own before/after gain was 0.51 -> 0.37 over 10,000 steps, and we are
+looking for effects a hundred times smaller from 1,500 steps); the seeds cover 30 failure modes
+at once rather than one behaviour; and a closed-loop success rate on LIBERO would be a far
+better readout than MAE. The scripts are ready for that variant.
