@@ -1,0 +1,12 @@
+{
+ "rows": 27630375,
+ "embedded": 218596,
+ "vector_index_s": 623.0,
+ "scalar_index_s": 2.1,
+ "queries": 30,
+ "indexed_ms_mean": 267.8,
+ "indexed_ms_max": 521.0,
+ "flat_ms_mean": 526.8,
+ "top100_episode_overlap": 0.91,
+ "table_version": 89
+}

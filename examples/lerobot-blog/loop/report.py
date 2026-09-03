@@ -55,8 +55,9 @@ def main():
             improved = float((cur < base).mean()) if label != a.base else float("nan")
             row[s] = {"mean": round(float(cur.mean()), 5), "delta_vs_base": round(float((cur - base).mean()), 5),
                       "ci95": [round(lo, 5), round(hi, 5)], "frac_improved": round(improved, 3), "n": len(eps)}
-            if a.control in merged and label not in (a.base, a.control):
-                ctrl = vec(a.control, eps)
+            ctrl_label = a.control + label[label.rfind("_s"):] if "_s" in label else a.control
+            if ctrl_label in merged and label != a.base and not label.startswith(a.control):
+                ctrl = vec(ctrl_label, eps)
                 clo, chi = paired_ci(ctrl, cur)
                 row[s]["delta_vs_control"] = round(float((cur - ctrl).mean()), 5)
                 row[s]["ci95_vs_control"] = [round(clo, 5), round(chi, 5)]
@@ -66,6 +67,33 @@ def main():
             line += f"{cell:>34}"
         report["rows"].append(row)
         print(line)
+    # average the seeds of each arm: mean over seeds of the per-episode metric, then the same stats
+    groups = {}
+    for label in labels:
+        if "_s" in label and label != a.base:
+            groups.setdefault(label[: label.rfind("_s")], []).append(label)
+    if groups:
+        print(f"{'seed-averaged':<16}" + "".join(f"{s:>34}" for s in slices)); print("-" * len(hdr))
+        for arm, members in groups.items():
+            row = {"arm": arm + "_avg", "members": members}
+            line = f"{arm + '_avg':<16}"
+            for s, eps in slices.items():
+                eps = [e for e in eps if all(str(e) in merged[m]["per_episode"] for m in members + [a.base])]
+                base = vec(a.base, eps)
+                cur = np.mean([vec(m, eps) for m in members], axis=0)
+                lo, hi = paired_ci(base, cur)
+                row[s] = {"mean": round(float(cur.mean()), 5), "delta_vs_base": round(float((cur - base).mean()), 5),
+                          "ci95": [round(lo, 5), round(hi, 5)], "frac_improved": round(float((cur < base).mean()), 3), "n": len(eps)}
+                if a.control in groups and arm != a.control:
+                    ctrl = np.mean([vec(m, eps) for m in groups[a.control]], axis=0)
+                    clo, chi = paired_ci(ctrl, cur)
+                    row[s]["delta_vs_control"] = round(float((cur - ctrl).mean()), 5)
+                    row[s]["ci95_vs_control"] = [round(clo, 5), round(chi, 5)]
+                    line += f"{cur.mean():.4f} vs {a.control} {(cur - ctrl).mean():+.4f} [{clo:+.4f},{chi:+.4f}]".rjust(34)
+                else:
+                    line += f"{cur.mean():.4f} ({(cur - base).mean():+.4f} vs base)".rjust(34)
+            report["rows"].append(row)
+            print(line)
     print()
     json.dump(report, open(a.out, "w"), indent=1)
     print("WROTE", a.out)
