@@ -49,6 +49,11 @@ flagged 59 clean episodes; the lag test replaced it.
 | curated (three queries) | 1,199 | 79 | 75 | 85 | 69 | **77.0** |
 | oracle (exactly the bad episodes removed) | 1,186 | 84 | 86 | 80 | 71 | **80.2** |
 
+The oracle, which removes exactly the 507 bad episodes, reaches 80.2. So of the 9 points between the
+query-curated model (77.0) and the clean one (86.0), roughly 3 come from the 33 bad episodes that
+slipped through and roughly 6 from training on 30% fewer episodes. Per-suite differences between the
+oracle and the curated model (+5, +11, -5, +2) are within binomial noise at 100 rollouts per suite.
+
 The mess cost 23 points; three queries got 14 back. The goal suite, whose tasks share one scene and
 differ only in the instruction, went 48 -> 85. Per-task numbers are in `results/eval_*.json`;
 `results/curation.json` and `results/curation_episodes.csv` hold every episode's scores and flags.
@@ -68,8 +73,3 @@ CLEAN=/data/libero_lance MESSY=/data/libero_messy_lance messy/run_messy.sh
 Headless rendering needs `MUJOCO_GL=egl PYOPENGL_PLATFORM=egl`, the NVIDIA EGL userspace library
 (`libnvidia-gl-<driver>-server`) and `libegl1`. The first `import libero` asks an interactive
 question; pipe `yes` into it once.
-
-The oracle, which removes exactly the 507 bad episodes, reaches 80.2. So of the 9 points between the
-query-curated model (77.0) and the clean one (86.0), roughly 3 come from the 33 bad episodes that
-slipped through and roughly 6 from training on 30% fewer episodes. Per-suite differences between the
-oracle and the curated model (+5, +11, -5, +2) are within binomial noise at 100 rollouts per suite.
