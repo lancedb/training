@@ -21,6 +21,7 @@ import os
 import time
 
 import lance
+import lancedb
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -183,20 +184,20 @@ def main():
     # --- write the columns back onto the table ---------------------------------------------------
     if not a.no_write:
         t0 = time.perf_counter()
-        ds = lance.dataset(uri)
-        drop = [c for c in ("jerk_score", "act_state_agree", "act_lag", "goal_dist", "quality_flag") if c in ds.schema.names]
+        # LanceDB Table.merge is a left join on the key column: it appends the new columns and rewrites
+        # nothing else, so readers pinned to the previous version keep working.
+        frames = lancedb.connect(a.root).open_table("frames")
+        drop = [c for c in ("jerk_score", "act_state_agree", "act_lag", "goal_dist", "quality_flag") if c in frames.schema.names]
         if drop:
-            ds.drop_columns(drop); ds = lance.dataset(uri)
-        ds.merge(pa.table({"index": idx, "jerk_score": jerk}), left_on="index", right_on="index")
-        ds = lance.dataset(uri)
+            frames.drop_columns(drop)
+        frames.merge(pa.table({"index": idx, "jerk_score": jerk}), left_on="index")
         ep_tbl = pa.table({"episode_index": episodes.astype(np.int64), "act_state_agree": agree, "act_lag": lag_best, "goal_dist": goal_dist,
                            "quality_flag": pa.array([("noise" if n else "") + ("misaligned" if m else "") + ("label" if l else "") or "ok"
                                                      for n, m, l in zip(flag_noise, flag_misaligned, flag_label)])})
-        ds.merge(ep_tbl, left_on="episode_index", right_on="episode_index")
-        ds = lance.dataset(uri)
-        report["table_version_after"] = ds.version
+        frames.merge(ep_tbl, left_on="episode_index")
+        report["table_version_after"] = frames.version
         report["merge_s"] = round(time.perf_counter() - t0, 1)
-        print(f"columns merged in {report['merge_s']}s: version {v0} -> {ds.version}")
+        print(f"columns merged in {report['merge_s']}s: version {v0} -> {frames.version}")
 
     json.dump(report, open(out_path, "w"), indent=1)
     per_ep.to_csv(out_path.replace(".json", "_episodes.csv"), index=False)

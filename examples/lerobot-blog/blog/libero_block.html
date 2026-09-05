@@ -1,93 +1,122 @@
 </div>
 
 <div class="w">
-<h3>What this curation is worth, measured closed-loop</h3>
-<p>Search and mining are only useful if the training set they produce makes a better robot. DROID has no
-simulator, so we measured that on <a href="https://libero-project.github.io/">LIBERO</a>, a simulation
-benchmark where a policy can be scored by whether it completes the task. LIBERO is also very clean: 1,693
-demonstrations of 40 tasks, every one a success with the right instruction attached. Real collections are
-not like that, so we broke it in three ways that turn up in real teleop data, each on a random 10% of the
-episodes:</p>
+<h3>Does any of this make a better robot?</h3>
+<p>Search and mining are only worth doing if the training set they produce trains a better policy. That is hard to
+measure on DROID, because there is no simulator to run the policy in. So for this one test we moved to
+<a href="https://libero-project.github.io/">LIBERO</a>, a simulation benchmark where a policy is scored on whether it
+completes the task. Success rate is the metric here, and it is the one that matters.</p>
+
+<p>LIBERO&rsquo;s dataset is also unusually clean: 1,693 demonstrations of 40 tasks, every one successful, every one with
+the right instruction attached. Real teleop collections are not like that. So we broke it on purpose. We picked a random
+30% of the episodes and gave each third of them one defect that shows up in real collections. The camera frames were
+never touched. All three defects live in the tabular data, which is also where real logging bugs live.</p>
+
+<p>For each defect there is a column that catches it. Each column is computed from what the table already holds, and an
+episode is flagged when its value is far outside the normal range for its task:</p>
+</div>
+
+<div class="wide"><div class="tw"><table>
+<thead><tr><th>what we broke</th><th>how you can tell</th><th>the column</th></tr></thead>
+<tbody>
+<tr><td><b>Wrong instruction.</b> The task label is swapped for another task in the same suite.</td>
+<td>The episode&rsquo;s last frames look unlike the last frames of other episodes with the same label.</td>
+<td><code>goal_dist</code>, per episode</td></tr>
+<tr><td><b>Shaky arm commands.</b> Noise on the arm actions, a spike on 4% of frames, the gripper flipped on 2%.</td>
+<td>The commanded action jumps around from one frame to the next.</td>
+<td><code>jerk_score</code>, per frame</td></tr>
+<tr><td><b>Out of sync.</b> The action stream runs 0.6 seconds ahead of the video, like a timestamp bug.</td>
+<td>The commanded motion only lines up with the motion the robot actually made after shifting it by several frames.</td>
+<td><code>act_lag</code>, per episode</td></tr>
+</tbody></table></div>
+<p class="cap">Thresholds are robust z-scores within each task, 3.0 in every case. Nothing in these checks knows which
+episodes were broken.</p></div>
+
+<div class="w">
+<p>An episode that trips any of the three rules gets <code>quality_flag</code> set to the name of the defect. Everything
+else is <code>ok</code>. The columns are written onto the frames table, and the training set is one filter over them:</p>
+
+<div class="snip"><p class="lbl">three columns, one filter</p>
+<pre><code>frames = lancedb.connect(root).open_table("frames")
+frames.merge(per_frame,   left_on="index")           # jerk_score
+frames.merge(per_episode, left_on="episode_index")   # act_lag, goal_dist, quality_flag
+
+keep = frames.search().where("quality_flag = 'ok'") \
+             .select(["episode_index"]).to_arrow()   # 1,199 episodes -> --dataset.episodes</code></pre>
+<p class="out">0.2 s to write the columns &#183; table version 1 &rarr; 6 &#183; no video touched &#183; the trainer takes the episode list, nothing is copied</p></div>
+
+<p><code>merge</code> is a left join on the key column. It adds the new columns and rewrites nothing else, so readers on
+the old version keep working. The per-episode scores are joined on <code>episode_index</code>, so every frame of an
+episode carries them. LeRobot&rsquo;s trainer takes a list of episodes, so the result of the filter becomes
+<code>--dataset.episodes</code>. If you will reuse a split, the same filter can be saved as a
+<a href="https://docs.lancedb.com/geneva/jobs/materialized-views">materialized view</a>, a named table that refreshes
+when the scores change. Here is what the table looks like afterwards:</p>
+</div>
+{{LIBERO_TABLE_HEAD}}
+
+<div class="w">
+<p>Then we trained <a href="https://huggingface.co/lerobot/smolvla_base">SmolVLA</a> four times with the same recipe,
+40,000 steps each, and scored each model in the simulator on 10 rollouts of every task, 400 rollouts per model. The four
+training sets were:</p>
 
 <ul>
-<li><b>Wrong instruction.</b> The task label is swapped for another task from the same suite.</li>
-<li><b>Jittery actions.</b> Noise on the arm commands, a spike on 4% of frames, the gripper flipping on 2%.</li>
-<li><b>Out of sync.</b> The action stream runs 0.6 seconds ahead of the observations, like a timestamp bug.</li>
+<li><b>Clean.</b> The original dataset, before we broke anything. This is the best case.</li>
+<li><b>Messy.</b> The broken dataset with nothing removed. This is what training on bad data costs.</li>
+<li><b>Messy, flagged episodes removed.</b> The broken dataset minus everything the three columns flagged. This is our
+method.</li>
+<li><b>Messy, exactly the broken episodes removed.</b> This row cheats. It uses the list of what we broke, which no real
+dataset comes with. It shows the best any detector could possibly do, so you can see how close the three columns got.</li>
 </ul>
-
-<p>The pixels never change. All three defects live in the tabular part of the data, which is where real logging
-bugs live too. Then we trained <a href="https://huggingface.co/lerobot/smolvla_base">SmolVLA</a> the same way
-four times, 40,000 steps each, and scored each model in the simulator on 10 rollouts of every task, 400 per
-model.</p>
 </div>
 
 <div class="wide"><div class="tw"><table>
 <thead><tr><th>trained on</th><th class="num">episodes</th><th class="num">spatial</th><th class="num">object</th>
 <th class="num">goal</th><th class="num">libero_10</th><th class="num">all 40 tasks</th></tr></thead>
 <tbody>
-<tr><td>the clean dataset</td><td class="num">1,693</td><td class="num">91</td><td class="num">87</td><td class="num">88</td><td class="num">78</td><td class="num"><b>86.0</b></td></tr>
-<tr class="hi"><td>the messy dataset, 30% bad</td><td class="num">1,693</td><td class="num">74</td><td class="num">71</td><td class="num" style="color:var(--up);font-weight:600">48</td><td class="num">58</td><td class="num" style="color:var(--up);font-weight:600">62.7</td></tr>
-<tr class="hi"><td>messy, minus what three queries flagged</td><td class="num">1,199</td><td class="num">79</td><td class="num">75</td><td class="num">85</td><td class="num">69</td><td class="num"><b>77.0</b></td></tr>
-<tr><td>messy, minus exactly the bad episodes (oracle)</td><td class="num">1,186</td><td class="num">84</td><td class="num">86</td><td class="num">80</td><td class="num">71</td><td class="num">80.2</td></tr>
+<tr><td>clean</td><td class="num">1,693</td><td class="num">91</td><td class="num">87</td><td class="num">88</td><td class="num">78</td><td class="num"><b>86.0</b></td></tr>
+<tr class="hi"><td>messy, nothing removed</td><td class="num">1,693</td><td class="num">74</td><td class="num">71</td><td class="num" style="color:var(--up);font-weight:600">48</td><td class="num">58</td><td class="num" style="color:var(--up);font-weight:600">62.7</td></tr>
+<tr class="hi"><td>messy, flagged episodes removed</td><td class="num">1,199</td><td class="num">79</td><td class="num">75</td><td class="num">85</td><td class="num">69</td><td class="num"><b>77.0</b></td></tr>
+<tr><td>messy, exactly the broken episodes removed (cheats)</td><td class="num">1,186</td><td class="num">84</td><td class="num">86</td><td class="num">80</td><td class="num">71</td><td class="num">80.2</td></tr>
 </tbody></table></div>
-<p class="cap">Success rate in %, 100 rollouts per suite. Same seed, same recipe, same steps for every row. The
-oracle row uses the hidden list of broken episodes, which no real dataset comes with.</p></div>
+<p class="cap">Success rate in %, 100 rollouts per suite. Same seed, same recipe, same steps for every row.</p></div>
 
 <div class="w">
-<p>The mess cost 23 points. Three queries on the table got 14 back, and on the goal suite, where several tasks share
-one scene and differ only in the instruction, almost all of it: 48 to 85. The oracle shows what perfect cleaning
-would have bought: 80.2, so roughly 3 of the remaining 9 points come from the 33 bad episodes that slipped through and
-roughly 6 from training on 30% fewer episodes.</p>
+<p>Breaking 30% of the data cost 23 points, from 86.0 to 62.7. Removing what the three columns flagged brought back 14 of
+them, to 77.0. Removing exactly the broken episodes would have reached 80.2, so the columns got most of the way to the
+ceiling. The remaining gap to the clean model is mostly the price of training on 30% fewer episodes, not of bad data left
+behind.</p>
+
+<p>The biggest recovery is on the goal suite, where several tasks share one scene and differ only in the instruction. A
+wrong label there is fatal, and removing the flagged episodes took success from 48 back to 85.</p>
 </div>
 
 <div class="wide"><figure>
 <video controls muted loop playsinline preload="metadata" poster="{{POSTER_LIBERO}}" class="vid"><source src="{{VIDEO_LIBERO}}" type="video/mp4"></video>
-<figcaption>"Put the bowl on top of the cabinet", the same rollout for two models. Left: trained on the messy data, it
-hovers over the stove and never picks up the bowl, 0 out of 10. Right: trained after the flagged episodes were dropped,
-it carries the bowl to the cabinet, 8 out of 10.</figcaption>
+<figcaption>&ldquo;Put the bowl on top of the cabinet&rdquo;, the same rollout for two models. Left: trained on the messy
+data, it hovers over the stove and never picks up the bowl, 0 out of 10. Right: trained after the flagged episodes were
+removed, it carries the bowl to the cabinet, 8 out of 10.</figcaption>
 </figure></div>
-
-<div class="w">
-<p>The three queries are the same mechanism as the columns above: one column and one rule per defect, thresholds
-set as robust z-scores within each task, and nothing that knows which episodes were broken.</p>
-
-<ul>
-<li><b>Jitter</b> gets a per-frame <code>jerk_score</code>, how much the arm command changes between frames. Episodes
-far above their task's median are flagged.</li>
-<li><b>Out of sync</b> gets a per-episode <code>act_lag</code>: how many frames you have to shift the commanded motion
-before it best explains the motion the robot actually made. Clean logs peak at zero.</li>
-<li><b>Wrong instruction</b> gets a per-episode <code>goal_dist</code>: how far the last frame's embedding sits from the
-median last frame of every other episode with the same label.</li>
-</ul>
-
-<div class="snip"><p class="lbl">three columns, one filter</p>
-<pre><code>frames.merge(per_frame,   left_on="index",         right_on="index")          # jerk_score
-frames.merge(per_episode, left_on="episode_index", right_on="episode_index")  # act_lag, goal_dist, quality_flag
-
-keep = frames.to_table(columns=["episode_index"],
-                       filter="quality_flag = 'ok'")   # 1,199 episodes -> --dataset.episodes</code></pre>
-<p class="out">0.2 s to write the columns &#183; table version 1 &rarr; 6 &#183; no video touched &#183; the trainer reads the episode list, nothing is copied</p></div>
-</div>
 
 <div class="wide"><div class="tw"><table>
 <thead><tr><th>defect</th><th>rule</th><th class="num">precision</th><th class="num">recall</th><th class="num">missed</th></tr></thead>
 <tbody>
 <tr><td>out of sync</td><td><code>act_lag &ge; 2</code></td><td class="num">1.00</td><td class="num">1.00</td><td class="num">0 of 169</td></tr>
-<tr><td>jittery actions</td><td><code>jerk_score</code> z &gt; 3</td><td class="num">0.91</td><td class="num">1.00</td><td class="num">0 of 169</td></tr>
+<tr><td>shaky arm commands</td><td><code>jerk_score</code> z &gt; 3</td><td class="num">0.91</td><td class="num">1.00</td><td class="num">0 of 169</td></tr>
 <tr><td>wrong instruction</td><td><code>goal_dist</code> z &gt; 3</td><td class="num">0.85</td><td class="num">0.78</td><td class="num">38 of 169</td></tr>
 <tr class="hi"><td><b>any defect</b></td><td>any flag</td><td class="num"><b>0.96</b></td><td class="num"><b>0.93</b></td><td class="num">33 of 507</td></tr>
 </tbody></table></div>
-<p class="cap">Graded against the hidden list. 20 clean episodes were dropped by mistake, 33 broken ones stayed in.</p></div>
+<p class="cap">How well the flags matched what we actually broke. Precision is the share of flagged episodes that were really
+broken. Recall is the share of broken episodes that were flagged.</p></div>
 
 <div class="w">
-<p>The weak spot is worth knowing. Almost every wrong label that slipped through is in the spatial suite, where all ten
-tasks end with the same bowl on the same plate, so the last frame cannot tell the labels apart and neither can a check
-built on it.</p>
+<p>The flags were right 96% of the time and caught 93% of the broken episodes. 20 clean episodes were dropped by mistake,
+and 33 broken ones stayed in. Almost all of the misses are wrong labels in the spatial suite, where all ten tasks end with
+the same bowl on the same plate. The last frame cannot tell those labels apart, so neither can a check built on it.</p>
 
-<div class="note">The mess here was injected. The three defect types are real ones, taken from what turns up in teleop
-collections, and the queries make no use of knowing they were there. The rates, 10% each, are ours. On your data the mix
-will differ, and so will which check does the work. The scripts that broke LIBERO and the ones that found the damage are
-in the <a href="https://github.com/lancedb/training/tree/lerobot-blog/examples/lerobot-lancedb-libero/messy">companion repo</a>.</div>
+<div class="note">The mess here was injected, and the 10% rates are ours. The three defect types are real ones from teleop
+collections, and the checks make no use of knowing they were there. On your data the mix will differ, and so will which
+column does the work. The scripts that broke LIBERO and the ones that found the damage are in the
+<a href="https://github.com/lancedb/training/tree/lerobot-blog/examples/lerobot-lancedb-libero/messy">companion repo</a>.</div>
 </div>
 
 <div class="w">
