@@ -7,7 +7,7 @@ the training table, and measures the whole thing with closed-loop success in the
 | step | script | what it does |
 |---|---|---|
 | 1 | `make_messy.py` | corrupts a disjoint random 10% of episodes per defect (30% total) and writes the truth to `messy_manifest.json`, outside the table |
-| 2 | `detect.py` | adds `jerk_score` (per frame), `act_lag`, `goal_dist` and `quality_flag` (per episode) to `frames.lance`; flags episodes with robust z-scores; grades the flags against the manifest |
+| 2 | `detect.py` | builds an `episodes` table (one row per episode) and declares `jerk_score`, `act_lag`, `goal_emb`, `goal_dist` and `quality_flag` on it with `add_columns`, then `backfill`s them; grades the flags against the manifest |
 | 3 | `train_arm.sh` | SmolVLA full fine-tune, 40,000 steps, batch 32, one GPU, same recipe for every arm |
 | 4 | `eval_arm.sh` | `lerobot-eval` closed-loop, 4 suites x 10 tasks x 10 rollouts, `n_action_steps=1` |
 | all | `run_messy.sh` | the three main arms end to end (clean / messy / curated), skipping finished stages |
@@ -24,21 +24,33 @@ Only the tabular frames table is rewritten, in the same row order. Videos are ha
 
 ## The detectors
 
-Each defect gets one column and one rule. Thresholds are robust z-scores (median / MAD) within
-task, 3.0 by default. Nothing reads the manifest except the final grading.
+Each defect gets one column and one rule. The columns live on an `episodes` table, one row per
+episode, next to `frames` and `videos`. Each is a Geneva UDF that takes an `episode_index` and reads
+that episode's frames from the frames table; `goal_dist` and `quality_flag` read the episodes table
+itself, because they compare an episode with the other episodes of its task. Nothing is merged into
+the frames table. Thresholds are robust z-scores (median / MAD) within task, 3.0 by default. Nothing
+reads the manifest except the final grading.
 
 | defect | column | rule | precision | recall |
 |---|---|---|---|---|
 | misaligned | `act_lag`: the lag (0..10 frames) at which commanded translation best correlates with the observed end-effector displacement | best lag >= 2 and gain > 0.05 | 1.00 | 1.00 |
-| action_noise | `jerk_score`: per-frame sum of |d action| over the arm dims, averaged per episode | z > 3 within task | 0.91 | 1.00 |
+| action_noise | `jerk_score`: episode mean of the frame-to-frame sum of |d action| over the arm dims | z > 3 within task | 0.91 | 1.00 |
 | label_swap | `goal_dist`: cosine distance of the mean SigLIP2 embedding of the last 3 frames to the median of every other episode with the same label | z > 3 within task | 0.85 | 0.78 |
 | any | `quality_flag != 'ok'` | | **0.96** | **0.93** |
 
 494 of 1,693 episodes flagged: 474 truly bad, 20 clean. 33 bad episodes slipped through, 38 of them
 label swaps, almost all in `libero_spatial`, where every task ends with the same bowl on the same
-plate so the final frame cannot separate the labels. Writing the four columns took 0.2 s (table
-version 1 -> 6). A first version of the misalignment check used a plain correlation threshold and
-flagged 59 clean episodes; the lag test replaced it.
+plate so the final frame cannot separate the labels. A first version of the misalignment check used
+a plain correlation threshold and flagged 59 clean episodes; the lag test replaced it.
+
+**Status of the episodes-table version of `detect.py`.** The published numbers above were produced
+by an earlier version that computed the scores in one numpy pass and merged them into `frames.lance`.
+The current script computes the same maths as per-episode UDFs. The two were checked against each
+other on data readable from S3: on `pusht-lance` (all 206 episodes) every score matches to 1e-8 both
+when the UDFs are called directly and through `geneva` `add_columns` + `backfill`, and the flagged
+lists are identical; on a 20-episode DROID sample the jerk and lag scores match likewise. The scripts
+for that check are in `equivalence/`. The LIBERO run itself has not been repeated yet: `detect.py`
+compares its kept list against `results/curation_episodes.csv` and reports whether it reproduces it.
 
 ## Results (4xH100, SmolVLA, 40k steps each, 400 rollouts per model)
 
