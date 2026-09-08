@@ -296,12 +296,12 @@ already shuffles globally, but streaming is the only option that does not downlo
 <th class="num">Lance, S3</th><th class="num">upstream, local</th><th class="num">same job</th>
 <th class="num">streaming</th><th class="num">vs streaming</th></tr></thead>
 <tbody>
-<tr class="hi"><td><b>DROID</b></td><td class="num">27,630,375</td><td class="num">3</td><td class="num">2,258.5</td><td class="num">346.7</td><td class="num" style="color:var(--lance);font-weight:600">6.51&times;</td><td class="num">898.6</td><td class="num">1.7&times;</td></tr>
-<tr><td>berkeley_rpt</td><td class="num">392,578</td><td class="num">1</td><td class="num">1,740.6</td><td class="num">1,209.9</td><td class="num">1.44&times;</td><td class="num">274.5</td><td class="num">6.3&times;</td></tr>
-<tr><td>toto</td><td class="num">325,699</td><td class="num">1</td><td class="num">1,097.0</td><td class="num">936.3</td><td class="num">1.17&times;</td><td class="num">121.3</td><td class="num">9.0&times;</td></tr>
-<tr><td>roboturk</td><td class="num">187,507</td><td class="num">1</td><td class="num">1,276.8</td><td class="num">1,082.3</td><td class="num">1.18&times;</td><td class="num">128.2</td><td class="num">10.0&times;</td></tr>
-<tr><td>aloha_mobile_cabinet</td><td class="num">127,500</td><td class="num">3</td><td class="num">815.7</td><td class="num">294.2</td><td class="num" style="color:var(--lance);font-weight:600">2.77&times;</td><td class="num">77.7</td><td class="num">10.5&times;</td></tr>
-<tr><td>koch_pick_place</td><td class="num">37,972</td><td class="num">2</td><td class="num">854.7</td><td class="num">274.9</td><td class="num">3.11&times;</td><td class="num">58.1</td><td class="num">14.7&times;</td></tr>
+<tr class="hi"><td><b>DROID</b></td><td class="num">27,630,375</td><td class="num">3</td><td class="num">2,258.5</td><td class="num">346.7</td><td class="num" style="color:var(--lance);font-weight:600">6.51&times;</td><td class="num">898.6</td><td class="num">2.51&times;</td></tr>
+<tr><td>berkeley_rpt</td><td class="num">392,578</td><td class="num">1</td><td class="num">1,740.6</td><td class="num">1,209.9</td><td class="num">1.44&times;</td><td class="num">274.5</td><td class="num">6.34&times;</td></tr>
+<tr><td>toto</td><td class="num">325,699</td><td class="num">1</td><td class="num">1,097.0</td><td class="num">936.3</td><td class="num">1.17&times;</td><td class="num">121.3</td><td class="num">9.04&times;</td></tr>
+<tr><td>roboturk</td><td class="num">187,507</td><td class="num">1</td><td class="num">1,276.8</td><td class="num">1,082.3</td><td class="num">1.18&times;</td><td class="num">128.2</td><td class="num">9.96&times;</td></tr>
+<tr><td>aloha_mobile_cabinet</td><td class="num">127,500</td><td class="num">3</td><td class="num">815.7</td><td class="num">294.2</td><td class="num" style="color:var(--lance);font-weight:600">2.77&times;</td><td class="num">77.7</td><td class="num">10.50&times;</td></tr>
+<tr><td>koch_pick_place</td><td class="num">37,972</td><td class="num">2</td><td class="num">854.7</td><td class="num">274.9</td><td class="num">3.11&times;</td><td class="num">58.1</td><td class="num">14.71&times;</td></tr>
 </tbody></table></div>
 <p class="cap">Samples per second. <b>same job</b> means both sides do a map-style global shuffle, but
 Lance reads from S3 and upstream reads from local disk after a full download, so the comparison is
