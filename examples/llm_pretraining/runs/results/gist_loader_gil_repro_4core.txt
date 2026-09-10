@@ -1,0 +1,14 @@
+400,000 docs | cpu_count=4 | lancedb 0.38.0
+io_queue_depth sweep (I/O threads = splits x io_queue_depth), transform_parallelism=2:
+  splits= 16 io_queue_depth=1 transform_parallelism=  2 | threads   20 | 1,004,828 tok/s | packer CPU 0.31 | process CPU 2.13 | raw queue   61104 rows | unread  285344
+  splits= 16 io_queue_depth=2 transform_parallelism=  2 | threads   36 |   631,373 tok/s | packer CPU 0.25 | process CPU 2.32 | raw queue  104432 rows | unread  259976
+  splits= 16 io_queue_depth=4 transform_parallelism=  2 | threads   68 |   441,093 tok/s | packer CPU 0.23 | process CPU 2.56 | raw queue  149792 rows | unread  224768
+  splits= 16 io_queue_depth=8 transform_parallelism=  2 | threads  132 |   270,619 tok/s | packer CPU 0.19 | process CPU 2.70 | raw queue  168776 rows | unread  214712
+transform_parallelism sweep (Arrow->Python threads), io_queue_depth=1:
+  splits= 16 io_queue_depth=1 transform_parallelism=  1 | threads   19 | 1,016,262 tok/s | packer CPU 0.32 | process CPU 2.15 | raw queue   67704 rows | unread  282592
+  splits= 16 io_queue_depth=1 transform_parallelism=  2 | threads   20 |   976,447 tok/s | packer CPU 0.32 | process CPU 2.12 | raw queue   58736 rows | unread  289152
+  splits= 16 io_queue_depth=1 transform_parallelism=  4 | threads   22 |   960,193 tok/s | packer CPU 0.31 | process CPU 2.08 | raw queue   48488 rows | unread  291856
+  splits= 16 io_queue_depth=1 transform_parallelism= 16 | threads   34 |   690,753 tok/s | packer CPU 0.23 | process CPU 1.83 | raw queue       0 rows | unread  321520
+  splits= 16 io_queue_depth=1 transform_parallelism=  4 | threads   22 |   996,140 tok/s | packer CPU 0.33 | process CPU 2.11 | raw queue   50792 rows | unread  287304
+If 'raw queue' and 'process CPU' rise while 'tok/s' and 'packer CPU' fall, the threads are not waiting on
+storage and are not idle: they are taking the interpreter lock from the one thread that produces blocks.

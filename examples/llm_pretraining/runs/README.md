@@ -6,7 +6,8 @@ credentials and is not committed).
 
 - `prep_small.sh`, `prep_large.sh` — timed ingest -> curate -> Geneva tokenize
 - `bench_small.sh`, `loader_knobs.py` — loader-only sweeps (see `../LOADER_TUNING.md`)
-- `loader_knobs_repro.py` — self-contained, CPU-only reproduction of *why* the knobs matter (packer GIL share, process CPU, queue depths per setting); output in `results/loader_knobs_repro_4core.txt`
+- `loader_knobs_repro.py` — CPU-only reproduction of *why* the knobs matter on this example's table (packer GIL share, process CPU, queue depths, `_commit_pack_state` share per setting); output in `results/loader_knobs_repro_4core.txt`
+- `gist_loader_gil_repro.py` — the same finding as a single file with no dependency on this repo (builds its own synthetic token table; `pip install lancedb torch pyarrow`), gist-ready; output in `results/gist_loader_gil_repro_4core.txt`
 - `train_small.sh`, `train_large.sh` — the 8-GPU training commands
 - `ab_run.sh`, `ab_matrix.sh`, `gpu_sampler.sh`, `gpu_summary.py` — loader A/B with `nvidia-smi` sampling
 - `resume_demo.sh` — kill -9 on 8 GPUs, resume on 4
