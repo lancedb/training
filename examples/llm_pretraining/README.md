@@ -36,7 +36,7 @@ a preprocessing job.
 | `ingest.py` | Stream a corpus (FineWeb-Edu or synthetic) into a Lance table |
 | `curate.py` | SQL EDA, BM25 full-text search, dedup flag as a zero-copy column |
 | `tokenize_data.py` | Tokenize once; store `input_ids` as a zero-copy column |
-| `geneva_backfill.py` | Distributed, checkpointed tokenization via Geneva (Ray) |
+| `geneva_backfill.py` | Distributed, checkpointed Geneva (Ray) backfills: `is_dup`, `input_ids`, `n_tokens`, GPU `embedding` — same two calls for every column |
 | `train.py` | torchrun-ready pretraining with `lancedb.streaming.StreamingDataset` |
 | `bench_loader.py` | Loader-only throughput probe (tune `read_batch_size`/splits) |
 | `sample.py` | Generate text from a trained checkpoint |
@@ -130,11 +130,15 @@ exact data version it saw (`db.open_table(name).checkout(v)`), and the raw
 `text` column is still right there for FTS/vector retrieval, data forensics,
 and eval-set inspection after training.
 
-This example backfills columns with `tbl.to_lance().add_columns(udf)` to
-stay zero-extra-dependency and offline-runnable. For real feature
-engineering — GPU UDFs, checkpointed distributed backfills, laptop-Ray to
-KubeRay with the same code — use [Geneva](https://github.com/lancedb/geneva);
-the [object-detection example](../../object-detection/) shows that flow.
+The offline scripts (`curate.py`, `tokenize_data.py`) backfill columns with
+`tbl.to_lance().add_columns(udf)` to stay zero-extra-dependency and runnable
+on a laptop. `geneva_backfill.py` writes the same columns — the `is_dup`
+flag, the tokens, the token count and a GPU embedding — as
+[Geneva](https://github.com/lancedb/geneva) backfills: declare the column
+with `add_columns`, fill it with `backfill`, checkpointed and distributed
+over Ray, laptop-Ray to KubeRay with the same code. The 8-GPU runs used the
+Geneva path; the [object-detection example](../../object-detection/) shows
+the same flow on images.
 
 
 ## Results: 8x H100, lancedb 0.38 (merged sequence packing)

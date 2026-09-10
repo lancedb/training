@@ -1,9 +1,13 @@
-"""Tokenize the corpus with Geneva: distributed, checkpointed UDF backfill.
+"""Add columns to the corpus with Geneva: distributed, checkpointed UDF backfill.
 
-The production-scale alternative to tokenize_data.py.  Geneva registers the
-token columns on the same Lance table and populates them with a Ray-parallel
-backfill job that checkpoints as it goes — safe to re-run (already-computed
-rows are skipped) and safe to kill mid-job.
+The production-scale alternative to curate.py's dedup flag and to
+tokenize_data.py.  Every column here follows the same two calls — declare it
+with ``add_columns``, fill it with ``backfill`` — whether the UDF is a
+three-line membership check (``is_dup``), a tokenizer (``input_ids``,
+``n_tokens``) or a GPU embedding model (``embedding``).  Geneva registers the
+column on the same Lance table and populates it with a Ray-parallel backfill
+job that checkpoints as it goes — safe to re-run (already-computed rows are
+skipped) and safe to kill mid-job.  Only the new column is written.
 
 Runs in its own environment (Geneva bundles Ray):
     uv venv .venv-geneva --python 3.12
@@ -11,6 +15,7 @@ Runs in its own environment (Geneva bundles Ray):
 
 Usage
 -----
+.venv-geneva/bin/python geneva_backfill.py --columns is_dup             # dedup flag
 .venv-geneva/bin/python geneva_backfill.py --tokenizer hf:gpt2 --concurrency 16
 .venv-geneva/bin/python geneva_backfill.py --tokenizer byte      # offline smoke
 """
@@ -61,6 +66,19 @@ def _n_tokens(input_ids: pa.Array) -> pa.Array:
     return pc.cast(pc.list_value_length(input_ids), pa.int32())
 
 
+@udf(data_type=pa.bool_(), input_columns=["id"])
+class _IsDup:
+    """Exact-dedup flag.  Pass 1 (``curate.find_duplicate_ids``) runs once on
+    the driver and finds the repeated ids; this UDF is pass 2, shipped to every
+    worker with that set, and marks each row."""
+
+    def __init__(self, dup_ids: set[int]):
+        self.dup_ids = dup_ids
+
+    def __call__(self, id: pa.Array) -> pa.Array:
+        return pa.array([i in self.dup_ids for i in id.to_pylist()], pa.bool_())
+
+
 @udf(
     data_type=pa.list_(pa.float32(), 384),
     input_columns=["text"],
@@ -101,7 +119,7 @@ def main(argv=None) -> None:
         "--columns",
         nargs="+",
         default=["input_ids", "n_tokens"],
-        help="which columns to backfill (input_ids, n_tokens, embedding)",
+        help="which columns to backfill (is_dup, input_ids, n_tokens, embedding)",
     )
     args = parser.parse_args(argv)
 
@@ -117,6 +135,13 @@ def main(argv=None) -> None:
     print(f"table '{args.table}': {tbl.count_rows():,} rows, v{tbl.version}")
 
     registry = {"input_ids": tokenize_udf, "n_tokens": _n_tokens, "embedding": _EmbedGPU()}
+    if "is_dup" in args.columns:
+        from curate import find_duplicate_ids
+
+        t0 = time.perf_counter()
+        dup_ids = find_duplicate_ids(tbl)
+        print(f"[dedup] pass 1: {len(dup_ids):,} duplicate ids in {time.perf_counter() - t0:,.1f}s")
+        registry["is_dup"] = _IsDup(dup_ids)
     registry = {c: registry[c] for c in args.columns}
     missing = {c: u for c, u in registry.items() if c not in set(tbl.schema.names)}
     if missing:

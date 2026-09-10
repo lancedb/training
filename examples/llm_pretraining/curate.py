@@ -42,17 +42,13 @@ def full_text_search(tbl, query: str) -> None:
         print(f"  id={h['id']:<8} quality={h['score']:.2f} bm25={h['_score']:.3f}")
 
 
-def flag_duplicates(tbl, db_uri: str, table_name: str) -> None:
-    """Exact-dedup on normalized text; write the flag as a new column.
+def find_duplicate_ids(tbl) -> set[int]:
+    """Pass 1 of exact dedup: scan only (id, text), keep the first occurrence
+    of each whitespace-normalized content hash, return the ids of the rest.
 
-    Pass 1 scans only (id, text) and keeps the first occurrence of each
-    content hash.  Pass 2 backfills an ``is_dup`` column with a Python UDF
-    through the underlying Lance dataset — LanceDB's own add_columns takes
-    SQL expressions, so computed columns drop down to ``tbl.to_lance()``.
+    Shared by the offline path below and by ``geneva_backfill.py``, which
+    turns the same set into an ``is_dup`` column with a Geneva UDF.
     """
-    banner("DEDUP -> zero-copy `is_dup` column")
-    files_before, bytes_before = data_file_stats(db_uri, table_name)
-
     seen: set[str] = set()
     dup_ids: set[int] = set()
     for batch in tbl.search().select(["id", "text"]).to_batches(1024):
@@ -64,6 +60,23 @@ def flag_duplicates(tbl, db_uri: str, table_name: str) -> None:
                 dup_ids.add(rid)
             else:
                 seen.add(h)
+    return dup_ids
+
+
+def flag_duplicates(tbl, db_uri: str, table_name: str) -> None:
+    """Exact-dedup on normalized text; write the flag as a new column.
+
+    Pass 2 backfills an ``is_dup`` column with a Python UDF through the
+    underlying Lance dataset — LanceDB's own add_columns takes SQL
+    expressions, so computed columns drop down to ``tbl.to_lance()``.
+    This keeps the offline path dependency-free; ``geneva_backfill.py
+    --columns is_dup`` writes the same column as a distributed Geneva
+    backfill.
+    """
+    banner("DEDUP -> zero-copy `is_dup` column")
+    files_before, bytes_before = data_file_stats(db_uri, table_name)
+
+    dup_ids = find_duplicate_ids(tbl)
 
     def is_dup_udf(batch: pa.RecordBatch) -> pa.RecordBatch:
         flags = [rid in dup_ids for rid in batch.column("id").to_pylist()]
