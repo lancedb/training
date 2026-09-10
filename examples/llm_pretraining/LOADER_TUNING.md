@@ -72,6 +72,33 @@ Upstream suggestions, in order of payoff:
    (every owned split has emitted the same block count) — callers must
    checkpoint on micro-batch boundaries that are multiples of `owned_splits`.
 
+## Mechanism, reproduced on 4 cores (`runs/loader_knobs_repro.py`)
+
+The knob effects above are a GIL-share effect, not an I/O or core-count
+effect. `runs/loader_knobs_repro.py` shows this on any machine: one packed
+iterator, 20 s per setting, recording throughput, the CPU share the packer
+(main) thread got, the CPU the whole process burned, and queue depths.
+Raw output from a 4-core box with a 700k-doc synthetic corpus is in
+`runs/results/loader_knobs_repro_4core.txt`; the `io_queue_depth` sweep:
+
+| io_queue_depth | threads | tok/s | packer CPU share | process CPU | raw rows queued |
+|---|---|---|---|---|---|
+| 1 | 20 | **1.07M** | **0.46** | 2.1 | 63k |
+| 2 | 36 | 793k | 0.40 | 2.5 | 103k |
+| 4 | 68 | 506k | 0.32 | 2.7 | 128k |
+| 8 | 132 | 407k | 0.32 | 2.9 | 141k |
+
+More I/O threads read *more* rows ahead (storage is not the limit), burn
+*more* CPU (they are busy, not idle) and deliver *fewer* blocks, while the
+packer thread's share of a CPU falls. The packer is the serial stage; every
+completed read and every Arrow->Python transform takes the GIL from it to do
+work that cannot speed up the output. Process CPU never exceeds 3 of 4 cores,
+so this is lock serialization, not core oversubscription. Transform threads
+1 -> 16: -20% tok/s, packer share 0.43 -> 0.30. Splits 16 -> 64: -20%,
+`_commit_pack_state` 3% -> 9% of packer time (4 splits is also slow: too few
+reads in flight). When the reader finishes the table and the packer runs
+alone, the same iterator does 2.7M tok/s — the ceiling contention costs.
+
 ## Memory and GC: cap the post-transform queue on long runs
 
 The 354M run (13,351 steps, 1h37m) showed periodic slow windows — 0.8-1.1M

@@ -6,6 +6,7 @@ credentials and is not committed).
 
 - `prep_small.sh`, `prep_large.sh` — timed ingest -> curate -> Geneva tokenize
 - `bench_small.sh`, `loader_knobs.py` — loader-only sweeps (see `../LOADER_TUNING.md`)
+- `loader_knobs_repro.py` — self-contained, CPU-only reproduction of *why* the knobs matter (packer GIL share, process CPU, queue depths per setting); output in `results/loader_knobs_repro_4core.txt`
 - `train_small.sh`, `train_large.sh` — the 8-GPU training commands
 - `ab_run.sh`, `ab_matrix.sh`, `gpu_sampler.sh`, `gpu_summary.py` — loader A/B with `nvidia-smi` sampling
 - `resume_demo.sh` — kill -9 on 8 GPUs, resume on 4
