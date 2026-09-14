@@ -57,23 +57,3 @@ torchrun --nproc-per-node 4 train.py ... --batch-size 64 --resume auto        # 
 python build_packed_datasets.py --db ./lance_pretrain_db --out ./blocks --workers 8
 torchrun --nproc-per-node 8 train.py --blocks-mode mosaic --blocks-path ./blocks/mds_blocks ...
 ```
-
-Loader settings: `--io-queue-depth 1 --transform-parallelism 2` and 16 splits
-per rank. The library defaults spawn hundreds of threads per rank that take
-the interpreter lock from the single packer thread; `loader_gil_repro.py`
-shows the effect in two minutes on any machine.
-
-## Known rough edges
-
-- Packed `state_dict()` needs every owned split at the same block count:
-  checkpoint on optimizer steps where `batch_size x grad_accum` is a multiple
-  of the rank's split count (with workers, `ckpt_every x grad_accum` a
-  multiple of `num_workers`).
-- `--num-workers` uses `forkserver` or `spawn`, never `fork`, inside CUDA
-  ranks. Workers dying at start-up with `SemLock._rebuild ->
-  FileNotFoundError` means the host's `systemd-logind` has `RemoveIPC=yes`;
-  set `RemoveIPC=no` in `/etc/systemd/logind.conf.d/`.
-- Building the permutation over ~16M filtered rows needs
-  `LANCEDB_PERM_BUILDER_MEMORY_LIMIT` raised from its 100MB default.
-- Interpreter exit can hang after a worker-process run; `train.py` calls
-  `os._exit(0)` once checkpoints and the final eval are written.
