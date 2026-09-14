@@ -15,28 +15,34 @@ Numbers and the write-up are in the blog post.
 | `curate.py` | SQL EDA, full-text index, exact-dedup flag as a new column |
 | `tokenize_data.py` | Token ids + counts as new columns (single process) |
 | `geneva_backfill.py` | Same columns as distributed, checkpointed [Geneva](https://github.com/lancedb/geneva) backfills, plus a GPU embedding column |
-| `train.py` | torchrun-ready trainer; `--pack` for loader-side packing; `--blocks-mode` for the loader A/B |
+| `train.py` | torchrun-ready trainer; `--pack` for loader-side packing; `--resume auto` on any world size dividing `num_splits`; `--blocks-mode` for the loader A/B |
 | `model.py`, `common.py`, `sample.py` | Compact GPT, shared helpers, text sampling |
-| `verify_e2e.py` | Offline CPU check of the whole pipeline (~2 min, 16 assertions) |
-| `elastic_pack_check.py` | Packed runs: identical global steps at any world size, resume across world sizes |
-| `bench_loader.py` | Loader-only throughput for one setting |
-| `build_packed_datasets.py`, `blocks_loaders.py`, `mosaic_compare.py` | A/B controls: identical pre-packed blocks as Parquet, pre-shuffled Parquet, MDS and Lance; their loaders; Mosaic determinism/resume checks |
-| `forensics.py` | Vector index, hybrid search, generation attribution, near-duplicates |
+| `build_packed_datasets.py`, `blocks_loaders.py` | A/B controls: identical pre-packed blocks as Parquet, pre-shuffled Parquet, MDS shards and a Lance table, plus the Parquet loaders |
+| `forensics.py` | Vector index, hybrid search, generation attribution, near-duplicates on the training table |
 | `loader_gil_repro.py` | Standalone, CPU-only reproduction of why fewer loader threads are faster |
 
 ## Setup
 
 ```bash
 uv venv .venv --python 3.11 && source .venv/bin/activate
-uv pip install -e .                       # `-e .[hf]` for FineWeb-Edu + HF tokenizers
+uv pip install -e .                       # `-e .[hf]` for FineWeb-Edu + HF tokenizers, `-e .[ab]` for the Mosaic control
 uv venv .venv-geneva --python 3.12 && uv pip install --python .venv-geneva/bin/python geneva "transformers>=4.40"
 ```
 
 ## Run
 
-```bash
-python verify_e2e.py                                              # offline, CPU
+Offline smoke test on a laptop (synthetic corpus, byte tokenizer, tiny model):
 
+```bash
+python ingest.py --source synthetic --rows 5000
+python curate.py
+python tokenize_data.py --tokenizer byte
+python train.py --model tiny --pack --seq-len 256 --steps 40
+```
+
+Real corpus and the 8-GPU configuration behind the reported numbers:
+
+```bash
 python ingest.py --source fineweb-parquet --sample 10BT --files 4 --rows 2400000
 python curate.py
 .venv-geneva/bin/python geneva_backfill.py --tokenizer hf:gpt2 --concurrency 32   # or tokenize_data.py
@@ -46,11 +52,10 @@ torchrun --nproc-per-node 8 train.py --model small --tokenizer hf:gpt2 \
     --num-splits 128 --read-batch-size 8 --io-queue-depth 1 --transform-parallelism 2 \
     --transform-queue-depth 16 --num-workers 2 --ckpt-every 1000 --eval-every 1500
 
-torchrun --nproc-per-node 4 train.py ... --batch-size 64 --resume auto        # any world size dividing num_splits
+torchrun --nproc-per-node 4 train.py ... --batch-size 64 --resume auto        # same global batch, half the GPUs
 
 python build_packed_datasets.py --db ./lance_pretrain_db --out ./blocks --workers 8
 torchrun --nproc-per-node 8 train.py --blocks-mode mosaic --blocks-path ./blocks/mds_blocks ...
-python elastic_pack_check.py --db ./lance_pretrain_db --num-splits 128 --ws 8 4
 ```
 
 Loader settings: `--io-queue-depth 1 --transform-parallelism 2` and 16 splits

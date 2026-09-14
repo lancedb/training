@@ -5,7 +5,7 @@ tokenization, training, retrieval — works against this same table.
 
 Usage
 -----
-# Offline synthetic corpus (used by verify_e2e.py):
+# Offline synthetic corpus (laptop smoke test):
 python ingest.py --source synthetic --rows 5000
 
 # Real corpus (FineWeb-Edu, streamed from HuggingFace — needs network):

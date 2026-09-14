@@ -2,8 +2,8 @@
 
 Usage
 -----
-Imported by ingest.py, curate.py, tokenize_data.py, train.py, and
-verify_e2e.py.  Not a script.
+Imported by ingest.py, curate.py, tokenize_data.py and train.py.  Not a
+script.
 """
 
 from __future__ import annotations

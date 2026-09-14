@@ -308,7 +308,7 @@ def blocks_to_rows(batch: pa.RecordBatch, seq_len: int) -> list[dict]:
 
 
 def run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok) -> None:
-    """Identical-samples A/B: same trainer, loader swapped (see mosaic_compare)."""
+    """Identical-samples A/B: same trainer, loader swapped (see build_packed_datasets.py)."""
     import functools
 
     global_batch = args.batch_size * world_size
