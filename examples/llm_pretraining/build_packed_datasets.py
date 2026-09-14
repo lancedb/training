@@ -1,8 +1,6 @@
 """Materialize identical pre-packed 1024-token blocks in every "standard
 workflow" format, from one deterministic pass over the curated Lance table.
 
-This pass is the materialization tax the incumbent workflows require: their
-loaders stream pre-packed, pre-shuffled samples, they do not pack or shuffle.
 Every output holds the byte-identical block set, so training A/Bs
 (`train.py --blocks-mode ...`) differ only in the loader.
 

@@ -16,7 +16,7 @@ while holding the GIL; that time comes straight out of the one thread that
 sets the pace.  Same story for transform_parallelism (pass --tx-sweep).
 
     pip install "lancedb>=0.38" torch pyarrow
-    python gist_loader_gil_repro.py            # ~2 min on a laptop
+    python loader_gil_repro.py                 # ~2 min on a laptop
 """
 
 import argparse

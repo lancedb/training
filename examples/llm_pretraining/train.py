@@ -1,23 +1,17 @@
 """Pretrain a GPT on a LanceDB table with the elastic StreamingDataset.
 
-The table is the dataset: no webdataset shards, no tokenized parquet copies,
-no manifest files.  Training reads only the `input_ids` column, prefiltered
-by SQL, streamed in a deterministic order — optionally sequence-packed by
-the loader itself (``pack_sequences``), so every trained position is a real
-token.
+Training reads only the `input_ids` column, prefiltered by SQL, in a
+deterministic order, optionally sequence-packed by the loader (--pack).
 
 Usage
 -----
-# Single process (debug / CPU smoke):
-python train.py --model tiny --steps 40
+python train.py --model tiny --steps 40                        # single process, CPU smoke
 
-# The blog run — GPT-2 124M, Chinchilla-ish 2.5B tokens, 4x H100:
-torchrun --nproc-per-node 4 train.py --model small --tokenizer hf:gpt2 \
-    --pack --compile --batch-size 32 --grad-accum 4 --seq-len 1024 \
-    --epochs 1 --ckpt-every 1000
+torchrun --nproc-per-node 8 train.py --model small --tokenizer hf:gpt2 \
+    --pack --compile --batch-size 32 --grad-accum 2 --seq-len 1024 --epochs 1 \
+    --num-splits 128 --io-queue-depth 1 --transform-parallelism 2 --num-workers 2
 
-# Kill it mid-run, then resume (same topology when --pack):
-torchrun --nproc-per-node 4 train.py ... --resume auto
+torchrun --nproc-per-node 4 train.py ... --batch-size 64 --resume auto   # any world size dividing num_splits
 """
 
 from __future__ import annotations
@@ -70,35 +64,28 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument(
         "--pack",
         action="store_true",
-        help="sequence packing in the loader (pack_sequences): EOS-joined "
-        "fixed-length blocks, no padding waste. Resume packed runs at the "
-        "same world_size",
+        help="sequence packing in the loader: EOS-joined fixed-length blocks; "
+        "resumable across world sizes",
     )
     p.add_argument(
         "--transform-queue-depth",
         type=int,
         default=0,
-        help="cap on post-transform rows buffered per split, in read batches "
-        "(loader default: unbounded). Long runs otherwise accumulate hundreds "
-        "of thousands of cooked rows per worker — GBs of Python ints that "
-        "trigger periodic multi-second GC pauses. 16 is plenty of headroom",
+        help="cap on post-transform rows per split, in read batches "
+        "(0 = loader default, unbounded; 16 avoids GC pauses on long runs)",
     )
     p.add_argument(
         "--num-workers",
         type=int,
         default=0,
-        help="DataLoader worker processes per rank via lancedb's "
-        "StreamingDataLoader: moves the (GIL-bound) packer off the training "
-        "thread; checkpoints are committed only for batches the trainer has "
-        "received, so state_dict() stays exact. num_splits must be divisible "
-        "by world_size * num_workers",
+        help="loader worker processes per rank (StreamingDataLoader); "
+        "num_splits must be divisible by world_size * num_workers",
     )
     p.add_argument(
         "--mp-context",
         default="forkserver",
         choices=["forkserver", "spawn"],
-        help="multiprocessing start method for --num-workers (fork is unsafe "
-        "with CUDA + lancedb's async runtime; forkserver is faster than spawn)",
+        help="start method for --num-workers (never fork under CUDA)",
     )
     p.add_argument("--compile", action="store_true", help="torch.compile the model")
     p.add_argument("--compile-mode", default="default", help="torch.compile mode, e.g. max-autotune")
@@ -137,17 +124,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--io-queue-depth",
         type=int,
         default=1,
-        help="I/O batches in flight per split (loader default 4). Threads = "
-        "splits x depth per rank; oversubscription costs more than latency "
-        "hiding gains on local NVMe",
+        help="I/O batches in flight per split (loader default 4); see LOADER_TUNING.md",
     )
     p.add_argument(
         "--transform-parallelism",
         type=int,
         default=2,
-        help="transform threads per rank (loader default = os.cpu_count()). "
-        "Packing is GIL-bound Python; 8 ranks x 112 threads starves the "
-        "pipeline",
+        help="transform threads per rank (loader default: cpu_count); see LOADER_TUNING.md",
     )
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument(
@@ -326,7 +309,6 @@ def blocks_to_rows(batch: pa.RecordBatch, seq_len: int) -> list[dict]:
 
 def run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok) -> None:
     """Identical-samples A/B: same trainer, loader swapped (see mosaic_compare)."""
-    import contextlib as _ctx
     import functools
 
     global_batch = args.batch_size * world_size
@@ -393,7 +375,7 @@ def run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok) ->
         ctx = (
             trainable.no_sync()
             if (world_size > 1 and not is_sync)
-            else _ctx.nullcontext()
+            else contextlib.nullcontext()
         )
         with ctx:
             loss, real = batch_loss(trainable, batch, device, tok.pad_token_id)

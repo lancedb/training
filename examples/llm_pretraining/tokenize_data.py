@@ -1,10 +1,7 @@
-"""Tokenize the corpus ONCE, storing token ids as a new column — zero-copy.
+"""Tokenize the corpus once, storing token ids and counts as new columns.
 
-This replaces the classic "materialize a tokenized+shuffled copy of the
-dataset" preprocessing step.  The `input_ids` column is appended to the same
-table via Lance's zero-copy schema evolution: raw text and token ids live
-side by side, no data is rewritten, and training reads only the columns it
-asks for.
+Single-process version; `geneva_backfill.py` writes the same columns as a
+distributed, checkpointed backfill. Nothing existing is rewritten.
 
 Usage
 -----
