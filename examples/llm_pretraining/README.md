@@ -7,8 +7,7 @@ retrieval all work on the same table. Derived signals are new columns
 sequence packing and shuffling happen inside the loader
 (`lancedb.streaming.StreamingDataset`, lancedb >= 0.38).
 
-Numbers and the write-up are in the blog post; the exact commands and raw
-outputs behind them are in [`runs/`](runs/).
+Numbers and the write-up are in the blog post.
 
 | File | Purpose |
 |---|---|
@@ -23,7 +22,7 @@ outputs behind them are in [`runs/`](runs/).
 | `bench_loader.py` | Loader-only throughput for one setting |
 | `build_packed_datasets.py`, `blocks_loaders.py`, `mosaic_compare.py` | A/B controls: identical pre-packed blocks as Parquet, pre-shuffled Parquet, MDS and Lance; their loaders; Mosaic determinism/resume checks |
 | `forensics.py` | Vector index, hybrid search, generation attribution, near-duplicates |
-| `runs/loader_gil_repro.py` | Standalone, CPU-only reproduction of why fewer loader threads are faster |
+| `loader_gil_repro.py` | Standalone, CPU-only reproduction of why fewer loader threads are faster |
 
 ## Setup
 
@@ -56,7 +55,7 @@ python elastic_pack_check.py --db ./lance_pretrain_db --num-splits 128 --ws 8 4
 
 Loader settings: `--io-queue-depth 1 --transform-parallelism 2` and 16 splits
 per rank. The library defaults spawn hundreds of threads per rank that take
-the interpreter lock from the single packer thread; `runs/loader_gil_repro.py`
+the interpreter lock from the single packer thread; `loader_gil_repro.py`
 shows the effect in two minutes on any machine.
 
 ## Known rough edges
