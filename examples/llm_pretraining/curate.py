@@ -15,6 +15,7 @@ import argparse
 import hashlib
 
 import pyarrow as pa
+from lancedb.index import FTS
 
 from common import DEFAULT_DB, DEFAULT_TABLE, banner, connect_table, data_file_stats
 
@@ -34,9 +35,9 @@ def eda(tbl) -> None:
 
 def full_text_search(tbl, query: str) -> None:
     banner(f"FULL-TEXT SEARCH: {query!r}")
-    tbl.create_fts_index("text", replace=True)
+    tbl.create_index("text", config=FTS(), replace=True)
     hits = (
-        tbl.search(query, query_type="fts").select(["id", "score"]).limit(3).to_list()
+        tbl.search(query, query_type="fts").select(["id", "score", "_score"]).limit(3).to_list()
     )
     for h in hits:
         print(f"  id={h['id']:<8} quality={h['score']:.2f} bm25={h['_score']:.3f}")

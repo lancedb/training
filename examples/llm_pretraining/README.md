@@ -25,8 +25,8 @@ Numbers and the write-up are in the blog post.
 
 ```bash
 uv venv .venv --python 3.11 && source .venv/bin/activate
-uv pip install -e .                       # `-e .[hf]` for FineWeb-Edu + HF tokenizers, `-e .[ab]` for the Mosaic control
-uv venv .venv-geneva --python 3.12 && uv pip install --python .venv-geneva/bin/python geneva "transformers>=4.40"
+uv pip install -e .
+uv venv .venv-geneva --python 3.12 && uv pip install --python .venv-geneva/bin/python geneva transformers sentence-transformers
 ```
 
 ## Run

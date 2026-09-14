@@ -27,6 +27,8 @@ import time
 
 import pyarrow as pa
 import pyarrow.compute as pc
+from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer
 
 import geneva
 from geneva.transformer import udf
@@ -47,8 +49,6 @@ class _TokenizeHF:
 
     def __call__(self, text: pa.Array) -> pa.Array:
         if self._tok is None:
-            from transformers import AutoTokenizer
-
             self._tok = AutoTokenizer.from_pretrained(self.model_name)
         encoded = self._tok(text.to_pylist())["input_ids"]
         return pa.array(encoded, type=pa.list_(pa.int32()))
@@ -95,8 +95,6 @@ class _EmbedGPU:
 
     def __call__(self, text: pa.Array) -> pa.Array:
         if self._model is None:
-            from sentence_transformers import SentenceTransformer
-
             self._model = SentenceTransformer(
                 "sentence-transformers/all-MiniLM-L6-v2", device="cuda"
             )

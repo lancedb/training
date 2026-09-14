@@ -9,15 +9,9 @@ dependencies = [
     "torch>=2.2.0",
     "pyarrow>=16.0.0",
     "numpy>=1.26.0",
-]
-
-[project.optional-dependencies]
-# Real-corpus runs: streaming FineWeb-Edu and HF tokenizers.
-hf = [
     "datasets>=2.19.0",
+    "huggingface_hub>=0.23.0",
     "transformers>=4.40.0",
-]
-# Loader A/B controls (build_packed_datasets.py, train.py --blocks-mode mosaic).
-ab = [
+    "sentence-transformers>=3.0.0",
     "mosaicml-streaming>=0.7",
 ]

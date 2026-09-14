@@ -30,6 +30,8 @@ import lancedb
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+from datasets import load_dataset
+from huggingface_hub import HfApi, hf_hub_download
 
 from common import DEFAULT_DB, DEFAULT_TABLE, banner
 
@@ -81,8 +83,6 @@ def synthetic_docs(rows: int, seed: int = 0, dup_fraction: float = 0.05):
 
 def fineweb_docs(rows: int):
     """Stream FineWeb-Edu from HuggingFace (requires network access)."""
-    from datasets import load_dataset  # optional [hf] extra
-
     ds = load_dataset(
         "HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=True
     )
@@ -108,8 +108,6 @@ def fineweb_parquet_batches(
     than at the speed of a Python row iterator.  ``id`` is assigned
     sequentially across files so the train/val split filters stay stable.
     """
-    from huggingface_hub import HfApi, hf_hub_download  # optional [hf] extra
-
     tree = HfApi().list_repo_tree(
         "HuggingFaceFW/fineweb-edu", f"sample/{sample}", repo_type="dataset"
     )
@@ -196,7 +194,7 @@ def main(argv=None) -> None:
     reader = pa.RecordBatchReader.from_batches(SCHEMA, batches)
 
     db = lancedb.connect(args.db)
-    if args.table in db.table_names():
+    if args.table in db.list_tables():
         db.drop_table(args.table)
     tbl = db.create_table(
         args.table,

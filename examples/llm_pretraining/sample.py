@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 
 import torch
+from transformers import AutoTokenizer
 
 from common import load_tokenizer
 from model import make_model
@@ -61,8 +62,6 @@ def main(argv=None) -> None:
     torch.manual_seed(args.seed)
     ids = generate(model, tok, args.prompt, args.tokens, args.temperature, args.top_k)
     if args.tokenizer.startswith("hf:"):
-        from transformers import AutoTokenizer
-
         print(AutoTokenizer.from_pretrained(args.tokenizer[3:]).decode(ids))
     else:
         print(bytes(i for i in ids if i < 256).decode("utf-8", errors="replace"))

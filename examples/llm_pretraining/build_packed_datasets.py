@@ -31,7 +31,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from lancedb.streaming import StreamingDataset
-from streaming import MDSWriter  # mosaicml-streaming, the optional [ab] extra
+from streaming import MDSWriter
 
 from common import TRAIN_FILTER, connect_table, load_tokenizer
 

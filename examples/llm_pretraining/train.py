@@ -34,6 +34,8 @@ import pyarrow.compute as pc
 import torch
 import torch.distributed as dist
 from lancedb.streaming import StreamingDataLoader, StreamingDataset
+from streaming import StreamingDataLoader as MosaicDL
+from streaming import StreamingDataset as MosaicSD
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
@@ -341,10 +343,7 @@ def run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok) ->
             workers = args.num_workers or 2
         loader = DataLoader(pds, batch_size=args.batch_size, num_workers=workers, prefetch_factor=4)
         ds = None
-    else:  # mosaicml-streaming is the optional [ab] extra
-        from streaming import StreamingDataset as MosaicSD
-        from streaming import StreamingDataLoader
-
+    else:
         kwargs = dict(
             batch_size=args.batch_size,
             shuffle=True,
@@ -360,7 +359,7 @@ def run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok) ->
             mds = MosaicSD(remote=args.blocks_path, local=cache, **kwargs)
         else:
             mds = MosaicSD(local=args.blocks_path, **kwargs)
-        loader = StreamingDataLoader(mds, batch_size=args.batch_size, num_workers=8)
+        loader = MosaicDL(mds, batch_size=args.batch_size, num_workers=8)
         ds = None
 
     trainable.train()

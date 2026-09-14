@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 
 import lancedb
+from transformers import AutoTokenizer
 
 DEFAULT_DB = os.environ.get("LANCE_PRETRAIN_DB", "./lance_pretrain_db")
 DEFAULT_TABLE = "corpus"
@@ -78,7 +79,6 @@ def load_tokenizer(spec: str):
     if spec == "byte":
         return ByteTokenizer()
     if spec.startswith("hf:"):
-        from transformers import AutoTokenizer
 
         tok = AutoTokenizer.from_pretrained(spec[3:])
 
