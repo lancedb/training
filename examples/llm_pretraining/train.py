@@ -18,13 +18,19 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import glob
+import hashlib
 import math
+import multiprocessing as mp
 import os
 import sys
 import time
 
+import lancedb
+import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import torch
 import torch.distributed as dist
 from lancedb.streaming import StreamingDataLoader, StreamingDataset
@@ -39,6 +45,7 @@ from common import (
     connect_table,
     load_tokenizer,
 )
+from blocks_loaders import ParquetRandomBlocks, ParquetSeqBlocks
 from model import make_model
 
 H100_BF16_FLOPS = 989e12  # dense peak, SXM
@@ -301,21 +308,15 @@ def flops_per_token(model) -> float:
 def blocks_to_rows(batch: pa.RecordBatch, seq_len: int) -> list[dict]:
     """Row transform for the pre-packed Lance blocks table (module-level so it
     pickles into DataLoader worker processes)."""
-    import numpy as np
-
     mat = batch.column("input_ids").values.to_numpy().reshape(-1, seq_len)
     return [{"input_ids": torch.from_numpy(r.astype(np.int64))} for r in mat]
 
 
 def run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok) -> None:
     """Identical-samples A/B: same trainer, loader swapped (see build_packed_datasets.py)."""
-    import functools
-
     global_batch = args.batch_size * world_size
     fpt = flops_per_token(model.module if hasattr(model, "module") else model)
     if args.blocks_mode == "lance":
-        import lancedb
-
         btbl = lancedb.connect(args.blocks_path).open_table("blocks")
         to_rows = functools.partial(blocks_to_rows, seq_len=args.seq_len)
         ds = StreamingDataset(
@@ -332,8 +333,6 @@ def run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok) ->
         )
         loader = make_loader(ds, args)
     elif args.blocks_mode.startswith("parquet"):
-        from blocks_loaders import ParquetRandomBlocks, ParquetSeqBlocks
-
         if args.blocks_mode == "parquet-random":
             pds = ParquetRandomBlocks(args.blocks_path, rank, world_size, args.shuffle_seed)
             workers = args.num_workers or 8  # concurrent readers hide per-row-group latency
@@ -342,7 +341,7 @@ def run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok) ->
             workers = args.num_workers or 2
         loader = DataLoader(pds, batch_size=args.batch_size, num_workers=workers, prefetch_factor=4)
         ds = None
-    else:
+    else:  # mosaicml-streaming is the optional [ab] extra
         from streaming import StreamingDataset as MosaicSD
         from streaming import StreamingDataLoader
 
@@ -355,8 +354,6 @@ def run_blocks_ab(args, rank, world_size, device, trainable, model, opt, tok) ->
         if args.blocks_path.startswith("s3://"):
             # One shared local cache per node (Mosaic's contract: rank 0 downloads
             # index.json / shards, the other local ranks wait for the same files).
-            import hashlib
-
             cache = os.path.expanduser(
                 f"~/mosaic_cache/{hashlib.md5(args.blocks_path.encode()).hexdigest()[:8]}"
             )
@@ -419,8 +416,6 @@ def main(argv=None) -> None:
         # Before any StreamingDataset exists: its shared-memory stats are
         # created in the *default* mp context, so make that the same
         # (non-fork) context the DataLoader workers will use.
-        import multiprocessing as mp
-
         mp.set_start_method(args.mp_context, force=True)
     rank, world_size, device = setup_distributed()
     is_main = rank == 0
@@ -520,8 +515,6 @@ def main(argv=None) -> None:
             .limit(train_rows)
             .to_arrow()
         )
-        import pyarrow.compute as pc
-
         total_tokens = pc.sum(toks.column("n_tokens")).as_py() + train_rows
         if args.blocks_per_epoch == "auto":
             blocks_per_epoch = "auto"

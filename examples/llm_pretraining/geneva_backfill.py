@@ -26,9 +26,12 @@ import argparse
 import time
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 import geneva
 from geneva.transformer import udf
+
+from curate import find_duplicate_ids
 
 DEFAULT_DB = "./lance_pretrain_db"
 DEFAULT_TABLE = "corpus"
@@ -61,8 +64,6 @@ def _tokenize_bytes(text: pa.Array) -> pa.Array:
 
 @udf(data_type=pa.int32(), input_columns=["input_ids"])
 def _n_tokens(input_ids: pa.Array) -> pa.Array:
-    import pyarrow.compute as pc
-
     return pc.cast(pc.list_value_length(input_ids), pa.int32())
 
 
@@ -136,8 +137,6 @@ def main(argv=None) -> None:
 
     registry = {"input_ids": tokenize_udf, "n_tokens": _n_tokens, "embedding": _EmbedGPU()}
     if "is_dup" in args.columns:
-        from curate import find_duplicate_ids
-
         t0 = time.perf_counter()
         dup_ids = find_duplicate_ids(tbl)
         print(f"[dedup] pass 1: {len(dup_ids):,} duplicate ids in {time.perf_counter() - t0:,.1f}s")

@@ -25,9 +25,13 @@ import subprocess
 import sys
 import time
 
+import lancedb
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
+from lancedb.streaming import StreamingDataset
+from streaming import MDSWriter  # mosaicml-streaming, the optional [ab] extra
 
 from common import TRAIN_FILTER, connect_table, load_tokenizer
 
@@ -39,8 +43,6 @@ SCHEMA = pa.schema([pa.field("input_ids", pa.list_(pa.int32(), SEQ_LEN))])
 
 
 def blocks_budget(tbl, filt: str) -> int:
-    import pyarrow.compute as pc
-
     n = tbl.count_rows(filt)
     tot = pc.sum(
         tbl.search().select(["n_tokens"]).where(filt).limit(n).to_arrow().column("n_tokens")
@@ -51,8 +53,6 @@ def blocks_budget(tbl, filt: str) -> int:
 
 def worker(args) -> None:
     """One simulated rank: pack its splits, write one parquet shard."""
-    from lancedb.streaming import StreamingDataset
-
     tok = load_tokenizer("hf:gpt2")
     tbl = connect_table(args.db, "corpus")
     filt = f"NOT is_dup AND score >= {args.min_score} AND ({TRAIN_FILTER})"
@@ -90,9 +90,6 @@ def worker(args) -> None:
 
 
 def build_derived(args) -> None:
-    import lancedb
-    from streaming import MDSWriter
-
     parts = sorted(
         f"{args.out}/blocks_parquet/{f}" for f in os.listdir(f"{args.out}/blocks_parquet")
     )
