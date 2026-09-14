@@ -210,3 +210,13 @@ __marimo__/
 
 
 data/
+
+# llm_pretraining example artifacts
+lance_pretrain_db/
+verify_workdir/
+checkpoints/
+
+# nested working clones and env
+lancedb/
+.venv*/
+*.pt
