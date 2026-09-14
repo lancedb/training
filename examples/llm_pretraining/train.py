@@ -124,13 +124,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--io-queue-depth",
         type=int,
         default=1,
-        help="I/O batches in flight per split (loader default 4); see LOADER_TUNING.md",
+        help="I/O batches in flight per split (loader default 4)",
     )
     p.add_argument(
         "--transform-parallelism",
         type=int,
         default=2,
-        help="transform threads per rank (loader default: cpu_count); see LOADER_TUNING.md",
+        help="transform threads per rank (loader default: cpu_count)",
     )
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument(

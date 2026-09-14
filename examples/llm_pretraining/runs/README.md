@@ -5,7 +5,7 @@ reported numbers (paths assume `/home/ubuntu/runs/...`; `env.sh` holds
 credentials and is not committed).
 
 - `prep_small.sh`, `prep_large.sh` — timed ingest -> curate -> Geneva tokenize
-- `bench_small.sh` — loader-only `read_batch_size` sweep (see `../LOADER_TUNING.md`)
+- `bench_small.sh` — loader-only `read_batch_size` sweep
 - `train_small.sh`, `train_large.sh` — the 8-GPU training commands
 - `ab_run.sh`, `ab_matrix.sh`, `gpu_sampler.sh`, `gpu_summary.py` — loader A/B with `nvidia-smi` sampling
 - `resume_demo.sh` — kill -9 on 8 GPUs, resume on 4
